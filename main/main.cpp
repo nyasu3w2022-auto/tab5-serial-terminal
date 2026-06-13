@@ -1,20 +1,25 @@
 /*
- * M5Stack TAB5 Serial Terminal - Step 1: Display & Keyboard Test
+ * M5Stack TAB5 Serial Terminal - Step 2: USB Host Serial Communication
  *
- * This program initializes the TAB5 hardware, sets up the display via LVGL,
- * and reads keyboard input via I2C. It displays typed characters on screen
- * as a basic terminal emulator foundation.
+ * Builds on Step 1 (display + keyboard) and adds:
+ *  - USB Host library initialization
+ *  - CDC-ACM driver with VCP support (CH34x, CP210x, FTDI)
+ *  - Bidirectional communication: keyboard -> USB TX, USB RX -> screen
+ *  - ENTER key fix (send CR+LF, display newline)
+ *  - Baud rate configurable via Ctrl+B
  *
  * SPDX-License-Identifier: MIT
  */
 
 #include <stdio.h>
 #include <string.h>
+#include <inttypes.h>
 #include <esp_log.h>
 #include <esp_err.h>
 #include <freertos/FreeRTOS.h>
 #include <freertos/task.h>
 #include <freertos/queue.h>
+#include <freertos/event_groups.h>
 
 #include "m5_tab5_component.h"
 #include "m5_tab5_keyboard.h"
@@ -24,29 +29,73 @@
 #include "lvgl_port_touch.h"
 #include "lvgl.h"
 
+// USB Host
+#include "usb/usb_host.h"
+#include "usb/cdc_acm_host.h"
+#include "usb/vcp_ch34x.h"
+#include "usb/vcp_cp210x.h"
+#include "usb/vcp_ftdi.h"
+#include "usb/vcp.hpp"
+
 static const char *TAG = "terminal";
 
 // ==============================================================
 // Terminal Screen Configuration
 // ==============================================================
-#define TERM_COLS       106  // 1280 / 12px font width ≈ 106
-#define TERM_ROWS       45   // 720 / 16px font height = 45
-#define TERM_FONT_SIZE  16
+// Display is 1280x720 rotated 90° -> effective 1280 wide, 720 tall in LVGL
+// Using lv_font_unscii_8: each char is 8x8 pixels
+#define TERM_FONT_W     8
+#define TERM_FONT_H     8
+#define TERM_COLS       (1280 / TERM_FONT_W)   // 160 columns
+#define TERM_ROWS       ((720 - 10) / TERM_FONT_H)  // 88 rows (leave 10px for status bar)
+#define STATUS_BAR_H    10
 
 // Terminal state
-static char term_buffer[TERM_ROWS][TERM_COLS + 1];  // +1 for null terminator
+static char term_buffer[TERM_ROWS][TERM_COLS + 1];
 static int cursor_row = 0;
 static int cursor_col = 0;
 
 // LVGL objects
-static lv_obj_t *term_label = NULL;
+static lv_obj_t *term_label   = NULL;
 static lv_obj_t *status_label = NULL;
 
-// Keyboard instance
-static m5::M5Tab5Keyboard s_keyboard;
-
-// Board instance
+// Board and keyboard
 static m5::tab5::m5tab5_component s_tab5_board;
+static m5::M5Tab5Keyboard         s_keyboard;
+
+// ==============================================================
+// USB Serial state
+// ==============================================================
+#define USB_HOST_PRIORITY   20
+#define USB_CDC_PRIORITY    19
+
+static cdc_acm_dev_hdl_t s_cdc_dev = NULL;
+static bool              s_usb_connected = false;
+
+// Default baud rate (can be changed at runtime)
+static uint32_t s_baud_rate = 115200;
+
+// Event bits
+#define USB_DEV_CONNECTED_BIT   BIT0
+#define USB_DEV_DISCONNECTED_BIT BIT1
+static EventGroupHandle_t s_usb_event_group = NULL;
+
+// ==============================================================
+// Message queues
+// ==============================================================
+// Keyboard -> main loop
+typedef struct {
+    uint8_t modifier;
+    char    str[16];
+} key_event_msg_t;
+static QueueHandle_t s_key_queue = NULL;
+
+// USB RX -> main loop
+typedef struct {
+    uint8_t data[64];
+    size_t  len;
+} usb_rx_msg_t;
+static QueueHandle_t s_usb_rx_queue = NULL;
 
 // ==============================================================
 // Terminal Buffer Management
@@ -88,13 +137,11 @@ static void term_put_char(char c)
     } else if (c == '\r') {
         cursor_col = 0;
     } else if (c == '\b' || c == 0x7F) {
-        // Backspace
         if (cursor_col > 0) {
             cursor_col--;
             term_buffer[cursor_row][cursor_col] = ' ';
         }
     } else if (c == '\t') {
-        // Tab: advance to next 8-column boundary
         int next_tab = (cursor_col + 8) & ~7;
         if (next_tab >= TERM_COLS) {
             term_newline();
@@ -102,13 +149,13 @@ static void term_put_char(char c)
             cursor_col = next_tab;
         }
     } else if (c >= 0x20 && c < 0x7F) {
-        // Printable ASCII
         term_buffer[cursor_row][cursor_col] = c;
         cursor_col++;
         if (cursor_col >= TERM_COLS) {
             term_newline();
         }
     }
+    // Control characters other than the above are silently ignored for now
 }
 
 static void term_put_string(const char *str)
@@ -126,7 +173,6 @@ static void term_refresh_display(void)
 {
     if (term_label == NULL) return;
 
-    // Build the full screen text with newlines
     static char display_buf[TERM_ROWS * (TERM_COLS + 1) + 1];
     char *p = display_buf;
 
@@ -150,6 +196,16 @@ static void term_update_status(const char *msg)
     lvgl_port_unlock();
 }
 
+static void update_status_bar(void)
+{
+    char buf[160];
+    snprintf(buf, sizeof(buf),
+             " USB:%s  Baud:%"PRIu32"  Ctrl+C=Clear  Ctrl+B=Baud  Ctrl+D=Disconnect",
+             s_usb_connected ? "Connected" : "Waiting...",
+             s_baud_rate);
+    term_update_status(buf);
+}
+
 // ==============================================================
 // LVGL UI Setup
 // ==============================================================
@@ -158,86 +214,56 @@ static void ui_create(void)
 {
     lvgl_port_lock(0);
 
-    // Get the active screen
     lv_obj_t *scr = lv_scr_act();
     lv_obj_set_style_bg_color(scr, lv_color_black(), 0);
     lv_obj_set_style_bg_opa(scr, LV_OPA_COVER, 0);
 
-    // Create terminal text label (monospace font)
+    // Terminal text area
     term_label = lv_label_create(scr);
     lv_obj_set_style_text_font(term_label, &lv_font_unscii_8, 0);
-    lv_obj_set_style_text_color(term_label, lv_color_make(0, 255, 0), 0);  // Green text
+    lv_obj_set_style_text_color(term_label, lv_color_make(0, 255, 0), 0);
     lv_obj_set_style_text_letter_space(term_label, 0, 0);
     lv_obj_set_style_text_line_space(term_label, 0, 0);
     lv_obj_set_pos(term_label, 0, 0);
-    lv_obj_set_size(term_label, 1280, 700);
+    lv_obj_set_size(term_label, 1280, 720 - STATUS_BAR_H);
     lv_label_set_long_mode(term_label, LV_LABEL_LONG_CLIP);
     lv_label_set_text(term_label, "");
 
-    // Create status bar at bottom
+    // Status bar at bottom
     status_label = lv_label_create(scr);
     lv_obj_set_style_text_font(status_label, &lv_font_unscii_8, 0);
-    lv_obj_set_style_text_color(status_label, lv_color_make(255, 255, 0), 0);  // Yellow
-    lv_obj_set_style_bg_color(status_label, lv_color_make(0, 0, 64), 0);
+    lv_obj_set_style_text_color(status_label, lv_color_make(0, 0, 0), 0);
+    lv_obj_set_style_bg_color(status_label, lv_color_make(0, 200, 0), 0);
     lv_obj_set_style_bg_opa(status_label, LV_OPA_COVER, 0);
-    lv_obj_set_pos(status_label, 0, 704);
-    lv_obj_set_size(status_label, 1280, 16);
-    lv_label_set_text(status_label, " TAB5 Serial Terminal - Step 1: Keyboard Test");
+    lv_obj_set_pos(status_label, 0, 720 - STATUS_BAR_H);
+    lv_obj_set_size(status_label, 1280, STATUS_BAR_H);
+    lv_label_set_text(status_label, " TAB5 Serial Terminal - Initializing...");
 
     lvgl_port_unlock();
 }
 
 // ==============================================================
-// Keyboard Event Handling
+// LCD/LVGL Initialization
 // ==============================================================
 
-// Queue for keyboard events
-static QueueHandle_t s_key_queue = NULL;
-
-typedef struct {
-    uint8_t modifier;
-    char str[16];
-} key_event_msg_t;
-
-static void keyboard_event_cb(m5_tab5_key_event_t event, void *arg)
-{
-    if (event.type == M5_TAB5_KB_MODE_STRING && event.str_len > 0) {
-        key_event_msg_t msg;
-        msg.modifier = event.str_modifier;
-        memset(msg.str, 0, sizeof(msg.str));
-        memcpy(msg.str, event.str_data, event.str_len < 15 ? event.str_len : 15);
-
-        if (s_key_queue != NULL) {
-            xQueueSend(s_key_queue, &msg, 0);
-        }
-    }
-}
-
-// ==============================================================
-// LCD/LVGL Initialization (based on official M5Tab5-Keyboard-UserDemo)
-// ==============================================================
-
-// Display resolution constants
 static constexpr uint32_t LCD_H_RES = 720;
 static constexpr uint32_t LCD_V_RES = 1280;
 
-static lv_display_t *s_lvgl_disp = nullptr;
-static lv_indev_t   *s_lvgl_touch_indev = nullptr;
+static lv_display_t *s_lvgl_disp         = nullptr;
+static lv_indev_t   *s_lvgl_touch_indev  = nullptr;
 
 static esp_err_t app_lcd_lvgl_init(m5::tab5::m5tab5_component &board)
 {
     if (s_lvgl_disp != nullptr) {
-        ESP_LOGW(TAG, "LVGL already initialized, skipping");
         return ESP_OK;
     }
 
     esp_lcd_panel_handle_t panel_handle = board.lcd_panel();
     if (panel_handle == nullptr) {
-        ESP_LOGE(TAG, "LCD panel handle unavailable, call board.begin() first");
+        ESP_LOGE(TAG, "LCD panel handle unavailable");
         return ESP_ERR_INVALID_STATE;
     }
 
-    // Initialize LVGL port
     lvgl_port_cfg_t lvgl_cfg   = {};
     lvgl_cfg.task_priority     = 6;
     lvgl_cfg.task_stack        = 16384;
@@ -251,7 +277,6 @@ static esp_err_t app_lcd_lvgl_init(m5::tab5::m5tab5_component &board)
         return ret;
     }
 
-    // Add MIPI-DSI display
     lvgl_disp_cfg_t disp_cfg    = {};
     disp_cfg.panel_handle       = panel_handle;
     disp_cfg.hres               = LCD_H_RES;
@@ -261,7 +286,7 @@ static esp_err_t app_lcd_lvgl_init(m5::tab5::m5tab5_component &board)
     disp_cfg.flags.full_refresh = 0;
     disp_cfg.flags.direct_mode  = 1;
     disp_cfg.flags.buff_spiram  = 1;
-    disp_cfg.flags.sw_rotate    = 1;  // 90-degree rotation
+    disp_cfg.flags.sw_rotate    = 1;
 
     lvgl_disp_dsi_cfg_t dsi_cfg = {};
     dsi_cfg.sw_rotation         = LV_DISPLAY_ROTATION_90;
@@ -274,16 +299,13 @@ static esp_err_t app_lcd_lvgl_init(m5::tab5::m5tab5_component &board)
         return ESP_FAIL;
     }
 
-    // Add touch input (optional)
     esp_lcd_touch_handle_t touch_handle = board.touch_panel();
     if (touch_handle != nullptr) {
         lvgl_touch_cfg_t touch_cfg = {};
         touch_cfg.disp             = s_lvgl_disp;
         touch_cfg.handle           = touch_handle;
         s_lvgl_touch_indev = lvgl_port_add_touch(&touch_cfg);
-        if (s_lvgl_touch_indev == nullptr) {
-            ESP_LOGW(TAG, "Failed to add LVGL touch input (non-fatal)");
-        } else {
+        if (s_lvgl_touch_indev != nullptr) {
             lvgl_port_set_touch_rotation(s_lvgl_touch_indev, LV_DISPLAY_ROTATION_90);
         }
     }
@@ -292,15 +314,192 @@ static esp_err_t app_lcd_lvgl_init(m5::tab5::m5tab5_component &board)
 }
 
 // ==============================================================
+// Keyboard Event Handling
+// ==============================================================
+
+static void keyboard_event_cb(m5_tab5_key_event_t event, void *arg)
+{
+    if (event.type == M5_TAB5_KB_MODE_STRING && event.str_len > 0) {
+        key_event_msg_t msg = {};
+        msg.modifier = event.str_modifier;
+        size_t copy_len = event.str_len < (sizeof(msg.str) - 1) ? event.str_len : (sizeof(msg.str) - 1);
+        memcpy(msg.str, event.str_data, copy_len);
+        msg.str[copy_len] = '\0';
+        if (s_key_queue != NULL) {
+            xQueueSend(s_key_queue, &msg, 0);
+        }
+    }
+}
+
+// ==============================================================
+// USB Host Task
+// ==============================================================
+
+/**
+ * @brief USB RX data callback - called from USB host task context
+ */
+static bool usb_rx_cb(const uint8_t *data, size_t data_len, void *arg)
+{
+    if (s_usb_rx_queue == NULL || data_len == 0) return true;
+
+    // Split into 64-byte chunks for the queue
+    size_t offset = 0;
+    while (offset < data_len) {
+        usb_rx_msg_t msg = {};
+        msg.len = data_len - offset;
+        if (msg.len > sizeof(msg.data)) msg.len = sizeof(msg.data);
+        memcpy(msg.data, data + offset, msg.len);
+        xQueueSend(s_usb_rx_queue, &msg, 0);
+        offset += msg.len;
+    }
+    return true;
+}
+
+/**
+ * @brief USB device event callback
+ */
+static void usb_event_cb(const cdc_acm_host_dev_event_data_t *event, void *user_ctx)
+{
+    switch (event->type) {
+    case CDC_ACM_HOST_DEVICE_DISCONNECTED:
+        ESP_LOGI(TAG, "USB CDC device disconnected");
+        s_usb_connected = false;
+        s_cdc_dev = NULL;
+        if (s_usb_event_group) {
+            xEventGroupSetBits(s_usb_event_group, USB_DEV_DISCONNECTED_BIT);
+        }
+        break;
+    case CDC_ACM_HOST_ERROR:
+        ESP_LOGE(TAG, "USB CDC error: %d", event->data.error);
+        break;
+    case CDC_ACM_HOST_SERIAL_STATE:
+        break;
+    default:
+        break;
+    }
+}
+
+/**
+ * @brief USB new device callback - called when a new USB device is enumerated
+ */
+static void usb_new_dev_cb(usb_device_handle_t usb_dev)
+{
+    // Retrieve VID/PID
+    const usb_device_desc_t *desc;
+    usb_host_get_device_descriptor(usb_dev, &desc);
+    uint16_t vid = desc->idVendor;
+    uint16_t pid = desc->idProduct;
+    ESP_LOGI(TAG, "New USB device: VID=0x%04X PID=0x%04X", vid, pid);
+
+    if (s_usb_event_group) {
+        // Store VID/PID in event group user data via a simple approach:
+        // post to a dedicated queue instead
+        xEventGroupSetBits(s_usb_event_group, USB_DEV_CONNECTED_BIT);
+    }
+}
+
+/**
+ * @brief USB Host library task - handles USB events
+ */
+static void usb_lib_task(void *arg)
+{
+    ESP_LOGI(TAG, "USB Host task started");
+
+    const usb_host_config_t host_config = {
+        .skip_phy_setup = false,
+        .intr_flags     = ESP_INTR_FLAG_LOWMED,
+    };
+    ESP_ERROR_CHECK(usb_host_install(&host_config));
+
+    const cdc_acm_host_driver_config_t driver_config = {
+        .driver_task_stack_size = 4096,
+        .driver_task_priority   = USB_CDC_PRIORITY,
+        .xCoreID                = 0,
+        .new_dev_cb             = usb_new_dev_cb,
+    };
+    ESP_ERROR_CHECK(cdc_acm_host_install(&driver_config));
+
+    // Register VCP drivers for common USB-serial chips
+    VCP::register_driver<FT23x>();
+    VCP::register_driver<CP210x>();
+    VCP::register_driver<CH34x>();
+
+    // Notify main task that USB host is ready
+    xTaskNotifyGive((TaskHandle_t)arg);
+
+    while (1) {
+        uint32_t event_flags;
+        usb_host_lib_handle_events(portMAX_DELAY, &event_flags);
+        if (event_flags & USB_HOST_LIB_EVENT_FLAGS_NO_CLIENTS) {
+            if (ESP_OK == usb_host_device_free_all()) {
+                break;
+            }
+        }
+        if (event_flags & USB_HOST_LIB_EVENT_FLAGS_ALL_FREE) {
+            break;
+        }
+    }
+
+    ESP_LOGI(TAG, "USB Host task ending");
+    usb_host_uninstall();
+    vTaskDelete(NULL);
+}
+
+/**
+ * @brief Try to open a CDC/VCP device with the given VID/PID
+ *        Falls back to CDC_HOST_ANY_VID / CDC_HOST_ANY_PID if VID=0
+ */
+static esp_err_t usb_open_device(uint16_t vid, uint16_t pid)
+{
+    cdc_acm_host_device_config_t dev_config = {};
+    dev_config.connection_timeout_ms = 5000;
+    dev_config.out_buffer_size       = 512;
+    dev_config.in_buffer_size        = 0;   // use default
+    dev_config.user_arg              = NULL;
+    dev_config.event_cb              = usb_event_cb;
+    dev_config.data_cb               = usb_rx_cb;
+
+    // Try VCP (vendor-specific) first, then standard CDC-ACM
+    esp_err_t err = ESP_FAIL;
+
+    // Use VCP service which handles CH34x/CP210x/FTDI automatically
+    cdc_acm_dev_hdl_t dev = nullptr;
+    err = cdc_acm_host_open_vendor_specific(vid, pid, 0, &dev_config, &dev);
+    if (err != ESP_OK) {
+        // Fall back to standard CDC-ACM
+        err = cdc_acm_host_open(vid, pid, 0, &dev_config, &dev);
+    }
+
+    if (err == ESP_OK && dev != nullptr) {
+        // Set line coding (baud rate, 8N1)
+        cdc_acm_line_coding_t line_coding = {
+            .dwDTERate   = s_baud_rate,
+            .bCharFormat = 0,  // 1 stop bit
+            .bParityType = 0,  // No parity
+            .bDataBits   = 8,
+        };
+        cdc_acm_host_line_coding_set(dev, &line_coding);
+        cdc_acm_host_set_control_line_state(dev, true, false);  // DTR=true, RTS=false
+
+        s_cdc_dev = dev;
+        s_usb_connected = true;
+        ESP_LOGI(TAG, "USB CDC device opened: VID=0x%04X PID=0x%04X baud=%"PRIu32,
+                 vid, pid, s_baud_rate);
+        return ESP_OK;
+    }
+
+    return err;
+}
+
+// ==============================================================
 // Main Application
 // ==============================================================
 
 extern "C" void app_main(void)
 {
-    ESP_LOGI(TAG, "=== TAB5 Serial Terminal - Step 1 ===");
-    ESP_LOGI(TAG, "Initializing TAB5 hardware...");
+    ESP_LOGI(TAG, "=== TAB5 Serial Terminal - Step 2 ===");
 
-    // Initialize board
+    // ---- Board init ----
     m5::tab5::m5tab5_component_config_t board_cfg = {};
     esp_err_t ret = s_tab5_board.begin(board_cfg);
     if (ret != ESP_OK) {
@@ -308,41 +507,44 @@ extern "C" void app_main(void)
         return;
     }
 
-    const m5::tab5::m5tab5_variant_descriptor_t *variant = s_tab5_board.variant();
-    if (variant != nullptr) {
-        ESP_LOGI(TAG, "Detected variant: %s", variant->id);
-    }
-
-    // Enable USB-A 5V power (for future USB serial host use)
+    // Enable USB-A 5V power
     s_tab5_board.usb5v_enable(true);
     ESP_LOGI(TAG, "USB-A 5V power enabled");
 
-    // Initialize LCD and LVGL
+    // ---- LCD/LVGL init ----
     ret = app_lcd_lvgl_init(s_tab5_board);
     if (ret != ESP_OK) {
         ESP_LOGE(TAG, "LCD/LVGL init failed: %s", esp_err_to_name(ret));
         return;
     }
-    ESP_LOGI(TAG, "LCD/LVGL initialized");
-
-    // Create UI
     ui_create();
-    ESP_LOGI(TAG, "UI created");
-
-    // Initialize terminal buffer
     term_clear();
-    term_put_string("M5Stack TAB5 Serial Terminal\n");
-    term_put_string("============================\n");
-    term_put_string("Step 1: Hardware Verification\n");
-    term_put_string("\n");
-    term_put_string("Keyboard: ");
+    term_put_string("M5Stack TAB5 Serial Terminal v2\n");
+    term_put_string("================================\n");
+    term_put_string("Initializing USB host...\n");
     term_refresh_display();
 
-    // Create keyboard event queue
-    s_key_queue = xQueueCreate(32, sizeof(key_event_msg_t));
+    // ---- Queues and event groups ----
+    s_key_queue      = xQueueCreate(32, sizeof(key_event_msg_t));
+    s_usb_rx_queue   = xQueueCreate(64, sizeof(usb_rx_msg_t));
+    s_usb_event_group = xEventGroupCreate();
 
-    // Initialize keyboard
-    ESP_LOGI(TAG, "Initializing keyboard...");
+    // ---- USB Host task ----
+    TaskHandle_t usb_task_handle = NULL;
+    BaseType_t task_created = xTaskCreate(usb_lib_task, "usb_lib",
+                                          4096, xTaskGetCurrentTaskHandle(),
+                                          USB_HOST_PRIORITY, &usb_task_handle);
+    if (task_created != pdTRUE) {
+        ESP_LOGE(TAG, "Failed to create USB host task");
+        return;
+    }
+    // Wait for USB host to be ready
+    ulTaskNotifyTake(pdTRUE, pdMS_TO_TICKS(3000));
+    ESP_LOGI(TAG, "USB Host ready");
+    term_put_string("USB host ready. Connect a USB-serial device.\n\n");
+    term_refresh_display();
+
+    // ---- Keyboard init ----
     m5_tab5_kb_err_t kb_err = s_keyboard.begin(
         I2C_NUM_1,
         M5_TAB5_KB_DEFAULT_ADDR,
@@ -352,79 +554,151 @@ extern "C" void app_main(void)
         M5_TAB5_KB_DEFAULT_INT,
         M5_TAB5_KB_INT_MODE_HARDWARE
     );
-
     if (kb_err == M5_TAB5_KB_OK) {
         uint8_t version = 0;
         s_keyboard.getVersion(&version);
-        ESP_LOGI(TAG, "Keyboard OK, FW version: 0x%02X", version);
-
-        char msg[64];
-        snprintf(msg, sizeof(msg), "OK (FW: 0x%02X)\n", version);
-        term_put_string(msg);
-
-        // Set to String mode for character input
+        ESP_LOGI(TAG, "Keyboard OK, FW: 0x%02X", version);
         s_keyboard.enableStringMode(keyboard_event_cb, NULL);
-        ESP_LOGI(TAG, "Keyboard set to String mode");
-
-        term_put_string("Mode: Character (String)\n");
-        term_put_string("\n");
-        term_put_string("Type something:\n");
-        term_put_string("> ");
     } else {
         ESP_LOGW(TAG, "Keyboard not detected (err=%d)", kb_err);
-        term_put_string("NOT DETECTED\n");
-        term_put_string("\nPlease connect the keyboard accessory.\n");
+        term_put_string("[WARNING] Keyboard not detected!\n");
+        term_refresh_display();
     }
 
-    term_refresh_display();
+    update_status_bar();
 
-    // Status bar info
-    char status_msg[128];
-    snprintf(status_msg, sizeof(status_msg),
-             " TAB5 Terminal | Keyboard: %s | Ctrl+C=Clear | Ready",
-             (kb_err == M5_TAB5_KB_OK) ? "Connected" : "Disconnected");
-    term_update_status(status_msg);
+    // ---- Main loop ----
+    ESP_LOGI(TAG, "Entering main loop");
 
-    // Main loop: process keyboard events
-    ESP_LOGI(TAG, "Entering main loop...");
-    key_event_msg_t key_msg;
+    // Track last connected device VID/PID for reconnect
+    uint16_t last_vid = CDC_HOST_ANY_VID;
+    uint16_t last_pid = CDC_HOST_ANY_PID;
 
     while (1) {
-        if (xQueueReceive(s_key_queue, &key_msg, pdMS_TO_TICKS(50)) == pdTRUE) {
-            bool ctrl_pressed = (key_msg.modifier & 0x01) != 0;
-            bool alt_pressed = (key_msg.modifier & 0x04) != 0;
+        // Check USB connection events (non-blocking)
+        EventBits_t bits = xEventGroupGetBits(s_usb_event_group);
 
-            ESP_LOGD(TAG, "Key: '%s' mod=0x%02X ctrl=%d alt=%d",
-                     key_msg.str, key_msg.modifier, ctrl_pressed, alt_pressed);
+        if ((bits & USB_DEV_CONNECTED_BIT) && !s_usb_connected) {
+            xEventGroupClearBits(s_usb_event_group, USB_DEV_CONNECTED_BIT);
+            term_put_string("\n[USB] Device detected, connecting...\n");
+            term_refresh_display();
 
-            if (ctrl_pressed && (key_msg.str[0] == 'c' || key_msg.str[0] == 'C')) {
-                // Ctrl+C: Clear screen
-                term_clear();
-                term_put_string("Screen cleared.\n> ");
-                term_refresh_display();
+            esp_err_t open_err = usb_open_device(last_vid, last_pid);
+            if (open_err == ESP_OK) {
+                char msg[80];
+                snprintf(msg, sizeof(msg), "[USB] Connected! Baud: %"PRIu32"\n", s_baud_rate);
+                term_put_string(msg);
+            } else {
+                term_put_string("[USB] Failed to open device.\n");
+            }
+            term_refresh_display();
+            update_status_bar();
+        }
+
+        if (bits & USB_DEV_DISCONNECTED_BIT) {
+            xEventGroupClearBits(s_usb_event_group, USB_DEV_DISCONNECTED_BIT);
+            term_put_string("\n[USB] Device disconnected.\n");
+            term_refresh_display();
+            update_status_bar();
+        }
+
+        // Process USB RX data (data received from the connected serial device)
+        usb_rx_msg_t rx_msg;
+        while (xQueueReceive(s_usb_rx_queue, &rx_msg, 0) == pdTRUE) {
+            for (size_t i = 0; i < rx_msg.len; i++) {
+                term_put_char((char)rx_msg.data[i]);
+            }
+            term_refresh_display();
+        }
+
+        // Process keyboard input
+        key_event_msg_t key_msg;
+        if (xQueueReceive(s_key_queue, &key_msg, pdMS_TO_TICKS(20)) == pdTRUE) {
+            bool ctrl = (key_msg.modifier & 0x01) != 0;
+
+            // --- Control key shortcuts ---
+            if (ctrl) {
+                char k = key_msg.str[0];
+                if (k == 'c' || k == 'C') {
+                    // Ctrl+C: clear screen
+                    term_clear();
+                    term_put_string("[Screen cleared]\n");
+                    term_refresh_display();
+                    continue;
+                }
+                if (k == 'l' || k == 'L') {
+                    // Ctrl+L: redraw
+                    term_refresh_display();
+                    continue;
+                }
+                if (k == 'b' || k == 'B') {
+                    // Ctrl+B: cycle baud rate
+                    static const uint32_t baud_rates[] = {9600, 19200, 38400, 57600, 115200, 230400, 460800, 921600};
+                    static int baud_idx = 4; // default 115200
+                    baud_idx = (baud_idx + 1) % (sizeof(baud_rates) / sizeof(baud_rates[0]));
+                    s_baud_rate = baud_rates[baud_idx];
+                    if (s_usb_connected && s_cdc_dev) {
+                        cdc_acm_line_coding_t lc = {
+                            .dwDTERate   = s_baud_rate,
+                            .bCharFormat = 0,
+                            .bParityType = 0,
+                            .bDataBits   = 8,
+                        };
+                        cdc_acm_host_line_coding_set(s_cdc_dev, &lc);
+                    }
+                    char msg[64];
+                    snprintf(msg, sizeof(msg), "\n[Baud rate: %"PRIu32"]\n", s_baud_rate);
+                    term_put_string(msg);
+                    term_refresh_display();
+                    update_status_bar();
+                    continue;
+                }
+                if (k == 'd' || k == 'D') {
+                    // Ctrl+D: disconnect USB
+                    if (s_usb_connected && s_cdc_dev) {
+                        cdc_acm_host_close(s_cdc_dev);
+                        s_cdc_dev = NULL;
+                        s_usb_connected = false;
+                        term_put_string("\n[USB] Disconnected by user.\n");
+                        term_refresh_display();
+                        update_status_bar();
+                    }
+                    continue;
+                }
+                // Other Ctrl+key: send as control character to USB
+                if (s_usb_connected && s_cdc_dev && k >= '@' && k <= '_') {
+                    uint8_t ctrl_char = k - '@';
+                    cdc_acm_host_data_tx_blocking(s_cdc_dev, &ctrl_char, 1, 1000);
+                }
                 continue;
             }
 
-            if (ctrl_pressed && (key_msg.str[0] == 'l' || key_msg.str[0] == 'L')) {
-                // Ctrl+L: Redraw
-                term_refresh_display();
-                continue;
-            }
-
-            // Process each character in the string
+            // --- Normal character processing ---
             for (int i = 0; key_msg.str[i] != '\0'; i++) {
                 char c = key_msg.str[i];
 
                 if (c == '\r' || c == '\n') {
+                    // ENTER key: send CR+LF to USB, display newline locally
+                    if (s_usb_connected && s_cdc_dev) {
+                        const uint8_t crlf[2] = {'\r', '\n'};
+                        cdc_acm_host_data_tx_blocking(s_cdc_dev, crlf, 2, 1000);
+                    }
                     term_put_char('\n');
-                    term_put_string("> ");
                 } else if (c == '\b' || c == 0x7F) {
+                    // Backspace: send to USB and update display
+                    if (s_usb_connected && s_cdc_dev) {
+                        const uint8_t bs = '\b';
+                        cdc_acm_host_data_tx_blocking(s_cdc_dev, &bs, 1, 1000);
+                    }
                     term_put_char('\b');
                 } else {
+                    // Printable character: send to USB and echo locally
+                    if (s_usb_connected && s_cdc_dev) {
+                        cdc_acm_host_data_tx_blocking(s_cdc_dev, (const uint8_t *)&c, 1, 1000);
+                    }
                     term_put_char(c);
                 }
             }
-
             term_refresh_display();
         }
     }

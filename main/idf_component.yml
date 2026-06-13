@@ -5,3 +5,8 @@ dependencies:
   m5_tab5_component:
     path: ../components/m5_tab5_component
   espressif/esp_lvgl_port: ^2.7.0
+  # USB Host CDC-ACM driver + VCP drivers for common USB-serial chips
+  espressif/usb_host_cdc_acm: ^2.1.0
+  espressif/usb_host_ch34x_vcp: ^2.2.0
+  espressif/usb_host_cp210x_vcp: ^2.2.0
+  espressif/usb_host_ftdi_vcp: ^2.1.0
