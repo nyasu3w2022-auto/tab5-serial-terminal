@@ -214,37 +214,78 @@ static void keyboard_event_cb(m5_tab5_key_event_t event, void *arg)
 }
 
 // ==============================================================
-// LCD/LVGL Initialization (simplified from demo)
+// LCD/LVGL Initialization (based on official M5Tab5-Keyboard-UserDemo)
 // ==============================================================
+
+// Display resolution constants
+static constexpr uint32_t LCD_H_RES = 720;
+static constexpr uint32_t LCD_V_RES = 1280;
+
+static lv_display_t *s_lvgl_disp = nullptr;
+static lv_indev_t   *s_lvgl_touch_indev = nullptr;
 
 static esp_err_t app_lcd_lvgl_init(m5::tab5::m5tab5_component &board)
 {
+    if (s_lvgl_disp != nullptr) {
+        ESP_LOGW(TAG, "LVGL already initialized, skipping");
+        return ESP_OK;
+    }
+
+    esp_lcd_panel_handle_t panel_handle = board.lcd_panel();
+    if (panel_handle == nullptr) {
+        ESP_LOGE(TAG, "LCD panel handle unavailable, call board.begin() first");
+        return ESP_ERR_INVALID_STATE;
+    }
+
     // Initialize LVGL port
-    const lvgl_port_cfg_t lvgl_cfg = {
-        .task_priority = 4,
-        .task_stack = 8192,
-        .task_affinity = -1,
-        .task_max_sleep_ms = 500,
-        .timer_period_ms = 5,
-    };
+    lvgl_port_cfg_t lvgl_cfg   = {};
+    lvgl_cfg.task_priority     = 6;
+    lvgl_cfg.task_stack        = 16384;
+    lvgl_cfg.task_affinity     = 1;
+    lvgl_cfg.task_max_sleep_ms = 500;
+    lvgl_cfg.timer_period_ms   = 5;
 
     esp_err_t ret = lvgl_port_init(&lvgl_cfg);
     if (ret != ESP_OK) {
-        ESP_LOGE(TAG, "LVGL port init failed");
+        ESP_LOGE(TAG, "LVGL port init failed: %s", esp_err_to_name(ret));
         return ret;
     }
 
-    // Add display
-    ret = lvgl_port_add_m5tab5_disp(board);
-    if (ret != ESP_OK) {
-        ESP_LOGE(TAG, "LVGL display add failed");
-        return ret;
+    // Add MIPI-DSI display
+    lvgl_disp_cfg_t disp_cfg    = {};
+    disp_cfg.panel_handle       = panel_handle;
+    disp_cfg.hres               = LCD_H_RES;
+    disp_cfg.vres               = LCD_V_RES;
+    disp_cfg.buffer_size        = LCD_H_RES * LCD_V_RES;
+    disp_cfg.color_format       = LV_COLOR_FORMAT_RGB565;
+    disp_cfg.flags.full_refresh = 0;
+    disp_cfg.flags.direct_mode  = 1;
+    disp_cfg.flags.buff_spiram  = 1;
+    disp_cfg.flags.sw_rotate    = 1;  // 90-degree rotation
+
+    lvgl_disp_dsi_cfg_t dsi_cfg = {};
+    dsi_cfg.sw_rotation         = LV_DISPLAY_ROTATION_90;
+    dsi_cfg.flags.avoid_tearing = 1;
+    dsi_cfg.flags.use_ppa       = 1;
+
+    s_lvgl_disp = lvgl_port_add_disp_dsi(&disp_cfg, &dsi_cfg);
+    if (s_lvgl_disp == nullptr) {
+        ESP_LOGE(TAG, "Failed to add LVGL DSI display");
+        return ESP_FAIL;
     }
 
-    // Add touch
-    ret = lvgl_port_add_m5tab5_touch(board);
-    if (ret != ESP_OK) {
-        ESP_LOGW(TAG, "LVGL touch add failed (non-fatal)");
+    // Add touch input (optional)
+    esp_lcd_touch_handle_t touch_handle = board.touch_panel();
+    if (touch_handle != nullptr) {
+        lvgl_touch_cfg_t touch_cfg = {};
+        touch_cfg.disp             = s_lvgl_disp;
+        touch_cfg.handle           = touch_handle;
+        s_lvgl_touch_indev = lvgl_port_add_touch(&touch_cfg);
+        if (s_lvgl_touch_indev == nullptr) {
+            ESP_LOGW(TAG, "Failed to add LVGL touch input (non-fatal)");
+        } else {
+            lvgl_port_set_touch_rotation(s_lvgl_touch_indev, LV_DISPLAY_ROTATION_90);
+        }
     }
 
     return ESP_OK;
