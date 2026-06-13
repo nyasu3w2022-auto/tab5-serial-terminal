@@ -35,7 +35,11 @@
 #include "usb/vcp_ch34x.h"
 #include "usb/vcp_cp210x.h"
 #include "usb/vcp_ftdi.h"
+#include "usb/vcp_ch34x.hpp"
+#include "usb/vcp_cp210x.hpp"
+#include "usb/vcp_ftdi.hpp"
 #include "usb/vcp.hpp"
+using namespace esp_usb;
 
 static const char *TAG = "terminal";
 
