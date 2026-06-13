@@ -1,6 +1,12 @@
 # Target: ESP32-P4
 CONFIG_IDF_TARGET="esp32p4"
 
+# Chip revision: TAB5 early lot uses ESP32-P4 v1.0
+# Without this, bootloader requires v3.1+ and refuses to flash on v1.0 chips
+CONFIG_ESP32P4_REV_MIN_0=y
+CONFIG_ESP32P4_REV_MIN_FULL=0
+CONFIG_ESP32P4_REV_MAX_FULL=99
+
 # Flash size
 CONFIG_ESPTOOLPY_FLASHSIZE_16MB=y
 
