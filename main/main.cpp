@@ -32,9 +32,6 @@
 // USB Host
 #include "usb/usb_host.h"
 #include "usb/cdc_acm_host.h"
-#include "usb/vcp_ch34x.h"
-#include "usb/vcp_cp210x.h"
-#include "usb/vcp_ftdi.h"
 #include "usb/vcp_ch34x.hpp"
 #include "usb/vcp_cp210x.hpp"
 #include "usb/vcp_ftdi.hpp"
@@ -46,13 +43,13 @@ static const char *TAG = "terminal";
 // ==============================================================
 // Terminal Screen Configuration
 // ==============================================================
-// Display is 1280x720 rotated 90° -> effective 1280 wide, 720 tall in LVGL
+// Display is 1280x720 rotated 90° -> effective 720 wide, 1280 tall in LVGL
 // Using lv_font_unscii_8: each char is 8x8 pixels
 #define TERM_FONT_W     8
 #define TERM_FONT_H     8
-#define TERM_COLS       (1280 / TERM_FONT_W)   // 160 columns
-#define TERM_ROWS       ((720 - 10) / TERM_FONT_H)  // 88 rows (leave 10px for status bar)
 #define STATUS_BAR_H    10
+#define TERM_COLS       (720 / TERM_FONT_W)            // 90 columns
+#define TERM_ROWS       ((1280 - STATUS_BAR_H) / TERM_FONT_H)  // 158 rows
 
 // Terminal state
 static char term_buffer[TERM_ROWS][TERM_COLS + 1];
@@ -72,34 +69,56 @@ static m5::M5Tab5Keyboard         s_keyboard;
 // ==============================================================
 #define USB_HOST_PRIORITY   20
 #define USB_CDC_PRIORITY    19
+#define USB_VCP_PRIORITY    18
 
-static cdc_acm_dev_hdl_t s_cdc_dev = NULL;
-static bool              s_usb_connected = false;
+// VCP device handle (owned by vcp_task)
+static CdcAcmDevice *s_vcp_dev  = nullptr;
+static bool          s_usb_connected = false;
 
-// Default baud rate (can be changed at runtime)
+// Default baud rate
 static uint32_t s_baud_rate = 115200;
 
-// Event bits
-#define USB_DEV_CONNECTED_BIT   BIT0
-#define USB_DEV_DISCONNECTED_BIT BIT1
-static EventGroupHandle_t s_usb_event_group = NULL;
-
 // ==============================================================
-// Message queues
+// Message queues / event groups
 // ==============================================================
-// Keyboard -> main loop
 typedef struct {
     uint8_t modifier;
     char    str[16];
 } key_event_msg_t;
 static QueueHandle_t s_key_queue = NULL;
 
-// USB RX -> main loop
 typedef struct {
     uint8_t data[64];
     size_t  len;
 } usb_rx_msg_t;
 static QueueHandle_t s_usb_rx_queue = NULL;
+
+// Used to signal main loop from USB callbacks
+#define USB_DEV_DISCONNECTED_BIT BIT0
+static EventGroupHandle_t s_usb_event_group = NULL;
+
+// Notify main loop that VCP task is ready (USB host installed)
+static TaskHandle_t s_main_task_handle = NULL;
+
+// ==============================================================
+// Screen logging helper (thread-safe, called from any task)
+// ==============================================================
+static QueueHandle_t s_screen_log_queue = NULL;
+typedef struct {
+    char msg[128];
+} screen_log_msg_t;
+
+static void screen_log(const char *fmt, ...) __attribute__((format(printf, 1, 2)));
+static void screen_log(const char *fmt, ...)
+{
+    if (s_screen_log_queue == NULL) return;
+    screen_log_msg_t m = {};
+    va_list args;
+    va_start(args, fmt);
+    vsnprintf(m.msg, sizeof(m.msg), fmt, args);
+    va_end(args);
+    xQueueSend(s_screen_log_queue, &m, 0);
+}
 
 // ==============================================================
 // Terminal Buffer Management
@@ -159,7 +178,6 @@ static void term_put_char(char c)
             term_newline();
         }
     }
-    // Control characters other than the above are silently ignored for now
 }
 
 static void term_put_string(const char *str)
@@ -204,7 +222,7 @@ static void update_status_bar(void)
 {
     char buf[160];
     snprintf(buf, sizeof(buf),
-             " USB:%s  Baud:%"PRIu32"  Ctrl+C=Clear  Ctrl+B=Baud  Ctrl+D=Disconnect",
+             " USB:%s  Baud:%"PRIu32"  Ctrl+C=Clear  Ctrl+B=Baud",
              s_usb_connected ? "Connected" : "Waiting...",
              s_baud_rate);
     term_update_status(buf);
@@ -229,7 +247,7 @@ static void ui_create(void)
     lv_obj_set_style_text_letter_space(term_label, 0, 0);
     lv_obj_set_style_text_line_space(term_label, 0, 0);
     lv_obj_set_pos(term_label, 0, 0);
-    lv_obj_set_size(term_label, 1280, 720 - STATUS_BAR_H);
+    lv_obj_set_size(term_label, 720, 1280 - STATUS_BAR_H);
     lv_label_set_long_mode(term_label, LV_LABEL_LONG_CLIP);
     lv_label_set_text(term_label, "");
 
@@ -239,8 +257,8 @@ static void ui_create(void)
     lv_obj_set_style_text_color(status_label, lv_color_make(0, 0, 0), 0);
     lv_obj_set_style_bg_color(status_label, lv_color_make(0, 200, 0), 0);
     lv_obj_set_style_bg_opa(status_label, LV_OPA_COVER, 0);
-    lv_obj_set_pos(status_label, 0, 720 - STATUS_BAR_H);
-    lv_obj_set_size(status_label, 1280, STATUS_BAR_H);
+    lv_obj_set_pos(status_label, 0, 1280 - STATUS_BAR_H);
+    lv_obj_set_size(status_label, 720, STATUS_BAR_H);
     lv_label_set_text(status_label, " TAB5 Serial Terminal - Initializing...");
 
     lvgl_port_unlock();
@@ -336,7 +354,7 @@ static void keyboard_event_cb(m5_tab5_key_event_t event, void *arg)
 }
 
 // ==============================================================
-// USB Host Task
+// USB VCP Callbacks
 // ==============================================================
 
 /**
@@ -346,7 +364,6 @@ static bool usb_rx_cb(const uint8_t *data, size_t data_len, void *arg)
 {
     if (s_usb_rx_queue == NULL || data_len == 0) return true;
 
-    // Split into 64-byte chunks for the queue
     size_t offset = 0;
     while (offset < data_len) {
         usb_rx_msg_t msg = {};
@@ -366,69 +383,37 @@ static void usb_event_cb(const cdc_acm_host_dev_event_data_t *event, void *user_
 {
     switch (event->type) {
     case CDC_ACM_HOST_DEVICE_DISCONNECTED:
-        ESP_LOGI(TAG, "USB CDC device disconnected");
+        ESP_LOGI(TAG, "VCP device disconnected");
         s_usb_connected = false;
-        s_cdc_dev = NULL;
         if (s_usb_event_group) {
             xEventGroupSetBits(s_usb_event_group, USB_DEV_DISCONNECTED_BIT);
         }
         break;
     case CDC_ACM_HOST_ERROR:
-        ESP_LOGE(TAG, "USB CDC error: %d", event->data.error);
-        break;
-    case CDC_ACM_HOST_SERIAL_STATE:
+        ESP_LOGE(TAG, "VCP error: %d", event->data.error);
+        screen_log("[USB ERR] %d\n", event->data.error);
         break;
     default:
         break;
     }
 }
 
-/**
- * @brief USB new device callback - called when a new USB device is enumerated
- */
-static void usb_new_dev_cb(usb_device_handle_t usb_dev)
-{
-    // Retrieve VID/PID
-    const usb_device_desc_t *desc;
-    usb_host_get_device_descriptor(usb_dev, &desc);
-    uint16_t vid = desc->idVendor;
-    uint16_t pid = desc->idProduct;
-    ESP_LOGI(TAG, "New USB device: VID=0x%04X PID=0x%04X", vid, pid);
+// ==============================================================
+// USB Host Library Task (daemon)
+// ==============================================================
 
-    if (s_usb_event_group) {
-        // Store VID/PID in event group user data via a simple approach:
-        // post to a dedicated queue instead
-        xEventGroupSetBits(s_usb_event_group, USB_DEV_CONNECTED_BIT);
-    }
-}
-
-/**
- * @brief USB Host library task - handles USB events
- */
 static void usb_lib_task(void *arg)
 {
-    ESP_LOGI(TAG, "USB Host task started");
+    ESP_LOGI(TAG, "USB lib task started");
 
     const usb_host_config_t host_config = {
         .skip_phy_setup = false,
         .intr_flags     = ESP_INTR_FLAG_LOWMED,
     };
     ESP_ERROR_CHECK(usb_host_install(&host_config));
+    ESP_LOGI(TAG, "USB host installed");
 
-    const cdc_acm_host_driver_config_t driver_config = {
-        .driver_task_stack_size = 4096,
-        .driver_task_priority   = USB_CDC_PRIORITY,
-        .xCoreID                = 0,
-        .new_dev_cb             = usb_new_dev_cb,
-    };
-    ESP_ERROR_CHECK(cdc_acm_host_install(&driver_config));
-
-    // Register VCP drivers for common USB-serial chips
-    VCP::register_driver<FT23x>();
-    VCP::register_driver<CP210x>();
-    VCP::register_driver<CH34x>();
-
-    // Notify main task that USB host is ready
+    // Notify VCP task that host is ready
     xTaskNotifyGive((TaskHandle_t)arg);
 
     while (1) {
@@ -444,37 +429,72 @@ static void usb_lib_task(void *arg)
         }
     }
 
-    ESP_LOGI(TAG, "USB Host task ending");
+    ESP_LOGI(TAG, "USB lib task ending");
     usb_host_uninstall();
     vTaskDelete(NULL);
 }
 
-/**
- * @brief Try to open a CDC/VCP device with the given VID/PID
- *        Falls back to CDC_HOST_ANY_VID / CDC_HOST_ANY_PID if VID=0
- */
-static esp_err_t usb_open_device(uint16_t vid, uint16_t pid)
+// ==============================================================
+// VCP Connection Task
+// ==============================================================
+// This task loops forever: wait for VCP device -> open -> communicate -> on disconnect, repeat
+
+static void vcp_task(void *arg)
 {
-    cdc_acm_host_device_config_t dev_config = {};
-    dev_config.connection_timeout_ms = 5000;
-    dev_config.out_buffer_size       = 512;
-    dev_config.in_buffer_size        = 0;   // use default
-    dev_config.user_arg              = NULL;
-    dev_config.event_cb              = usb_event_cb;
-    dev_config.data_cb               = usb_rx_cb;
+    TaskHandle_t usb_lib_task_handle = NULL;
 
-    // Try VCP (vendor-specific) first, then standard CDC-ACM
-    esp_err_t err = ESP_FAIL;
+    // Start USB lib daemon task first, passing this task's handle for notification
+    xTaskCreate(usb_lib_task, "usb_lib", 4096,
+                xTaskGetCurrentTaskHandle(),
+                USB_HOST_PRIORITY, &usb_lib_task_handle);
 
-    // Use VCP service which handles CH34x/CP210x/FTDI automatically
-    cdc_acm_dev_hdl_t dev = nullptr;
-    err = cdc_acm_host_open_vendor_specific(vid, pid, 0, &dev_config, &dev);
-    if (err != ESP_OK) {
-        // Fall back to standard CDC-ACM
-        err = cdc_acm_host_open(vid, pid, 0, &dev_config, &dev);
+    // Wait for USB host to be installed
+    ulTaskNotifyTake(pdTRUE, pdMS_TO_TICKS(5000));
+    ESP_LOGI(TAG, "USB host ready, installing CDC-ACM driver");
+
+    // Install CDC-ACM driver
+    const cdc_acm_host_driver_config_t driver_config = {
+        .driver_task_stack_size = 4096,
+        .driver_task_priority   = USB_CDC_PRIORITY,
+        .xCoreID                = 0,
+        .new_dev_cb             = NULL,
+    };
+    ESP_ERROR_CHECK(cdc_acm_host_install(&driver_config));
+
+    // Register VCP drivers for common USB-serial chips
+    VCP::register_driver<FT23x>();
+    VCP::register_driver<CP210x>();
+    VCP::register_driver<CH34x>();
+
+    ESP_LOGI(TAG, "VCP drivers registered");
+
+    // Notify main task that USB is ready
+    if (s_main_task_handle) {
+        xTaskNotifyGive(s_main_task_handle);
     }
 
-    if (err == ESP_OK && dev != nullptr) {
+    // Main VCP loop: open device (blocks until connected), communicate, repeat on disconnect
+    while (1) {
+        screen_log("[USB] Waiting for VCP device...\n");
+        ESP_LOGI(TAG, "Waiting for VCP device...");
+
+        cdc_acm_host_device_config_t dev_config = {};
+        dev_config.connection_timeout_ms = 0;  // 0 = wait forever
+        dev_config.out_buffer_size       = 512;
+        dev_config.in_buffer_size        = 512;
+        dev_config.user_arg              = NULL;
+        dev_config.event_cb              = usb_event_cb;
+        dev_config.data_cb               = usb_rx_cb;
+
+        // VCP::open blocks until a supported device is connected
+        CdcAcmDevice *dev = VCP::open(&dev_config);
+        if (dev == nullptr) {
+            screen_log("[USB] VCP::open failed, retrying...\n");
+            ESP_LOGE(TAG, "VCP::open returned nullptr");
+            vTaskDelay(pdMS_TO_TICKS(1000));
+            continue;
+        }
+
         // Set line coding (baud rate, 8N1)
         cdc_acm_line_coding_t line_coding = {
             .dwDTERate   = s_baud_rate,
@@ -482,17 +502,30 @@ static esp_err_t usb_open_device(uint16_t vid, uint16_t pid)
             .bParityType = 0,  // No parity
             .bDataBits   = 8,
         };
-        cdc_acm_host_line_coding_set(dev, &line_coding);
-        cdc_acm_host_set_control_line_state(dev, true, false);  // DTR=true, RTS=false
+        esp_err_t err = dev->line_coding_set(&line_coding);
+        if (err != ESP_OK) {
+            // Some devices (e.g. CH340) don't support SET_LINE_CODING, ignore error
+            ESP_LOGW(TAG, "line_coding_set: %s (ignored)", esp_err_to_name(err));
+        }
+        dev->set_control_line_state(true, false);  // DTR=true, RTS=false
 
-        s_cdc_dev = dev;
+        s_vcp_dev       = dev;
         s_usb_connected = true;
-        ESP_LOGI(TAG, "USB CDC device opened: VID=0x%04X PID=0x%04X baud=%"PRIu32,
-                 vid, pid, s_baud_rate);
-        return ESP_OK;
-    }
+        screen_log("[USB] Connected! Baud:%"PRIu32"\n", s_baud_rate);
+        ESP_LOGI(TAG, "VCP device opened, baud=%"PRIu32, s_baud_rate);
 
-    return err;
+        // Wait for disconnect event
+        xEventGroupWaitBits(s_usb_event_group, USB_DEV_DISCONNECTED_BIT,
+                            pdTRUE, pdFALSE, portMAX_DELAY);
+
+        // Clean up
+        s_vcp_dev = nullptr;
+        delete dev;
+        screen_log("[USB] Disconnected.\n");
+        ESP_LOGI(TAG, "VCP device closed");
+
+        vTaskDelay(pdMS_TO_TICKS(500));  // Brief delay before reconnect attempt
+    }
 }
 
 // ==============================================================
@@ -501,7 +534,9 @@ static esp_err_t usb_open_device(uint16_t vid, uint16_t pid)
 
 extern "C" void app_main(void)
 {
-    ESP_LOGI(TAG, "=== TAB5 Serial Terminal - Step 2 ===");
+    ESP_LOGI(TAG, "=== TAB5 Serial Terminal ===");
+
+    s_main_task_handle = xTaskGetCurrentTaskHandle();
 
     // ---- Board init ----
     m5::tab5::m5tab5_component_config_t board_cfg = {};
@@ -523,29 +558,25 @@ extern "C" void app_main(void)
     }
     ui_create();
     term_clear();
-    term_put_string("M5Stack TAB5 Serial Terminal v2\n");
-    term_put_string("================================\n");
+    term_put_string("M5Stack TAB5 Serial Terminal\n");
+    term_put_string("============================\n");
     term_put_string("Initializing USB host...\n");
     term_refresh_display();
 
     // ---- Queues and event groups ----
-    s_key_queue      = xQueueCreate(32, sizeof(key_event_msg_t));
-    s_usb_rx_queue   = xQueueCreate(64, sizeof(usb_rx_msg_t));
-    s_usb_event_group = xEventGroupCreate();
+    s_key_queue         = xQueueCreate(32, sizeof(key_event_msg_t));
+    s_usb_rx_queue      = xQueueCreate(64, sizeof(usb_rx_msg_t));
+    s_screen_log_queue  = xQueueCreate(32, sizeof(screen_log_msg_t));
+    s_usb_event_group   = xEventGroupCreate();
 
-    // ---- USB Host task ----
-    TaskHandle_t usb_task_handle = NULL;
-    BaseType_t task_created = xTaskCreate(usb_lib_task, "usb_lib",
-                                          4096, xTaskGetCurrentTaskHandle(),
-                                          USB_HOST_PRIORITY, &usb_task_handle);
-    if (task_created != pdTRUE) {
-        ESP_LOGE(TAG, "Failed to create USB host task");
-        return;
-    }
+    // ---- VCP task (manages USB host + CDC-ACM + VCP) ----
+    xTaskCreate(vcp_task, "vcp_task", 8192, NULL, USB_VCP_PRIORITY, NULL);
+
     // Wait for USB host to be ready
-    ulTaskNotifyTake(pdTRUE, pdMS_TO_TICKS(3000));
-    ESP_LOGI(TAG, "USB Host ready");
-    term_put_string("USB host ready. Connect a USB-serial device.\n\n");
+    ulTaskNotifyTake(pdTRUE, pdMS_TO_TICKS(5000));
+    ESP_LOGI(TAG, "USB ready, starting main loop");
+    term_put_string("USB host ready.\n");
+    term_put_string("Connect a USB-serial device to the USB-A port.\n\n");
     term_refresh_display();
 
     // ---- Keyboard init ----
@@ -574,45 +605,27 @@ extern "C" void app_main(void)
     // ---- Main loop ----
     ESP_LOGI(TAG, "Entering main loop");
 
-    // Track last connected device VID/PID for reconnect
-    uint16_t last_vid = CDC_HOST_ANY_VID;
-    uint16_t last_pid = CDC_HOST_ANY_PID;
-
     while (1) {
-        // Check USB connection events (non-blocking)
-        EventBits_t bits = xEventGroupGetBits(s_usb_event_group);
-
-        if ((bits & USB_DEV_CONNECTED_BIT) && !s_usb_connected) {
-            xEventGroupClearBits(s_usb_event_group, USB_DEV_CONNECTED_BIT);
-            term_put_string("\n[USB] Device detected, connecting...\n");
-            term_refresh_display();
-
-            esp_err_t open_err = usb_open_device(last_vid, last_pid);
-            if (open_err == ESP_OK) {
-                char msg[80];
-                snprintf(msg, sizeof(msg), "[USB] Connected! Baud: %"PRIu32"\n", s_baud_rate);
-                term_put_string(msg);
-            } else {
-                term_put_string("[USB] Failed to open device.\n");
-            }
-            term_refresh_display();
-            update_status_bar();
+        // Process screen log messages from other tasks
+        screen_log_msg_t log_msg;
+        bool need_refresh = false;
+        while (xQueueReceive(s_screen_log_queue, &log_msg, 0) == pdTRUE) {
+            term_put_string(log_msg.msg);
+            need_refresh = true;
         }
 
-        if (bits & USB_DEV_DISCONNECTED_BIT) {
-            xEventGroupClearBits(s_usb_event_group, USB_DEV_DISCONNECTED_BIT);
-            term_put_string("\n[USB] Device disconnected.\n");
-            term_refresh_display();
-            update_status_bar();
-        }
-
-        // Process USB RX data (data received from the connected serial device)
+        // Process USB RX data
         usb_rx_msg_t rx_msg;
         while (xQueueReceive(s_usb_rx_queue, &rx_msg, 0) == pdTRUE) {
             for (size_t i = 0; i < rx_msg.len; i++) {
                 term_put_char((char)rx_msg.data[i]);
             }
+            need_refresh = true;
+        }
+
+        if (need_refresh) {
             term_refresh_display();
+            update_status_bar();
         }
 
         // Process keyboard input
@@ -620,85 +633,67 @@ extern "C" void app_main(void)
         if (xQueueReceive(s_key_queue, &key_msg, pdMS_TO_TICKS(20)) == pdTRUE) {
             bool ctrl = (key_msg.modifier & 0x01) != 0;
 
-            // --- Control key shortcuts ---
             if (ctrl) {
                 char k = key_msg.str[0];
                 if (k == 'c' || k == 'C') {
-                    // Ctrl+C: clear screen
                     term_clear();
                     term_put_string("[Screen cleared]\n");
                     term_refresh_display();
                     continue;
                 }
                 if (k == 'l' || k == 'L') {
-                    // Ctrl+L: redraw
                     term_refresh_display();
                     continue;
                 }
                 if (k == 'b' || k == 'B') {
-                    // Ctrl+B: cycle baud rate
                     static const uint32_t baud_rates[] = {9600, 19200, 38400, 57600, 115200, 230400, 460800, 921600};
                     static int baud_idx = 4; // default 115200
                     baud_idx = (baud_idx + 1) % (sizeof(baud_rates) / sizeof(baud_rates[0]));
                     s_baud_rate = baud_rates[baud_idx];
-                    if (s_usb_connected && s_cdc_dev) {
+                    if (s_usb_connected && s_vcp_dev) {
                         cdc_acm_line_coding_t lc = {
                             .dwDTERate   = s_baud_rate,
                             .bCharFormat = 0,
                             .bParityType = 0,
                             .bDataBits   = 8,
                         };
-                        cdc_acm_host_line_coding_set(s_cdc_dev, &lc);
+                        s_vcp_dev->line_coding_set(&lc);
                     }
                     char msg[64];
-                    snprintf(msg, sizeof(msg), "\n[Baud rate: %"PRIu32"]\n", s_baud_rate);
+                    snprintf(msg, sizeof(msg), "\n[Baud: %"PRIu32"]\n", s_baud_rate);
                     term_put_string(msg);
                     term_refresh_display();
                     update_status_bar();
                     continue;
                 }
-                if (k == 'd' || k == 'D') {
-                    // Ctrl+D: disconnect USB
-                    if (s_usb_connected && s_cdc_dev) {
-                        cdc_acm_host_close(s_cdc_dev);
-                        s_cdc_dev = NULL;
-                        s_usb_connected = false;
-                        term_put_string("\n[USB] Disconnected by user.\n");
-                        term_refresh_display();
-                        update_status_bar();
-                    }
-                    continue;
-                }
                 // Other Ctrl+key: send as control character to USB
-                if (s_usb_connected && s_cdc_dev && k >= '@' && k <= '_') {
+                if (s_usb_connected && s_vcp_dev && k >= '@' && k <= '_') {
                     uint8_t ctrl_char = k - '@';
-                    cdc_acm_host_data_tx_blocking(s_cdc_dev, &ctrl_char, 1, 1000);
+                    s_vcp_dev->tx_blocking(&ctrl_char, 1, 1000);
                 }
                 continue;
             }
 
-            // --- Normal character processing ---
+            // Normal character processing
             for (int i = 0; key_msg.str[i] != '\0'; i++) {
                 char c = key_msg.str[i];
 
                 if (c == '\r' || c == '\n') {
-                    // ENTER key: send CR+LF to USB, display newline locally
-                    if (s_usb_connected && s_cdc_dev) {
-                        const uint8_t crlf[2] = {'\r', '\n'};
-                        cdc_acm_host_data_tx_blocking(s_cdc_dev, crlf, 2, 1000);
+                    // ENTER: send CR+LF to USB, display newline locally
+                    if (s_usb_connected && s_vcp_dev) {
+                        uint8_t crlf[2] = {'\r', '\n'};
+                        s_vcp_dev->tx_blocking(crlf, 2, 1000);
                     }
                     term_put_char('\n');
                 } else if (c == '\b' || c == 0x7F) {
-                    // Backspace: send to USB and update display
-                    if (s_usb_connected && s_cdc_dev) {
-                        const uint8_t bs = '\b';
-                        cdc_acm_host_data_tx_blocking(s_cdc_dev, &bs, 1, 1000);
+                    if (s_usb_connected && s_vcp_dev) {
+                        uint8_t bs = '\b';
+                        s_vcp_dev->tx_blocking(&bs, 1, 1000);
                     }
                     term_put_char('\b');
                 } else {
-                    // Printable character: send to USB and echo locally
-                    if (s_usb_connected && s_cdc_dev) {
-                        cdc_acm_host_data_tx_blocking(s_cdc_dev, (const uint8_t *)&c, 1, 1000);
+                    if (s_usb_connected && s_vcp_dev) {
+                        s_vcp_dev->tx_blocking((uint8_t *)&c, 1, 1000);
                     }
                     term_put_char(c);
                 }
