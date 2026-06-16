@@ -2,8 +2,9 @@
  * M5Stack TAB5 Serial Terminal - Step 2: USB Host Serial Communication
  *
  * Builds on Step 1 (display + keyboard) and adds:
- *  - USB Host library initialization with auto-restart on failure
+ *  - USB Host library initialization
  *  - CDC-ACM driver with VCP support (CH34x, CP210x, FTDI)
+ *  - Standard CDC-ACM fallback for devices like Raspberry Pi USB gadget
  *  - Bidirectional communication: keyboard -> USB TX, USB RX -> screen
  *  - ENTER key fix (send CR+LF, display newline)
  *  - Baud rate configurable via Ctrl+B
@@ -16,6 +17,7 @@
 #include <inttypes.h>
 #include <esp_log.h>
 #include <esp_err.h>
+#include <esp_system.h>
 #include <freertos/FreeRTOS.h>
 #include <freertos/task.h>
 #include <freertos/queue.h>
@@ -86,7 +88,7 @@ typedef struct {
 } usb_rx_msg_t;
 static QueueHandle_t s_usb_rx_queue = NULL;
 
-// USB events: disconnect and lib-fatal
+// USB events
 #define USB_DEV_DISCONNECTED_BIT  BIT0
 #define USB_LIB_STOPPED_BIT       BIT1
 static EventGroupHandle_t s_usb_event_group = NULL;
@@ -376,7 +378,11 @@ static void usb_event_cb(const cdc_acm_host_dev_event_data_t *event, void *user_
         break;
     case CDC_ACM_HOST_ERROR:
         ESP_LOGE(TAG, "VCP error: %d", event->data.error);
-        screen_log("[USB ERR] %d\n", event->data.error);
+        // On error, treat as disconnect to trigger reconnect
+        s_usb_connected = false;
+        if (s_usb_event_group) {
+            xEventGroupSetBits(s_usb_event_group, USB_DEV_DISCONNECTED_BIT);
+        }
         break;
     default:
         break;
@@ -384,7 +390,7 @@ static void usb_event_cb(const cdc_acm_host_dev_event_data_t *event, void *user_
 }
 
 // ==============================================================
-// USB Host Library Task (daemon, restartable)
+// USB Host Library Task (daemon)
 // ==============================================================
 
 static void usb_lib_task(void *arg)
@@ -400,7 +406,6 @@ static void usb_lib_task(void *arg)
     esp_err_t err = usb_host_install(&host_config);
     if (err != ESP_OK) {
         ESP_LOGE(TAG, "usb_host_install failed: %s", esp_err_to_name(err));
-        // Signal failure to vcp_task
         if (s_usb_event_group) {
             xEventGroupSetBits(s_usb_event_group, USB_LIB_STOPPED_BIT);
         }
@@ -430,7 +435,6 @@ static void usb_lib_task(void *arg)
     ESP_LOGI(TAG, "USB lib task ending, uninstalling host");
     usb_host_uninstall();
 
-    // Signal vcp_task that the lib has stopped (needs restart)
     if (s_usb_event_group) {
         xEventGroupSetBits(s_usb_event_group, USB_LIB_STOPPED_BIT);
     }
@@ -438,153 +442,185 @@ static void usb_lib_task(void *arg)
 }
 
 // ==============================================================
-// VCP Connection Task (manages full USB stack lifecycle)
+// VCP Connection Task
 // ==============================================================
 
 static void vcp_task(void *arg)
 {
-    bool cdc_driver_installed = false;
+    // ---- Start USB host lib ----
+    screen_log("[USB] Starting USB host...\n");
+    ESP_LOGI(TAG, "Starting USB host lib task");
 
+    xEventGroupClearBits(s_usb_event_group, USB_LIB_STOPPED_BIT | USB_DEV_DISCONNECTED_BIT);
+
+    xTaskCreate(usb_lib_task, "usb_lib", 4096,
+                xTaskGetCurrentTaskHandle(),
+                USB_HOST_PRIORITY, NULL);
+
+    // Wait for USB host to be installed (timeout 5s)
+    uint32_t notified = ulTaskNotifyTake(pdTRUE, pdMS_TO_TICKS(5000));
+    if (notified == 0) {
+        screen_log("[USB] Host init timeout! Rebooting...\n");
+        ESP_LOGE(TAG, "USB host init timeout, rebooting");
+        vTaskDelay(pdMS_TO_TICKS(2000));
+        esp_restart();
+    }
+
+    // ---- Install CDC-ACM driver ----
+    const cdc_acm_host_driver_config_t driver_config = {
+        .driver_task_stack_size = 4096,
+        .driver_task_priority   = USB_CDC_PRIORITY,
+        .xCoreID                = 0,
+        .new_dev_cb             = NULL,
+    };
+    esp_err_t err = cdc_acm_host_install(&driver_config);
+    if (err != ESP_OK) {
+        ESP_LOGE(TAG, "cdc_acm_host_install failed: %s", esp_err_to_name(err));
+        screen_log("[USB] CDC driver install failed! Rebooting...\n");
+        vTaskDelay(pdMS_TO_TICKS(2000));
+        esp_restart();
+    }
+
+    // Register VCP drivers (FTDI, CP210x, CH34x)
+    VCP::register_driver<FT23x>();
+    VCP::register_driver<CP210x>();
+    VCP::register_driver<CH34x>();
+    ESP_LOGI(TAG, "VCP drivers registered");
+
+    // Notify main task that USB is ready
+    if (s_main_task_handle) {
+        xTaskNotifyGive(s_main_task_handle);
+        s_main_task_handle = NULL;
+    }
+
+    screen_log("[USB] Ready. Connect a USB-serial device.\n");
+    update_status_bar();
+
+    // ---- VCP connection loop ----
     while (1) {
-        // ---- (Re)start USB host lib ----
-        screen_log("[USB] Starting USB host...\n");
-        ESP_LOGI(TAG, "Starting USB host lib task");
+        // Check if USB lib has stopped (fatal error -> reboot)
+        EventBits_t bits = xEventGroupGetBits(s_usb_event_group);
+        if (bits & USB_LIB_STOPPED_BIT) {
+            screen_log("[USB] Host stopped unexpectedly. Rebooting...\n");
+            ESP_LOGE(TAG, "USB lib stopped unexpectedly, rebooting");
+            vTaskDelay(pdMS_TO_TICKS(2000));
+            esp_restart();
+        }
 
-        // Clear the lib-stopped bit before starting
-        xEventGroupClearBits(s_usb_event_group, USB_LIB_STOPPED_BIT);
+        screen_log("[USB] Waiting for device...\n");
+        ESP_LOGI(TAG, "Waiting for VCP device...");
 
-        xTaskCreate(usb_lib_task, "usb_lib", 4096,
-                    xTaskGetCurrentTaskHandle(),
-                    USB_HOST_PRIORITY, NULL);
+        // Device config:
+        // - in_buffer_size=0: use endpoint MPS (required for FTDI, avoids ESP_ERR_NO_MEM)
+        // - out_buffer_size=512: TX buffer
+        // - connection_timeout_ms=5000: 5s timeout, then retry
+        cdc_acm_host_device_config_t dev_config = {};
+        dev_config.connection_timeout_ms = 5000;
+        dev_config.out_buffer_size       = 512;
+        dev_config.in_buffer_size        = 0;   // 0 = use EP MPS (critical for FTDI)
+        dev_config.user_arg              = NULL;
+        dev_config.event_cb              = usb_event_cb;
+        dev_config.data_cb               = usb_rx_cb;
 
-        // Wait for USB host to be installed (timeout 5s)
-        uint32_t notified = ulTaskNotifyTake(pdTRUE, pdMS_TO_TICKS(5000));
-        if (notified == 0) {
-            // Timeout: usb_lib_task failed to start
-            screen_log("[USB] Host init timeout, retrying in 3s...\n");
-            ESP_LOGE(TAG, "USB host init timeout");
-            vTaskDelay(pdMS_TO_TICKS(3000));
+        // First try: VCP drivers (FTDI, CP210x, CH34x)
+        CdcAcmDevice *dev = VCP::open(&dev_config);
+
+        // Second try: standard CDC-ACM fallback (e.g. Raspberry Pi USB gadget)
+        if (dev == nullptr) {
+            ESP_LOGI(TAG, "VCP::open timed out, trying standard CDC-ACM...");
+            cdc_acm_dev_hdl_t cdc_hdl = NULL;
+            esp_err_t open_err = cdc_acm_host_open(
+                (uint16_t)CDC_HOST_ANY_VID,
+                (uint16_t)CDC_HOST_ANY_PID,
+                0,
+                &dev_config,
+                &cdc_hdl
+            );
+            if (open_err == ESP_OK && cdc_hdl != NULL) {
+                ESP_LOGI(TAG, "Standard CDC-ACM device opened");
+                // Wrap in CdcAcmDevice using the open(config) method
+                CdcAcmDevice *cdc_dev = new CdcAcmDevice();
+                if (cdc_dev != nullptr) {
+                    // Use the open method with config struct
+                    cdc_acm_host_open_config_t open_cfg = {};
+                    open_cfg.vid                  = CDC_HOST_ANY_VID;
+                    open_cfg.pid                  = CDC_HOST_ANY_PID;
+                    open_cfg.interface_idx        = 0;
+                    open_cfg.dev_addr             = CDC_HOST_ANY_DEV_ADDR;
+                    open_cfg.connection_timeout_ms = 3000;
+                    open_cfg.out_buffer_size      = 512;
+                    open_cfg.in_buffer_size       = 0;
+                    open_cfg.event_cb             = usb_event_cb;
+                    open_cfg.data_cb              = usb_rx_cb;
+                    open_cfg.user_arg             = NULL;
+                    // Close the handle we opened above and reopen via CdcAcmDevice
+                    cdc_acm_host_close(cdc_hdl);
+                    open_err = cdc_dev->open(&open_cfg);
+                    if (open_err == ESP_OK) {
+                        dev = cdc_dev;
+                    } else {
+                        delete cdc_dev;
+                    }
+                } else {
+                    cdc_acm_host_close(cdc_hdl);
+                }
+            }
+        }
+
+        if (dev == nullptr) {
+            // Both VCP and CDC-ACM failed: check if lib stopped
+            bits = xEventGroupGetBits(s_usb_event_group);
+            if (bits & USB_LIB_STOPPED_BIT) {
+                screen_log("[USB] Host stopped. Rebooting...\n");
+                vTaskDelay(pdMS_TO_TICKS(2000));
+                esp_restart();
+            }
+            // Normal timeout: just retry
+            vTaskDelay(pdMS_TO_TICKS(500));
             continue;
         }
 
-        // ---- Install CDC-ACM driver (only once) ----
-        if (!cdc_driver_installed) {
-            const cdc_acm_host_driver_config_t driver_config = {
-                .driver_task_stack_size = 4096,
-                .driver_task_priority   = USB_CDC_PRIORITY,
-                .xCoreID                = 0,
-                .new_dev_cb             = NULL,
-            };
-            esp_err_t err = cdc_acm_host_install(&driver_config);
-            if (err != ESP_OK) {
-                ESP_LOGE(TAG, "cdc_acm_host_install failed: %s", esp_err_to_name(err));
-                screen_log("[USB] CDC driver install failed!\n");
-                vTaskDelay(pdMS_TO_TICKS(2000));
-                continue;
-            }
-
-            VCP::register_driver<FT23x>();
-            VCP::register_driver<CP210x>();
-            VCP::register_driver<CH34x>();
-            cdc_driver_installed = true;
-            ESP_LOGI(TAG, "VCP drivers registered");
+        // ---- Device connected ----
+        cdc_acm_line_coding_t line_coding = {
+            .dwDTERate   = s_baud_rate,
+            .bCharFormat = 0,
+            .bParityType = 0,
+            .bDataBits   = 8,
+        };
+        err = dev->line_coding_set(&line_coding);
+        if (err != ESP_OK) {
+            ESP_LOGW(TAG, "line_coding_set: %s (ignored)", esp_err_to_name(err));
         }
+        dev->set_control_line_state(true, false);
 
-        // Notify main task that USB is ready (first time only)
-        if (s_main_task_handle) {
-            xTaskNotifyGive(s_main_task_handle);
-            s_main_task_handle = NULL;  // Only notify once
-        }
-
-        screen_log("[USB] Ready. Connect a USB-serial device.\n");
+        s_vcp_dev       = dev;
+        s_usb_connected = true;
+        screen_log("[USB] Connected! Baud:%"PRIu32"\n", s_baud_rate);
+        ESP_LOGI(TAG, "VCP connected, baud=%"PRIu32, s_baud_rate);
         update_status_bar();
 
-        // ---- VCP connection loop ----
-        while (1) {
-            // Check if USB lib has stopped (error recovery)
-            EventBits_t bits = xEventGroupGetBits(s_usb_event_group);
-            if (bits & USB_LIB_STOPPED_BIT) {
-                screen_log("[USB] Host stopped, restarting...\n");
-                ESP_LOGW(TAG, "USB lib stopped, will restart");
-                // Uninstall CDC driver so it can be reinstalled after host restart
-                cdc_acm_host_uninstall();
-                cdc_driver_installed = false;
-                vTaskDelay(pdMS_TO_TICKS(1000));
-                break;  // Break inner loop -> restart outer loop
-            }
+        // Wait for disconnect or lib-stopped
+        xEventGroupClearBits(s_usb_event_group, USB_DEV_DISCONNECTED_BIT);
+        xEventGroupWaitBits(s_usb_event_group,
+                            USB_DEV_DISCONNECTED_BIT | USB_LIB_STOPPED_BIT,
+                            pdTRUE, pdFALSE, portMAX_DELAY);
 
-            screen_log("[USB] Waiting for VCP device...\n");
-            ESP_LOGI(TAG, "Waiting for VCP device (VCP::open)...");
+        s_vcp_dev       = nullptr;
+        s_usb_connected = false;
+        delete dev;
+        screen_log("[USB] Disconnected.\n");
+        ESP_LOGI(TAG, "VCP device closed");
+        update_status_bar();
 
-            cdc_acm_host_device_config_t dev_config = {};
-            dev_config.connection_timeout_ms = 5000;  // 5s timeout (not forever)
-            dev_config.out_buffer_size       = 512;
-            dev_config.in_buffer_size        = 512;
-            dev_config.user_arg              = NULL;
-            dev_config.event_cb              = usb_event_cb;
-            dev_config.data_cb               = usb_rx_cb;
-
-            CdcAcmDevice *dev = VCP::open(&dev_config);
-            if (dev == nullptr) {
-                // Timeout or error: check if lib stopped
-                bits = xEventGroupGetBits(s_usb_event_group);
-                if (bits & USB_LIB_STOPPED_BIT) {
-                    screen_log("[USB] Host stopped, restarting...\n");
-                    cdc_acm_host_uninstall();
-                    cdc_driver_installed = false;
-                    vTaskDelay(pdMS_TO_TICKS(1000));
-                    break;
-                }
-                // Normal timeout: just retry
-                vTaskDelay(pdMS_TO_TICKS(500));
-                continue;
-            }
-
-            // ---- Device connected ----
-            cdc_acm_line_coding_t line_coding = {
-                .dwDTERate   = s_baud_rate,
-                .bCharFormat = 0,
-                .bParityType = 0,
-                .bDataBits   = 8,
-            };
-            esp_err_t err = dev->line_coding_set(&line_coding);
-            if (err != ESP_OK) {
-                ESP_LOGW(TAG, "line_coding_set: %s (ignored)", esp_err_to_name(err));
-            }
-            dev->set_control_line_state(true, false);
-
-            s_vcp_dev       = dev;
-            s_usb_connected = true;
-            screen_log("[USB] Connected! Baud:%"PRIu32"\n", s_baud_rate);
-            ESP_LOGI(TAG, "VCP connected, baud=%"PRIu32, s_baud_rate);
-            update_status_bar();
-
-            // Wait for disconnect or lib-stopped
-            xEventGroupWaitBits(s_usb_event_group,
-                                USB_DEV_DISCONNECTED_BIT | USB_LIB_STOPPED_BIT,
-                                pdTRUE, pdFALSE, portMAX_DELAY);
-
-            s_vcp_dev       = nullptr;
-            s_usb_connected = false;
-            delete dev;
-            screen_log("[USB] Disconnected.\n");
-            ESP_LOGI(TAG, "VCP device closed");
-            update_status_bar();
-
-            // Check if lib stopped (needs full restart)
-            bits = xEventGroupGetBits(s_usb_event_group);
-            if (bits & USB_LIB_STOPPED_BIT) {
-                cdc_acm_host_uninstall();
-                cdc_driver_installed = false;
-                vTaskDelay(pdMS_TO_TICKS(1000));
-                break;
-            }
-
-            vTaskDelay(pdMS_TO_TICKS(500));
+        // Check if lib stopped (fatal -> reboot)
+        bits = xEventGroupGetBits(s_usb_event_group);
+        if (bits & USB_LIB_STOPPED_BIT) {
+            screen_log("[USB] Host stopped. Rebooting...\n");
+            vTaskDelay(pdMS_TO_TICKS(2000));
+            esp_restart();
         }
 
-        // Delay before restarting USB host
-        vTaskDelay(pdMS_TO_TICKS(2000));
+        vTaskDelay(pdMS_TO_TICKS(500));
     }
 }
 
