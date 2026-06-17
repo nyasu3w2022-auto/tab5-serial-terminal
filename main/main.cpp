@@ -573,6 +573,12 @@ static void vcp_task(void *arg)
         }
 
         // ---- Device connected ----
+        // IMPORTANT: Clear DISCONNECTED_BIT here, because VCP::open() timeout
+        // may have triggered usb_event_cb(CDC_ACM_HOST_ERROR) internally,
+        // setting the bit BEFORE our open() succeeded. If we don't clear it,
+        // xEventGroupWaitBits() below returns immediately and we disconnect.
+        xEventGroupClearBits(s_usb_event_group, USB_DEV_DISCONNECTED_BIT);
+
         // Set line coding (baud rate etc.)
         // For standard CDC devices that don't support SET_LINE_CODING (e.g. RPi gadget),
         // this may return ESP_ERR_INVALID_RESPONSE (STALL) - that's OK, ignore it.
