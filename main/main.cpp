@@ -476,12 +476,12 @@ static void vcp_task(void *arg)
     esp_err_t err = cdc_acm_host_install(&driver_config);
     if (err != ESP_OK) {
         ESP_LOGE(TAG, "cdc_acm_host_install failed: %s", esp_err_to_name(err));
-        screen_log("[USB] CDC driver install failed! Rebooting...\n");
+        screen_log("[USB] CDC driver install failed!\n");
         vTaskDelay(pdMS_TO_TICKS(2000));
         esp_restart();
     }
 
-    // Register VCP drivers (FTDI, CP210x, CH34x)
+    // ---- Register VCP drivers (FTDI, CP210x, CH34x) ----
     VCP::register_driver<FT23x>();
     VCP::register_driver<CP210x>();
     VCP::register_driver<CH34x>();
@@ -490,18 +490,14 @@ static void vcp_task(void *arg)
     // Notify main task that USB is ready
     if (s_main_task_handle) {
         xTaskNotifyGive(s_main_task_handle);
-        s_main_task_handle = NULL;
     }
 
-    screen_log("[USB] Ready. Connect a USB-serial device.\n");
-    update_status_bar();
-
-    // ---- VCP connection loop ----
+    // ---- Connection loop ----
     while (1) {
         // Check if USB lib has stopped (fatal error -> reboot)
         EventBits_t bits = xEventGroupGetBits(s_usb_event_group);
         if (bits & USB_LIB_STOPPED_BIT) {
-            screen_log("[USB] Host stopped unexpectedly. Rebooting...\n");
+            screen_log("[USB] Host stopped. Rebooting...\n");
             ESP_LOGE(TAG, "USB lib stopped unexpectedly, rebooting");
             vTaskDelay(pdMS_TO_TICKS(2000));
             esp_restart();
@@ -510,10 +506,10 @@ static void vcp_task(void *arg)
         screen_log("[USB] Waiting for device...\n");
         ESP_LOGI(TAG, "Waiting for VCP device...");
 
-        // Device config:
-        // - in_buffer_size=0: use endpoint MPS (required for FTDI, avoids ESP_ERR_NO_MEM)
-        // - out_buffer_size=512: TX buffer
-        // - connection_timeout_ms=5000: 5s timeout, then retry
+        // Device config for VCP drivers (FTDI/CP210x/CH34x):
+        //   in_buffer_size=0  -> use endpoint MPS (required for FTDI)
+        //   out_buffer_size=512 -> TX buffer
+        //   connection_timeout_ms=5000 -> 5s timeout, then try standard CDC
         cdc_acm_host_device_config_t dev_config = {};
         dev_config.connection_timeout_ms = 5000;
         dev_config.out_buffer_size       = 512;
@@ -522,65 +518,64 @@ static void vcp_task(void *arg)
         dev_config.event_cb              = usb_event_cb;
         dev_config.data_cb               = usb_rx_cb;
 
-        // First try: VCP drivers (FTDI, CP210x, CH34x)
-        CdcAcmDevice *dev = VCP::open(&dev_config);
+        xEventGroupClearBits(s_usb_event_group, USB_DEV_DISCONNECTED_BIT);
 
-        // Second try: standard CDC-ACM fallback (e.g. Raspberry Pi USB gadget)
+        CdcAcmDevice *dev = nullptr;
+        bool is_standard_cdc = false;
+
+        // --- Try 1: VCP drivers (FTDI, CP210x, CH34x) ---
+        dev = VCP::open(&dev_config);
+
         if (dev == nullptr) {
+            // --- Try 2: Standard CDC-ACM (e.g. Raspberry Pi USB gadget) ---
             ESP_LOGI(TAG, "VCP::open timed out, trying standard CDC-ACM...");
-            cdc_acm_dev_hdl_t cdc_hdl = NULL;
-            esp_err_t open_err = cdc_acm_host_open(
-                (uint16_t)CDC_HOST_ANY_VID,
-                (uint16_t)CDC_HOST_ANY_PID,
-                0,
-                &dev_config,
-                &cdc_hdl
-            );
-            if (open_err == ESP_OK && cdc_hdl != NULL) {
-                ESP_LOGI(TAG, "Standard CDC-ACM device opened");
-                // Wrap in CdcAcmDevice using the open(config) method
-                CdcAcmDevice *cdc_dev = new CdcAcmDevice();
-                if (cdc_dev != nullptr) {
-                    // Use the open method with config struct
-                    cdc_acm_host_open_config_t open_cfg = {};
-                    open_cfg.vid                  = CDC_HOST_ANY_VID;
-                    open_cfg.pid                  = CDC_HOST_ANY_PID;
-                    open_cfg.interface_idx        = 0;
-                    open_cfg.dev_addr             = CDC_HOST_ANY_DEV_ADDR;
-                    open_cfg.connection_timeout_ms = 3000;
-                    open_cfg.out_buffer_size      = 512;
-                    open_cfg.in_buffer_size       = 0;
-                    open_cfg.event_cb             = usb_event_cb;
-                    open_cfg.data_cb              = usb_rx_cb;
-                    open_cfg.user_arg             = NULL;
-                    // Close the handle we opened above and reopen via CdcAcmDevice
-                    cdc_acm_host_close(cdc_hdl);
-                    open_err = cdc_dev->open(&open_cfg);
-                    if (open_err == ESP_OK) {
-                        dev = cdc_dev;
-                    } else {
-                        delete cdc_dev;
-                    }
+            screen_log("[USB] Trying standard CDC-ACM...\n");
+
+            // Use CdcAcmDevice::open() directly with open_config
+            cdc_acm_host_open_config_t open_cfg = {};
+            open_cfg.vid                   = CDC_HOST_ANY_VID;
+            open_cfg.pid                   = CDC_HOST_ANY_PID;
+            open_cfg.interface_idx         = 0;
+            open_cfg.dev_addr              = CDC_HOST_ANY_DEV_ADDR;
+            open_cfg.connection_timeout_ms = 5000;
+            open_cfg.out_buffer_size       = 512;
+            open_cfg.in_buffer_size        = 0;
+            open_cfg.event_cb              = usb_event_cb;
+            open_cfg.data_cb               = usb_rx_cb;
+            open_cfg.user_arg              = NULL;
+
+            CdcAcmDevice *cdc_dev = new CdcAcmDevice();
+            if (cdc_dev != nullptr) {
+                err = cdc_dev->open(&open_cfg);
+                if (err == ESP_OK) {
+                    dev = cdc_dev;
+                    is_standard_cdc = true;
+                    ESP_LOGI(TAG, "Standard CDC-ACM device opened");
+                    screen_log("[USB] Standard CDC-ACM opened\n");
                 } else {
-                    cdc_acm_host_close(cdc_hdl);
+                    ESP_LOGE(TAG, "Standard CDC-ACM open failed: %s", esp_err_to_name(err));
+                    delete cdc_dev;
                 }
             }
         }
 
         if (dev == nullptr) {
-            // Both VCP and CDC-ACM failed: check if lib stopped
+            // Both failed: check if lib stopped
             bits = xEventGroupGetBits(s_usb_event_group);
             if (bits & USB_LIB_STOPPED_BIT) {
                 screen_log("[USB] Host stopped. Rebooting...\n");
                 vTaskDelay(pdMS_TO_TICKS(2000));
                 esp_restart();
             }
-            // Normal timeout: just retry
+            // Normal timeout: retry
             vTaskDelay(pdMS_TO_TICKS(500));
             continue;
         }
 
         // ---- Device connected ----
+        // Set line coding (baud rate etc.)
+        // For standard CDC devices that don't support SET_LINE_CODING (e.g. RPi gadget),
+        // this may return ESP_ERR_INVALID_RESPONSE (STALL) - that's OK, ignore it.
         cdc_acm_line_coding_t line_coding = {
             .dwDTERate   = s_baud_rate,
             .bCharFormat = 0,
@@ -589,18 +584,26 @@ static void vcp_task(void *arg)
         };
         err = dev->line_coding_set(&line_coding);
         if (err != ESP_OK) {
-            ESP_LOGW(TAG, "line_coding_set: %s (ignored)", esp_err_to_name(err));
+            ESP_LOGW(TAG, "line_coding_set: %s (ignored, device may not support it)",
+                     esp_err_to_name(err));
         }
-        dev->set_control_line_state(true, false);
+
+        // Set control line state (DTR=true, RTS=false)
+        // Also ignore errors for devices that don't support it
+        err = dev->set_control_line_state(true, false);
+        if (err != ESP_OK) {
+            ESP_LOGW(TAG, "set_control_line_state: %s (ignored)", esp_err_to_name(err));
+        }
 
         s_vcp_dev       = dev;
         s_usb_connected = true;
-        screen_log("[USB] Connected! Baud:%"PRIu32"\n", s_baud_rate);
-        ESP_LOGI(TAG, "VCP connected, baud=%"PRIu32, s_baud_rate);
+        screen_log("[USB] Connected! Baud:%"PRIu32" %s\n",
+                   s_baud_rate, is_standard_cdc ? "(CDC)" : "(VCP)");
+        ESP_LOGI(TAG, "VCP connected, baud=%"PRIu32" %s",
+                 s_baud_rate, is_standard_cdc ? "(CDC)" : "(VCP)");
         update_status_bar();
 
         // Wait for disconnect or lib-stopped
-        xEventGroupClearBits(s_usb_event_group, USB_DEV_DISCONNECTED_BIT);
         xEventGroupWaitBits(s_usb_event_group,
                             USB_DEV_DISCONNECTED_BIT | USB_LIB_STOPPED_BIT,
                             pdTRUE, pdFALSE, portMAX_DELAY);
