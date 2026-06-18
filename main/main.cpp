@@ -579,26 +579,28 @@ static void vcp_task(void *arg)
         // xEventGroupWaitBits() below returns immediately and we disconnect.
         xEventGroupClearBits(s_usb_event_group, USB_DEV_DISCONNECTED_BIT);
 
-        // Set line coding (baud rate etc.)
-        // For standard CDC devices that don't support SET_LINE_CODING (e.g. RPi gadget),
-        // this may return ESP_ERR_INVALID_RESPONSE (STALL) - that's OK, ignore it.
-        cdc_acm_line_coding_t line_coding = {
-            .dwDTERate   = s_baud_rate,
-            .bCharFormat = 0,
-            .bParityType = 0,
-            .bDataBits   = 8,
-        };
-        err = dev->line_coding_set(&line_coding);
-        if (err != ESP_OK) {
-            ESP_LOGW(TAG, "line_coding_set: %s (ignored, device may not support it)",
-                     esp_err_to_name(err));
-        }
-
-        // Set control line state (DTR=true, RTS=false)
-        // Also ignore errors for devices that don't support it
-        err = dev->set_control_line_state(true, false);
-        if (err != ESP_OK) {
-            ESP_LOGW(TAG, "set_control_line_state: %s (ignored)", esp_err_to_name(err));
+        // Set line coding and control line state ONLY for VCP devices (FTDI/CP210x/CH34x).
+        // Standard CDC-ACM devices (e.g. Raspberry Pi USB gadget) do NOT support
+        // SET_LINE_CODING or SET_CONTROL_LINE_STATE - they respond with STALL,
+        // which the cdc_acm driver then reports as CDC_ACM_HOST_ERROR asynchronously,
+        // causing an immediate disconnect even after open() succeeded.
+        if (!is_standard_cdc) {
+            cdc_acm_line_coding_t line_coding = {
+                .dwDTERate   = s_baud_rate,
+                .bCharFormat = 0,
+                .bParityType = 0,
+                .bDataBits   = 8,
+            };
+            err = dev->line_coding_set(&line_coding);
+            if (err != ESP_OK) {
+                ESP_LOGW(TAG, "line_coding_set: %s (ignored)", esp_err_to_name(err));
+            }
+            err = dev->set_control_line_state(true, false);
+            if (err != ESP_OK) {
+                ESP_LOGW(TAG, "set_control_line_state: %s (ignored)", esp_err_to_name(err));
+            }
+        } else {
+            ESP_LOGI(TAG, "Standard CDC-ACM: skipping line_coding_set and set_control_line_state");
         }
 
         s_vcp_dev       = dev;
