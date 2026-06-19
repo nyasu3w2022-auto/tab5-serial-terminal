@@ -377,12 +377,14 @@ static void usb_event_cb(const cdc_acm_host_dev_event_data_t *event, void *user_
         }
         break;
     case CDC_ACM_HOST_ERROR:
-        ESP_LOGE(TAG, "VCP error: %d", event->data.error);
-        // On error, treat as disconnect to trigger reconnect
-        s_usb_connected = false;
-        if (s_usb_event_group) {
-            xEventGroupSetBits(s_usb_event_group, USB_DEV_DISCONNECTED_BIT);
-        }
+        // CDC_ACM_HOST_ERROR can be fired spuriously after VCP::open() times out
+        // (residual async transfer callbacks from the failed VCP open attempt).
+        // We intentionally ignore it here and rely ONLY on
+        // CDC_ACM_HOST_DEVICE_DISCONNECTED for actual disconnect handling.
+        // Treating HOST_ERROR as a disconnect caused an immediate reconnect loop
+        // with Raspberry Pi USB gadget (standard CDC-ACM) devices.
+        ESP_LOGW(TAG, "VCP error: %d (ignored, spurious after VCP::open timeout)",
+                 event->data.error);
         break;
     default:
         break;
