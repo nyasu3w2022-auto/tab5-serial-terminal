@@ -541,7 +541,7 @@ static void vcp_task(void *arg)
             open_cfg.dev_addr              = CDC_HOST_ANY_DEV_ADDR;
             open_cfg.connection_timeout_ms = 5000;
             open_cfg.out_buffer_size       = 512;
-            open_cfg.in_buffer_size        = 0;
+            open_cfg.in_buffer_size        = 512;  // Must be non-zero to allocate RX buffer
             open_cfg.event_cb              = usb_event_cb;
             open_cfg.data_cb               = usb_rx_cb;
             open_cfg.user_arg              = NULL;
@@ -782,14 +782,26 @@ extern "C" void app_main(void)
                 continue;
             }
 
+            // TAB5 keyboard STRING mode sends ENTER key as the literal string "enter"
+            // (not as \r or \n). Detect this and send LF (\n) to the USB device.
+            if (strcmp(key_msg.str, "enter") == 0) {
+                if (s_usb_connected && s_vcp_dev) {
+                    uint8_t lf = '\n';
+                    s_vcp_dev->tx_blocking(&lf, 1, 1000);
+                }
+                term_put_char('\n');
+                term_refresh_display();
+                continue;
+            }
+
             // Normal character processing
             for (int i = 0; key_msg.str[i] != '\0'; i++) {
                 char c = key_msg.str[i];
 
                 if (c == '\r' || c == '\n') {
                     if (s_usb_connected && s_vcp_dev) {
-                        uint8_t crlf[2] = {'\r', '\n'};
-                        s_vcp_dev->tx_blocking(crlf, 2, 1000);
+                        uint8_t lf = '\n';
+                        s_vcp_dev->tx_blocking(&lf, 1, 1000);
                     }
                     term_put_char('\n');
                 } else if (c == '\b' || c == 0x7F) {
