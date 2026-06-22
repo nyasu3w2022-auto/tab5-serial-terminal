@@ -1,13 +1,22 @@
 /*
- * M5Stack TAB5 Serial Terminal - Step 2: USB Host Serial Communication
+ * M5Stack TAB5 Serial Terminal
  *
- * Builds on Step 1 (display + keyboard) and adds:
- *  - USB Host library initialization
- *  - CDC-ACM driver with VCP support (CH34x, CP210x, FTDI)
+ * Features:
+ *  - USB Host CDC-ACM with VCP support (CH34x, CP210x, FTDI)
  *  - Standard CDC-ACM fallback for devices like Raspberry Pi USB gadget
  *  - Bidirectional communication: keyboard -> USB TX, USB RX -> screen
- *  - ENTER key fix (send CR+LF, display newline)
+ *  - ENTER key sends LF (\n)
  *  - Baud rate configurable via Ctrl+B
+ *
+ * Design:
+ *  - new_dev_cb detects device connection and signals vcp_task via semaphore
+ *  - vcp_task opens the device immediately without polling/timeout loops
+ *  - VCP::open() is NOT used (it has a mandatory 5s timeout that causes
+ *    spurious CDC_ACM_HOST_ERROR events from residual async transfers)
+ *  - Instead, we use CdcAcmDevice::open() directly with connection_timeout_ms=0
+ *    so it opens the already-connected device immediately
+ *  - CDC_ACM_HOST_ERROR is ignored; only CDC_ACM_HOST_DEVICE_DISCONNECTED
+ *    triggers reconnect
  *
  * SPDX-License-Identifier: MIT
  */
@@ -74,7 +83,7 @@ static bool          s_usb_connected = false;
 static uint32_t      s_baud_rate     = 115200;
 
 // ==============================================================
-// Message queues / event groups
+// Message queues / semaphores / event groups
 // ==============================================================
 typedef struct {
     uint8_t modifier;
@@ -88,7 +97,10 @@ typedef struct {
 } usb_rx_msg_t;
 static QueueHandle_t s_usb_rx_queue = NULL;
 
-// USB events
+// Semaphore: posted by new_dev_cb when a USB device appears
+static SemaphoreHandle_t s_dev_present_sem = NULL;
+
+// Event group for disconnect / lib-stopped
 #define USB_DEV_DISCONNECTED_BIT  BIT0
 #define USB_LIB_STOPPED_BIT       BIT1
 static EventGroupHandle_t s_usb_event_group = NULL;
@@ -370,24 +382,39 @@ static void usb_event_cb(const cdc_acm_host_dev_event_data_t *event, void *user_
 {
     switch (event->type) {
     case CDC_ACM_HOST_DEVICE_DISCONNECTED:
-        ESP_LOGI(TAG, "VCP device disconnected");
+        ESP_LOGI(TAG, "CDC device disconnected");
         s_usb_connected = false;
         if (s_usb_event_group) {
             xEventGroupSetBits(s_usb_event_group, USB_DEV_DISCONNECTED_BIT);
         }
         break;
+
     case CDC_ACM_HOST_ERROR:
-        // CDC_ACM_HOST_ERROR can be fired spuriously after VCP::open() times out
-        // (residual async transfer callbacks from the failed VCP open attempt).
-        // We intentionally ignore it here and rely ONLY on
-        // CDC_ACM_HOST_DEVICE_DISCONNECTED for actual disconnect handling.
-        // Treating HOST_ERROR as a disconnect caused an immediate reconnect loop
-        // with Raspberry Pi USB gadget (standard CDC-ACM) devices.
-        ESP_LOGW(TAG, "VCP error: %d (ignored, spurious after VCP::open timeout)",
-                 event->data.error);
+        // Ignore: CDC_ACM_HOST_ERROR is fired spuriously from residual async
+        // transfer callbacks. Real disconnection is reported via
+        // CDC_ACM_HOST_DEVICE_DISCONNECTED (USB_HOST_CLIENT_EVENT_DEV_GONE).
+        ESP_LOGD(TAG, "CDC error %d (ignored)", event->data.error);
         break;
+
+    case CDC_ACM_HOST_SERIAL_STATE:
+        ESP_LOGD(TAG, "CDC serial state: 0x%02X", event->data.serial_state.val);
+        break;
+
     default:
         break;
+    }
+}
+
+// ==============================================================
+// new_dev_cb: called from USB Host context when a device appears
+// NOTE: Cannot open CDC device here; must signal vcp_task instead.
+// ==============================================================
+
+static void usb_new_dev_cb(usb_device_handle_t usb_dev)
+{
+    // Just wake up vcp_task; it will open the device
+    if (s_dev_present_sem) {
+        xSemaphoreGive(s_dev_present_sem);
     }
 }
 
@@ -416,7 +443,6 @@ static void usb_lib_task(void *arg)
     }
     ESP_LOGI(TAG, "USB host installed");
 
-    // Notify caller that host is ready
     if (notify_target) {
         xTaskNotifyGive(notify_target);
     }
@@ -449,7 +475,6 @@ static void usb_lib_task(void *arg)
 
 static void vcp_task(void *arg)
 {
-    // ---- Start USB host lib ----
     screen_log("[USB] Starting USB host...\n");
     ESP_LOGI(TAG, "Starting USB host lib task");
 
@@ -468,12 +493,12 @@ static void vcp_task(void *arg)
         esp_restart();
     }
 
-    // ---- Install CDC-ACM driver ----
+    // ---- Install CDC-ACM driver with new_dev_cb ----
     const cdc_acm_host_driver_config_t driver_config = {
         .driver_task_stack_size = 4096,
         .driver_task_priority   = USB_CDC_PRIORITY,
         .xCoreID                = 0,
-        .new_dev_cb             = NULL,
+        .new_dev_cb             = usb_new_dev_cb,  // Notified when any USB device appears
     };
     esp_err_t err = cdc_acm_host_install(&driver_config);
     if (err != ESP_OK) {
@@ -506,87 +531,78 @@ static void vcp_task(void *arg)
         }
 
         screen_log("[USB] Waiting for device...\n");
-        ESP_LOGI(TAG, "Waiting for VCP device...");
+        ESP_LOGI(TAG, "Waiting for USB device...");
 
-        // Device config for VCP drivers (FTDI/CP210x/CH34x):
-        //   in_buffer_size=0  -> use endpoint MPS (required for FTDI)
-        //   out_buffer_size=512 -> TX buffer
-        //   connection_timeout_ms=5000 -> 5s timeout, then try standard CDC
-        cdc_acm_host_device_config_t dev_config = {};
-        dev_config.connection_timeout_ms = 5000;
-        dev_config.out_buffer_size       = 512;
-        dev_config.in_buffer_size        = 0;   // 0 = use EP MPS (critical for FTDI)
-        dev_config.user_arg              = NULL;
-        dev_config.event_cb              = usb_event_cb;
-        dev_config.data_cb               = usb_rx_cb;
+        // Wait for new_dev_cb to signal that a device has appeared
+        // (or check immediately if a device is already present)
+        xSemaphoreTake(s_dev_present_sem, portMAX_DELAY);
 
+        // Small delay to let the USB host enumerate the device fully
+        vTaskDelay(pdMS_TO_TICKS(200));
+
+        // Clear disconnect bit before opening
         xEventGroupClearBits(s_usb_event_group, USB_DEV_DISCONNECTED_BIT);
 
+        // ---- Try to open as VCP (FTDI/CP210x/CH34x) first ----
+        // Use connection_timeout_ms=0 so open() returns immediately if device
+        // is not a VCP type (no 5-second wait that causes spurious errors).
         CdcAcmDevice *dev = nullptr;
-        bool is_standard_cdc = false;
+        bool is_vcp = false;
 
-        // --- Try 1: VCP drivers (FTDI, CP210x, CH34x) ---
-        dev = VCP::open(&dev_config);
+        {
+            cdc_acm_host_device_config_t vcp_cfg = {};
+            vcp_cfg.connection_timeout_ms = 100;   // Short timeout: device is already present
+            vcp_cfg.out_buffer_size       = 512;
+            vcp_cfg.in_buffer_size        = 512;
+            vcp_cfg.event_cb              = usb_event_cb;
+            vcp_cfg.data_cb               = usb_rx_cb;
+            vcp_cfg.user_arg              = NULL;
 
+            CdcAcmDevice *vcp_dev = VCP::open(&vcp_cfg);
+            if (vcp_dev != nullptr) {
+                dev    = vcp_dev;
+                is_vcp = true;
+                ESP_LOGI(TAG, "VCP device opened (FTDI/CP210x/CH34x)");
+            }
+        }
+
+        // ---- If not VCP, try standard CDC-ACM (e.g. Raspberry Pi) ----
         if (dev == nullptr) {
-            // --- Try 2: Standard CDC-ACM (e.g. Raspberry Pi USB gadget) ---
-            ESP_LOGI(TAG, "VCP::open timed out, trying standard CDC-ACM...");
-            screen_log("[USB] Trying standard CDC-ACM...\n");
-
-            // Use CdcAcmDevice::open() directly with open_config
-            cdc_acm_host_open_config_t open_cfg = {};
-            open_cfg.vid                   = CDC_HOST_ANY_VID;
-            open_cfg.pid                   = CDC_HOST_ANY_PID;
-            open_cfg.interface_idx         = 0;
-            open_cfg.dev_addr              = CDC_HOST_ANY_DEV_ADDR;
-            open_cfg.connection_timeout_ms = 5000;
-            open_cfg.out_buffer_size       = 512;
-            open_cfg.in_buffer_size        = 512;  // Must be non-zero to allocate RX buffer
-            open_cfg.event_cb              = usb_event_cb;
-            open_cfg.data_cb               = usb_rx_cb;
-            open_cfg.user_arg              = NULL;
+            cdc_acm_host_open_config_t cdc_cfg = {};
+            cdc_cfg.vid                   = CDC_HOST_ANY_VID;
+            cdc_cfg.pid                   = CDC_HOST_ANY_PID;
+            cdc_cfg.interface_idx         = 0;
+            cdc_cfg.dev_addr              = CDC_HOST_ANY_DEV_ADDR;
+            cdc_cfg.connection_timeout_ms = 1000;  // Device is present; short timeout
+            cdc_cfg.out_buffer_size       = 512;
+            cdc_cfg.in_buffer_size        = 512;
+            cdc_cfg.event_cb              = usb_event_cb;
+            cdc_cfg.data_cb               = usb_rx_cb;
+            cdc_cfg.user_arg              = NULL;
 
             CdcAcmDevice *cdc_dev = new CdcAcmDevice();
-            if (cdc_dev != nullptr) {
-                err = cdc_dev->open(&open_cfg);
-                if (err == ESP_OK) {
-                    dev = cdc_dev;
-                    is_standard_cdc = true;
-                    ESP_LOGI(TAG, "Standard CDC-ACM device opened");
-                    screen_log("[USB] Standard CDC-ACM opened\n");
-                } else {
-                    ESP_LOGE(TAG, "Standard CDC-ACM open failed: %s", esp_err_to_name(err));
-                    delete cdc_dev;
-                }
+            err = cdc_dev->open(&cdc_cfg);
+            if (err == ESP_OK) {
+                dev = cdc_dev;
+                ESP_LOGI(TAG, "Standard CDC-ACM device opened");
+            } else {
+                ESP_LOGE(TAG, "CDC-ACM open failed: %s", esp_err_to_name(err));
+                delete cdc_dev;
             }
         }
 
         if (dev == nullptr) {
-            // Both failed: check if lib stopped
-            bits = xEventGroupGetBits(s_usb_event_group);
-            if (bits & USB_LIB_STOPPED_BIT) {
-                screen_log("[USB] Host stopped. Rebooting...\n");
-                vTaskDelay(pdMS_TO_TICKS(2000));
-                esp_restart();
-            }
-            // Normal timeout: retry
+            // Could not open: wait a bit and retry (semaphore may fire again on reconnect)
+            screen_log("[USB] Open failed, retrying...\n");
             vTaskDelay(pdMS_TO_TICKS(500));
             continue;
         }
 
         // ---- Device connected ----
-        // IMPORTANT: Clear DISCONNECTED_BIT here, because VCP::open() timeout
-        // may have triggered usb_event_cb(CDC_ACM_HOST_ERROR) internally,
-        // setting the bit BEFORE our open() succeeded. If we don't clear it,
-        // xEventGroupWaitBits() below returns immediately and we disconnect.
-        xEventGroupClearBits(s_usb_event_group, USB_DEV_DISCONNECTED_BIT);
-
-        // Set line coding and control line state ONLY for VCP devices (FTDI/CP210x/CH34x).
-        // Standard CDC-ACM devices (e.g. Raspberry Pi USB gadget) do NOT support
-        // SET_LINE_CODING or SET_CONTROL_LINE_STATE - they respond with STALL,
-        // which the cdc_acm driver then reports as CDC_ACM_HOST_ERROR asynchronously,
-        // causing an immediate disconnect even after open() succeeded.
-        if (!is_standard_cdc) {
+        // Set line coding only for VCP devices (FTDI/CP210x/CH34x).
+        // Standard CDC-ACM devices (Raspberry Pi) do NOT support SET_LINE_CODING
+        // and respond with STALL.
+        if (is_vcp) {
             cdc_acm_line_coding_t line_coding = {
                 .dwDTERate   = s_baud_rate,
                 .bCharFormat = 0,
@@ -601,16 +617,14 @@ static void vcp_task(void *arg)
             if (err != ESP_OK) {
                 ESP_LOGW(TAG, "set_control_line_state: %s (ignored)", esp_err_to_name(err));
             }
-        } else {
-            ESP_LOGI(TAG, "Standard CDC-ACM: skipping line_coding_set and set_control_line_state");
         }
 
         s_vcp_dev       = dev;
         s_usb_connected = true;
         screen_log("[USB] Connected! Baud:%"PRIu32" %s\n",
-                   s_baud_rate, is_standard_cdc ? "(CDC)" : "(VCP)");
-        ESP_LOGI(TAG, "VCP connected, baud=%"PRIu32" %s",
-                 s_baud_rate, is_standard_cdc ? "(CDC)" : "(VCP)");
+                   s_baud_rate, is_vcp ? "(VCP)" : "(CDC)");
+        ESP_LOGI(TAG, "USB connected, baud=%"PRIu32" %s",
+                 s_baud_rate, is_vcp ? "(VCP)" : "(CDC)");
         update_status_bar();
 
         // Wait for disconnect or lib-stopped
@@ -622,7 +636,7 @@ static void vcp_task(void *arg)
         s_usb_connected = false;
         delete dev;
         screen_log("[USB] Disconnected.\n");
-        ESP_LOGI(TAG, "VCP device closed");
+        ESP_LOGI(TAG, "USB device closed");
         update_status_bar();
 
         // Check if lib stopped (fatal -> reboot)
@@ -672,11 +686,12 @@ extern "C" void app_main(void)
     term_put_string("Initializing USB host...\n");
     term_refresh_display();
 
-    // ---- Queues and event groups ----
+    // ---- Queues, semaphores, and event groups ----
     s_key_queue        = xQueueCreate(32, sizeof(key_event_msg_t));
     s_usb_rx_queue     = xQueueCreate(64, sizeof(usb_rx_msg_t));
     s_screen_log_queue = xQueueCreate(32, sizeof(screen_log_msg_t));
     s_usb_event_group  = xEventGroupCreate();
+    s_dev_present_sem  = xSemaphoreCreateCounting(8, 0);
 
     // ---- VCP task ----
     xTaskCreate(vcp_task, "vcp_task", 8192, NULL, USB_VCP_PRIORITY, NULL);
@@ -776,7 +791,7 @@ extern "C" void app_main(void)
                 }
                 // Other Ctrl+key: send as control character to USB
                 if (s_usb_connected && s_vcp_dev && k >= '@' && k <= '_') {
-                    uint8_t ctrl_char = k - '@';
+                    uint8_t ctrl_char = (uint8_t)(k - '@');
                     s_vcp_dev->tx_blocking(&ctrl_char, 1, 1000);
                 }
                 continue;
@@ -787,7 +802,10 @@ extern "C" void app_main(void)
             if (strcmp(key_msg.str, "enter") == 0) {
                 if (s_usb_connected && s_vcp_dev) {
                     uint8_t lf = '\n';
-                    s_vcp_dev->tx_blocking(&lf, 1, 1000);
+                    esp_err_t tx_err = s_vcp_dev->tx_blocking(&lf, 1, 1000);
+                    if (tx_err != ESP_OK) {
+                        ESP_LOGW(TAG, "TX error: %s", esp_err_to_name(tx_err));
+                    }
                 }
                 term_put_char('\n');
                 term_refresh_display();
