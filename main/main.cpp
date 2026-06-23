@@ -470,6 +470,58 @@ static void usb_lib_task(void *arg)
 }
 
 // ==============================================================
+// USB Host restart helper
+// ==============================================================
+
+// Restart USB host library and CDC-ACM driver.
+// Called when USB_LIB_STOPPED_BIT is set (e.g. after CHECK_CONFIG FAILED
+// causes enumeration cancel -> NO_CLIENTS -> usb_lib_task exit).
+static esp_err_t usb_host_restart(void)
+{
+    ESP_LOGI(TAG, "Restarting USB host...");
+    screen_log("[USB] Restarting host...\n");
+
+    // Uninstall CDC-ACM driver first (ignore errors)
+    cdc_acm_host_uninstall();
+
+    // Clear bits and restart usb_lib_task
+    xEventGroupClearBits(s_usb_event_group, USB_LIB_STOPPED_BIT | USB_DEV_DISCONNECTED_BIT);
+
+    // Drain the semaphore (discard stale signals)
+    while (xSemaphoreTake(s_dev_present_sem, 0) == pdTRUE) {}
+
+    xTaskCreate(usb_lib_task, "usb_lib", 4096,
+                xTaskGetCurrentTaskHandle(),
+                USB_HOST_PRIORITY, NULL);
+
+    uint32_t notified = ulTaskNotifyTake(pdTRUE, pdMS_TO_TICKS(5000));
+    if (notified == 0) {
+        ESP_LOGE(TAG, "USB host restart timeout, rebooting");
+        screen_log("[USB] Restart timeout! Rebooting...\n");
+        vTaskDelay(pdMS_TO_TICKS(2000));
+        esp_restart();
+    }
+
+    const cdc_acm_host_driver_config_t driver_config = {
+        .driver_task_stack_size = 4096,
+        .driver_task_priority   = USB_CDC_PRIORITY,
+        .xCoreID                = 0,
+        .new_dev_cb             = usb_new_dev_cb,
+    };
+    esp_err_t err = cdc_acm_host_install(&driver_config);
+    if (err != ESP_OK) {
+        ESP_LOGE(TAG, "cdc_acm_host_install failed: %s", esp_err_to_name(err));
+        screen_log("[USB] CDC driver install failed! Rebooting...\n");
+        vTaskDelay(pdMS_TO_TICKS(2000));
+        esp_restart();
+    }
+
+    ESP_LOGI(TAG, "USB host restarted OK");
+    screen_log("[USB] Host restarted.\n");
+    return ESP_OK;
+}
+
+// ==============================================================
 // VCP Connection Task
 // ==============================================================
 
@@ -521,21 +573,34 @@ static void vcp_task(void *arg)
 
     // ---- Connection loop ----
     while (1) {
-        // Check if USB lib has stopped (fatal error -> reboot)
+        // Check if USB lib has stopped (enumeration failure -> restart host)
         EventBits_t bits = xEventGroupGetBits(s_usb_event_group);
         if (bits & USB_LIB_STOPPED_BIT) {
-            screen_log("[USB] Host stopped. Rebooting...\n");
-            ESP_LOGE(TAG, "USB lib stopped unexpectedly, rebooting");
-            vTaskDelay(pdMS_TO_TICKS(2000));
-            esp_restart();
+            // USB host stopped (e.g. CHECK_CONFIG FAILED after enumeration cancel).
+            // Restart the host instead of rebooting so we can retry automatically.
+            xEventGroupClearBits(s_usb_event_group, USB_LIB_STOPPED_BIT);
+            vTaskDelay(pdMS_TO_TICKS(1000));
+            usb_host_restart();
+            continue;
         }
 
         screen_log("[USB] Waiting for device...\n");
         ESP_LOGI(TAG, "Waiting for USB device...");
 
-        // Wait for new_dev_cb to signal that a device has appeared
-        // (or check immediately if a device is already present)
-        xSemaphoreTake(s_dev_present_sem, portMAX_DELAY);
+        // Wait for new_dev_cb to signal that a device has appeared.
+        // Use a timeout so we can periodically check USB_LIB_STOPPED_BIT
+        // (which is set when enumeration fails and usb_lib_task exits).
+        BaseType_t sem_taken = xSemaphoreTake(s_dev_present_sem, pdMS_TO_TICKS(2000));
+        if (sem_taken != pdTRUE) {
+            // Timeout: check if USB lib stopped (CHECK_CONFIG FAILED etc.)
+            bits = xEventGroupGetBits(s_usb_event_group);
+            if (bits & USB_LIB_STOPPED_BIT) {
+                xEventGroupClearBits(s_usb_event_group, USB_LIB_STOPPED_BIT);
+                vTaskDelay(pdMS_TO_TICKS(1000));
+                usb_host_restart();
+            }
+            continue;
+        }
 
         // Small delay to let the USB host enumerate the device fully
         vTaskDelay(pdMS_TO_TICKS(200));
@@ -544,7 +609,7 @@ static void vcp_task(void *arg)
         xEventGroupClearBits(s_usb_event_group, USB_DEV_DISCONNECTED_BIT);
 
         // ---- Try to open as VCP (FTDI/CP210x/CH34x) first ----
-        // Use connection_timeout_ms=0 so open() returns immediately if device
+        // Use connection_timeout_ms=100 so open() returns quickly if device
         // is not a VCP type (no 5-second wait that causes spurious errors).
         CdcAcmDevice *dev = nullptr;
         bool is_vcp = false;
@@ -592,7 +657,7 @@ static void vcp_task(void *arg)
         }
 
         if (dev == nullptr) {
-            // Could not open: wait a bit and retry (semaphore may fire again on reconnect)
+            // Could not open: wait a bit and retry
             screen_log("[USB] Open failed, retrying...\n");
             vTaskDelay(pdMS_TO_TICKS(500));
             continue;
@@ -639,12 +704,12 @@ static void vcp_task(void *arg)
         ESP_LOGI(TAG, "USB device closed");
         update_status_bar();
 
-        // Check if lib stopped (fatal -> reboot)
+        // Check if lib stopped after disconnect (restart host)
         bits = xEventGroupGetBits(s_usb_event_group);
         if (bits & USB_LIB_STOPPED_BIT) {
-            screen_log("[USB] Host stopped. Rebooting...\n");
-            vTaskDelay(pdMS_TO_TICKS(2000));
-            esp_restart();
+            xEventGroupClearBits(s_usb_event_group, USB_LIB_STOPPED_BIT);
+            vTaskDelay(pdMS_TO_TICKS(1000));
+            usb_host_restart();
         }
 
         vTaskDelay(pdMS_TO_TICKS(500));
