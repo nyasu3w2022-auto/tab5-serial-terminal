@@ -451,21 +451,27 @@ static void usb_lib_task(void *arg)
         uint32_t event_flags;
         usb_host_lib_handle_events(portMAX_DELAY, &event_flags);
         if (event_flags & USB_HOST_LIB_EVENT_FLAGS_NO_CLIENTS) {
-            if (ESP_OK == usb_host_device_free_all()) {
-                break;
+            // Notify vcp_task immediately so it can restart the host.
+            // This fires after enumeration failure (CHECK_CONFIG FAILED) or
+            // after all CDC-ACM clients have been removed.
+            ESP_LOGI(TAG, "USB lib: no clients, signalling stop");
+            if (s_usb_event_group) {
+                xEventGroupSetBits(s_usb_event_group, USB_LIB_STOPPED_BIT);
             }
+            usb_host_device_free_all();
+            break;
         }
         if (event_flags & USB_HOST_LIB_EVENT_FLAGS_ALL_FREE) {
+            ESP_LOGI(TAG, "USB lib: all free, signalling stop");
+            if (s_usb_event_group) {
+                xEventGroupSetBits(s_usb_event_group, USB_LIB_STOPPED_BIT);
+            }
             break;
         }
     }
 
     ESP_LOGI(TAG, "USB lib task ending, uninstalling host");
     usb_host_uninstall();
-
-    if (s_usb_event_group) {
-        xEventGroupSetBits(s_usb_event_group, USB_LIB_STOPPED_BIT);
-    }
     vTaskDelete(NULL);
 }
 
