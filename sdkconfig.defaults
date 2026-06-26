@@ -42,3 +42,6 @@ CONFIG_COMPILER_CXX_EXCEPTIONS_EMG_POOL_SIZE=0
 # USB Host
 CONFIG_USB_HOST_TASK_PRIORITY=20
 CONFIG_USB_HOST_HW_BUFFER_BIAS_BALANCED=y
+# Enable enumeration filter callback so we can set bConfigurationValue=2
+# for Raspberry Pi g_serial gadget which uses config #2 (not the default #1)
+CONFIG_USB_HOST_ENABLE_ENUM_FILTER_CALLBACK=y

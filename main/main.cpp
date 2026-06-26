@@ -422,6 +422,34 @@ static void usb_new_dev_cb(usb_device_handle_t usb_dev)
 // USB Host Library Task (daemon)
 // ==============================================================
 
+/**
+ * @brief Enumeration filter callback
+ *
+ * Raspberry Pi g_serial gadget exposes its CDC-ACM function under
+ * configuration #2 ("CDC ACM config"), NOT the default configuration #1.
+ * ESP-IDF's USB host enumerator always tries SET_CONFIGURATION(1) unless
+ * told otherwise, which causes the Pi to STALL and enumeration to fail
+ * with "CHECK_CONFIG FAILED".
+ *
+ * This callback reads bNumConfigurations from the device descriptor and,
+ * when the device has exactly 2 configurations, selects configuration #2
+ * so that SET_CONFIGURATION(2) is sent instead.
+ *
+ * For single-configuration devices (bNumConfigurations == 1) the default
+ * value of 1 is left unchanged.
+ */
+static bool usb_enum_filter_cb(const usb_device_desc_t *dev_desc,
+                               uint8_t *bConfigurationValue)
+{
+    if (dev_desc->bNumConfigurations >= 2) {
+        // Use the last configuration; for Pi g_serial this is config #2
+        *bConfigurationValue = dev_desc->bNumConfigurations;
+        ESP_LOGI(TAG, "enum_filter: bNumConfigs=%d, selecting config #%d",
+                 dev_desc->bNumConfigurations, *bConfigurationValue);
+    }
+    return true; // always proceed with enumeration
+}
+
 static void usb_lib_task(void *arg)
 {
     TaskHandle_t notify_target = (TaskHandle_t)arg;
@@ -430,6 +458,7 @@ static void usb_lib_task(void *arg)
     const usb_host_config_t host_config = {
         .skip_phy_setup = false,
         .intr_flags     = ESP_INTR_FLAG_LOWMED,
+        .enum_filter_cb = usb_enum_filter_cb,
     };
 
     esp_err_t err = usb_host_install(&host_config);
