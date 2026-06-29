@@ -425,27 +425,45 @@ static void usb_new_dev_cb(usb_device_handle_t usb_dev)
 /**
  * @brief Enumeration filter callback
  *
- * Raspberry Pi g_serial gadget exposes its CDC-ACM function under
- * configuration #2 ("CDC ACM config"), NOT the default configuration #1.
+ * Raspberry Pi g_serial gadget (loaded with use_acm=1, the default) exposes
+ * its CDC-ACM function under configuration #2 ("CDC ACM config").
+ * This is because the Linux g_serial driver hard-codes bConfigurationValue=2
+ * for CDC-ACM mode, even though bNumConfigurations=1 (only one configuration
+ * exists, but its value is 2).
+ *
  * ESP-IDF's USB host enumerator always tries SET_CONFIGURATION(1) unless
- * told otherwise, which causes the Pi to STALL and enumeration to fail
- * with "CHECK_CONFIG FAILED".
+ * told otherwise via this callback, which causes the Pi to STALL and
+ * enumeration to fail with "CHECK_CONFIG FAILED".
  *
- * This callback reads bNumConfigurations from the device descriptor and,
- * when the device has exactly 2 configurations, selects configuration #2
- * so that SET_CONFIGURATION(2) is sent instead.
+ * We identify the Pi g_serial gadget by its VID:PID (0x0525:0xa4a7) and
+ * override bConfigurationValue to 2.
  *
- * For single-configuration devices (bNumConfigurations == 1) the default
- * value of 1 is left unchanged.
+ * NOTE: ESP-IDF's enum.c normally rejects bConfigurationValue > bNumConfigurations.
+ * That check must be patched out in:
+ *   components/usb/enum.c  select_active_configuration()
+ * Change:
+ *   if ((bConfigurationValue == 0) || (bConfigurationValue > dev_desc->bNumConfigurations))
+ * to:
+ *   if (bConfigurationValue == 0)
  */
+#define RPI_G_SERIAL_VID  0x0525u
+#define RPI_G_SERIAL_PID  0xa4a7u
+
 static bool usb_enum_filter_cb(const usb_device_desc_t *dev_desc,
                                uint8_t *bConfigurationValue)
 {
-    if (dev_desc->bNumConfigurations >= 2) {
-        // Use the last configuration; for Pi g_serial this is config #2
-        *bConfigurationValue = dev_desc->bNumConfigurations;
-        ESP_LOGI(TAG, "enum_filter: bNumConfigs=%d, selecting config #%d",
-                 dev_desc->bNumConfigurations, *bConfigurationValue);
+    uint16_t vid = dev_desc->idVendor;
+    uint16_t pid = dev_desc->idProduct;
+
+    if (vid == RPI_G_SERIAL_VID && pid == RPI_G_SERIAL_PID) {
+        // Raspberry Pi g_serial CDC-ACM: bConfigurationValue is 2
+        // even though bNumConfigurations == 1.
+        *bConfigurationValue = 2;
+        ESP_LOGI(TAG, "enum_filter: Raspberry Pi g_serial detected (VID=%04x PID=%04x), selecting config #2",
+                 vid, pid);
+    } else {
+        ESP_LOGD(TAG, "enum_filter: VID=%04x PID=%04x bNumConfigs=%d, using default config #%d",
+                 vid, pid, dev_desc->bNumConfigurations, *bConfigurationValue);
     }
     return true; // always proceed with enumeration
 }
