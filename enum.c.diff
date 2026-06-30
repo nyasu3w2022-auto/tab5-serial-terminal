@@ -1,0 +1,52 @@
+*** enum.c.original	2026-05-11 22:24:37.215744700 +0900
+--- enum.c	2026-06-30 11:10:48.102594400 +0900
+***************
+*** 127,132 ****
+--- 127,133 ----
+      uint8_t iSerialNumber;          /**< Index of the Serial Number string descriptor */
+      uint8_t str_desc_bLength;       /**< Saved bLength from getting a short string descriptor */
+      uint8_t bConfigurationValue;    /**< Device's current configuration number */
++     uint8_t bNumConfigurations;   // ← この行を追加
+  } enum_device_params_t;
+  
+  typedef struct {
+***************
+*** 263,269 ****
+      }
+  
+      // Set configuration descriptor
+!     if ((bConfigurationValue == 0) || (bConfigurationValue > dev_desc->bNumConfigurations)) {
+          ESP_LOGE(ENUM_TAG, "Invalid bConfigurationValue (%d) provided by user, using default", bConfigurationValue);
+          bConfigurationValue = ENUM_DEFAULT_CONFIGURATION_VALUE;
+      }
+--- 264,271 ----
+      }
+  
+      // Set configuration descriptor
+!     if (bConfigurationValue == 0) {
+!     //if ((bConfigurationValue == 0) || (bConfigurationValue > dev_desc->bNumConfigurations)) {
+          ESP_LOGE(ENUM_TAG, "Invalid bConfigurationValue (%d) provided by user, using default", bConfigurationValue);
+          bConfigurationValue = ENUM_DEFAULT_CONFIGURATION_VALUE;
+      }
+***************
+*** 342,347 ****
+--- 344,352 ----
+      uint16_t wTotalLength = p_enum_driver->single_thread.dev_params.wTotalLength;
+      uint8_t bConfigurationValue = p_enum_driver->single_thread.dev_params.bConfigurationValue;
+      uint8_t desc_index = get_configuration_descriptor_index(bConfigurationValue);
++ if (desc_index >= p_enum_driver->single_thread.dev_params.bNumConfigurations) {
++     desc_index = p_enum_driver->single_thread.dev_params.bNumConfigurations - 1;  // ← この行を追加
++ }
+  
+      switch (stage) {
+      case ENUM_STAGE_GET_SHORT_DEV_DESC: {
+***************
+*** 516,521 ****
+--- 521,527 ----
+      p_enum_driver->single_thread.dev_params.iManufacturer = dev_desc->iManufacturer;
+      p_enum_driver->single_thread.dev_params.iProduct = dev_desc->iProduct;
+      p_enum_driver->single_thread.dev_params.iSerialNumber = dev_desc->iSerialNumber;
++     p_enum_driver->single_thread.dev_params.bNumConfigurations = dev_desc->bNumConfigurations;  // ← この行を追加
+  
+      // Device has more than one configuration
+      if (dev_desc->bNumConfigurations > 1) {
