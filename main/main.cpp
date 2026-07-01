@@ -494,31 +494,53 @@ static void usb_lib_task(void *arg)
         xTaskNotifyGive(notify_target);
     }
 
+    bool no_clients_seen = false;
+    TickType_t no_clients_tick = 0;
+
     while (1) {
-        uint32_t event_flags;
-        usb_host_lib_handle_events(portMAX_DELAY, &event_flags);
-        if (event_flags & USB_HOST_LIB_EVENT_FLAGS_NO_CLIENTS) {
-            // Notify vcp_task immediately so it can restart the host.
-            // This fires after enumeration failure (CHECK_CONFIG FAILED) or
-            // after all CDC-ACM clients have been removed.
-            ESP_LOGI(TAG, "USB lib: no clients, signalling stop");
-            if (s_usb_event_group) {
-                xEventGroupSetBits(s_usb_event_group, USB_LIB_STOPPED_BIT);
+        // After NO_CLIENTS, wait at most 2s for ALL_FREE before forcing exit.
+        TickType_t timeout = portMAX_DELAY;
+        if (no_clients_seen) {
+            TickType_t elapsed = xTaskGetTickCount() - no_clients_tick;
+            TickType_t limit   = pdMS_TO_TICKS(2000);
+            if (elapsed >= limit) {
+                ESP_LOGW(TAG, "USB lib: ALL_FREE timeout after NO_CLIENTS, forcing exit");
+                break;
             }
-            usb_host_device_free_all();
+            timeout = limit - elapsed;
+        }
+
+        uint32_t event_flags;
+        esp_err_t ev_err = usb_host_lib_handle_events(timeout, &event_flags);
+        if (ev_err == ESP_ERR_TIMEOUT) {
+            // Timed out waiting for ALL_FREE after NO_CLIENTS
+            ESP_LOGW(TAG, "USB lib: event timeout, forcing exit");
             break;
         }
+        if (event_flags & USB_HOST_LIB_EVENT_FLAGS_NO_CLIENTS) {
+            // All CDC-ACM clients removed (after disconnect or enum failure).
+            // Free devices and let the loop continue until ALL_FREE.
+            ESP_LOGI(TAG, "USB lib: no clients, freeing devices");
+            usb_host_device_free_all();
+            no_clients_seen = true;
+            no_clients_tick = xTaskGetTickCount();
+            // Don't break yet; wait for ALL_FREE before uninstalling.
+        }
         if (event_flags & USB_HOST_LIB_EVENT_FLAGS_ALL_FREE) {
-            ESP_LOGI(TAG, "USB lib: all free, signalling stop");
-            if (s_usb_event_group) {
-                xEventGroupSetBits(s_usb_event_group, USB_LIB_STOPPED_BIT);
-            }
+            // All devices freed. Safe to uninstall now.
+            // USB_LIB_STOPPED_BIT will be set AFTER usb_host_uninstall() below.
+            ESP_LOGI(TAG, "USB lib: all free, exiting");
             break;
         }
     }
 
     ESP_LOGI(TAG, "USB lib task ending, uninstalling host");
     usb_host_uninstall();
+    // Signal AFTER uninstall completes so usb_host_restart() can safely call
+    // usb_host_install() without hitting ESP_ERR_INVALID_STATE.
+    if (s_usb_event_group) {
+        xEventGroupSetBits(s_usb_event_group, USB_LIB_STOPPED_BIT);
+    }
     vTaskDelete(NULL);
 }
 
