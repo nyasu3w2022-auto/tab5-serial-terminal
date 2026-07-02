@@ -473,15 +473,29 @@ static void usb_lib_task(void *arg)
     TaskHandle_t notify_target = (TaskHandle_t)arg;
     ESP_LOGI(TAG, "USB lib task started");
 
-    const usb_host_config_t host_config = {
-        .skip_phy_setup = false,
-        .intr_flags     = ESP_INTR_FLAG_LOWMED,
-        .enum_filter_cb = usb_enum_filter_cb,
-    };
+    // usb_host_install() may return ESP_ERR_INVALID_STATE immediately after
+    // a previous usb_host_uninstall() if the internal driver has not fully
+    // torn down yet.  Retry up to 10 times with 200 ms intervals.
+    esp_err_t err = ESP_ERR_INVALID_STATE;
+    for (int attempt = 0; attempt < 10 && err != ESP_OK; attempt++) {
+        if (attempt > 0) {
+            ESP_LOGW(TAG, "usb_host_install retry %d/10...", attempt + 1);
+            vTaskDelay(pdMS_TO_TICKS(200));
+        }
+        const usb_host_config_t host_config = {
+            .skip_phy_setup = false,
+            .intr_flags     = ESP_INTR_FLAG_LOWMED,
+            .enum_filter_cb = usb_enum_filter_cb,
+        };
+        err = usb_host_install(&host_config);
+        if (err != ESP_OK) {
+            ESP_LOGW(TAG, "usb_host_install attempt %d failed: %s",
+                     attempt + 1, esp_err_to_name(err));
+        }
+    }
 
-    esp_err_t err = usb_host_install(&host_config);
     if (err != ESP_OK) {
-        ESP_LOGE(TAG, "usb_host_install failed: %s", esp_err_to_name(err));
+        ESP_LOGE(TAG, "usb_host_install failed after retries: %s", esp_err_to_name(err));
         if (s_usb_event_group) {
             xEventGroupSetBits(s_usb_event_group, USB_LIB_STOPPED_BIT);
         }
@@ -556,20 +570,26 @@ static esp_err_t usb_host_restart(void)
     ESP_LOGI(TAG, "Restarting USB host...");
     screen_log("[USB] Restarting host...\n");
 
-    // Uninstall CDC-ACM driver first (ignore errors)
+    // Uninstall CDC-ACM driver first (ignore errors).
+    // This deregisters the USB host client so usb_host_install() can succeed.
     cdc_acm_host_uninstall();
 
-    // Clear bits and restart usb_lib_task
-    xEventGroupClearBits(s_usb_event_group, USB_LIB_STOPPED_BIT | USB_DEV_DISCONNECTED_BIT);
+    // Give the USB host driver time to fully clean up internal state after
+    // usb_host_uninstall() and cdc_acm_host_uninstall().
+    vTaskDelay(pdMS_TO_TICKS(500));
 
-    // Drain the semaphore (discard stale signals)
+    // Clear bits and drain stale semaphore signals
+    xEventGroupClearBits(s_usb_event_group, USB_LIB_STOPPED_BIT | USB_DEV_DISCONNECTED_BIT);
     while (xSemaphoreTake(s_dev_present_sem, 0) == pdTRUE) {}
 
+    // Start a new usb_lib_task.  It will call usb_host_install() internally
+    // with a retry loop and notify us when the host is ready.
     xTaskCreate(usb_lib_task, "usb_lib", 4096,
                 xTaskGetCurrentTaskHandle(),
                 USB_HOST_PRIORITY, NULL);
 
-    uint32_t notified = ulTaskNotifyTake(pdTRUE, pdMS_TO_TICKS(5000));
+    // Wait up to 10 s for usb_lib_task to finish installing the host
+    uint32_t notified = ulTaskNotifyTake(pdTRUE, pdMS_TO_TICKS(10000));
     if (notified == 0) {
         ESP_LOGE(TAG, "USB host restart timeout, rebooting");
         screen_log("[USB] Restart timeout! Rebooting...\n");
