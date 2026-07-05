@@ -9,6 +9,9 @@
  *  - Baud rate configurable via Ctrl+B
  *
  * Design:
+ *  - usb_lib_task runs permanently (never calls usb_host_uninstall).
+ *    When NO_CLIENTS is received it frees devices and keeps looping so
+ *    the next connection can be handled without reinstalling the host.
  *  - new_dev_cb detects device connection and signals vcp_task via semaphore
  *  - vcp_task opens the device immediately without polling/timeout loops
  *  - VCP::open() is NOT used (it has a mandatory 5s timeout that causes
@@ -100,9 +103,8 @@ static QueueHandle_t s_usb_rx_queue = NULL;
 // Semaphore: posted by new_dev_cb when a USB device appears
 static SemaphoreHandle_t s_dev_present_sem = NULL;
 
-// Event group for disconnect / lib-stopped
-#define USB_DEV_DISCONNECTED_BIT  BIT0
-#define USB_LIB_STOPPED_BIT       BIT1
+// Event group bits
+#define USB_DEV_DISCONNECTED_BIT  BIT0   // Set by usb_event_cb on device disconnect
 static EventGroupHandle_t s_usb_event_group = NULL;
 
 static TaskHandle_t s_main_task_handle = NULL;
@@ -473,32 +475,14 @@ static void usb_lib_task(void *arg)
     TaskHandle_t notify_target = (TaskHandle_t)arg;
     ESP_LOGI(TAG, "USB lib task started");
 
-    // usb_host_install() may return ESP_ERR_INVALID_STATE immediately after
-    // a previous usb_host_uninstall() if the internal driver has not fully
-    // torn down yet.  Retry up to 10 times with 200 ms intervals.
-    esp_err_t err = ESP_ERR_INVALID_STATE;
-    for (int attempt = 0; attempt < 10 && err != ESP_OK; attempt++) {
-        if (attempt > 0) {
-            ESP_LOGW(TAG, "usb_host_install retry %d/10...", attempt + 1);
-            vTaskDelay(pdMS_TO_TICKS(200));
-        }
-        const usb_host_config_t host_config = {
-            .skip_phy_setup = false,
-            .intr_flags     = ESP_INTR_FLAG_LOWMED,
-            .enum_filter_cb = usb_enum_filter_cb,
-        };
-        err = usb_host_install(&host_config);
-        if (err != ESP_OK) {
-            ESP_LOGW(TAG, "usb_host_install attempt %d failed: %s",
-                     attempt + 1, esp_err_to_name(err));
-        }
-    }
-
+    const usb_host_config_t host_config = {
+        .skip_phy_setup = false,
+        .intr_flags     = ESP_INTR_FLAG_LOWMED,
+        .enum_filter_cb = usb_enum_filter_cb,
+    };
+    esp_err_t err = usb_host_install(&host_config);
     if (err != ESP_OK) {
-        ESP_LOGE(TAG, "usb_host_install failed after retries: %s", esp_err_to_name(err));
-        if (s_usb_event_group) {
-            xEventGroupSetBits(s_usb_event_group, USB_LIB_STOPPED_BIT);
-        }
+        ESP_LOGE(TAG, "usb_host_install failed: %s", esp_err_to_name(err));
         vTaskDelete(NULL);
         return;
     }
@@ -508,113 +492,31 @@ static void usb_lib_task(void *arg)
         xTaskNotifyGive(notify_target);
     }
 
-    bool no_clients_seen = false;
-    TickType_t no_clients_tick = 0;
-
+    // Run forever: never call usb_host_uninstall().
+    // When NO_CLIENTS is received, free all devices and keep looping so
+    // the next device connection is handled without reinstalling the host.
+    // This avoids the ESP_ERR_INVALID_STATE problem that occurs when
+    // usb_host_install() is called too soon after usb_host_uninstall().
     while (1) {
-        // After NO_CLIENTS, wait at most 2s for ALL_FREE before forcing exit.
-        TickType_t timeout = portMAX_DELAY;
-        if (no_clients_seen) {
-            TickType_t elapsed = xTaskGetTickCount() - no_clients_tick;
-            TickType_t limit   = pdMS_TO_TICKS(2000);
-            if (elapsed >= limit) {
-                ESP_LOGW(TAG, "USB lib: ALL_FREE timeout after NO_CLIENTS, forcing exit");
-                break;
-            }
-            timeout = limit - elapsed;
-        }
-
         uint32_t event_flags;
-        esp_err_t ev_err = usb_host_lib_handle_events(timeout, &event_flags);
-        if (ev_err == ESP_ERR_TIMEOUT) {
-            // Timed out waiting for ALL_FREE after NO_CLIENTS
-            ESP_LOGW(TAG, "USB lib: event timeout, forcing exit");
-            break;
-        }
+        usb_host_lib_handle_events(portMAX_DELAY, &event_flags);
+
         if (event_flags & USB_HOST_LIB_EVENT_FLAGS_NO_CLIENTS) {
-            // All CDC-ACM clients removed (after disconnect or enum failure).
-            // Free devices and let the loop continue until ALL_FREE.
+            // All CDC-ACM clients removed (device disconnected or enum failed).
+            // Free devices so the host can accept the next connection.
             ESP_LOGI(TAG, "USB lib: no clients, freeing devices");
             usb_host_device_free_all();
-            no_clients_seen = true;
-            no_clients_tick = xTaskGetTickCount();
-            // Don't break yet; wait for ALL_FREE before uninstalling.
         }
         if (event_flags & USB_HOST_LIB_EVENT_FLAGS_ALL_FREE) {
-            // All devices freed. Safe to uninstall now.
-            // USB_LIB_STOPPED_BIT will be set AFTER usb_host_uninstall() below.
-            ESP_LOGI(TAG, "USB lib: all free, exiting");
-            break;
+            // All devices freed.  Keep running; do NOT uninstall.
+            ESP_LOGI(TAG, "USB lib: all devices free, waiting for next connection");
         }
     }
-
-    ESP_LOGI(TAG, "USB lib task ending, uninstalling host");
-    usb_host_uninstall();
-    // Signal AFTER uninstall completes so usb_host_restart() can safely call
-    // usb_host_install() without hitting ESP_ERR_INVALID_STATE.
-    if (s_usb_event_group) {
-        xEventGroupSetBits(s_usb_event_group, USB_LIB_STOPPED_BIT);
-    }
-    vTaskDelete(NULL);
+    // Never reached
 }
 
-// ==============================================================
-// USB Host restart helper
-// ==============================================================
-
-// Restart USB host library and CDC-ACM driver.
-// Called when USB_LIB_STOPPED_BIT is set (e.g. after CHECK_CONFIG FAILED
-// causes enumeration cancel -> NO_CLIENTS -> usb_lib_task exit).
-static esp_err_t usb_host_restart(void)
-{
-    ESP_LOGI(TAG, "Restarting USB host...");
-    screen_log("[USB] Restarting host...\n");
-
-    // Uninstall CDC-ACM driver first (ignore errors).
-    // This deregisters the USB host client so usb_host_install() can succeed.
-    cdc_acm_host_uninstall();
-
-    // Give the USB host driver time to fully clean up internal state after
-    // usb_host_uninstall() and cdc_acm_host_uninstall().
-    vTaskDelay(pdMS_TO_TICKS(500));
-
-    // Clear bits and drain stale semaphore signals
-    xEventGroupClearBits(s_usb_event_group, USB_LIB_STOPPED_BIT | USB_DEV_DISCONNECTED_BIT);
-    while (xSemaphoreTake(s_dev_present_sem, 0) == pdTRUE) {}
-
-    // Start a new usb_lib_task.  It will call usb_host_install() internally
-    // with a retry loop and notify us when the host is ready.
-    xTaskCreate(usb_lib_task, "usb_lib", 4096,
-                xTaskGetCurrentTaskHandle(),
-                USB_HOST_PRIORITY, NULL);
-
-    // Wait up to 10 s for usb_lib_task to finish installing the host
-    uint32_t notified = ulTaskNotifyTake(pdTRUE, pdMS_TO_TICKS(10000));
-    if (notified == 0) {
-        ESP_LOGE(TAG, "USB host restart timeout, rebooting");
-        screen_log("[USB] Restart timeout! Rebooting...\n");
-        vTaskDelay(pdMS_TO_TICKS(2000));
-        esp_restart();
-    }
-
-    const cdc_acm_host_driver_config_t driver_config = {
-        .driver_task_stack_size = 4096,
-        .driver_task_priority   = USB_CDC_PRIORITY,
-        .xCoreID                = 0,
-        .new_dev_cb             = usb_new_dev_cb,
-    };
-    esp_err_t err = cdc_acm_host_install(&driver_config);
-    if (err != ESP_OK) {
-        ESP_LOGE(TAG, "cdc_acm_host_install failed: %s", esp_err_to_name(err));
-        screen_log("[USB] CDC driver install failed! Rebooting...\n");
-        vTaskDelay(pdMS_TO_TICKS(2000));
-        esp_restart();
-    }
-
-    ESP_LOGI(TAG, "USB host restarted OK");
-    screen_log("[USB] Host restarted.\n");
-    return ESP_OK;
-}
+// usb_host_restart() has been removed.
+// usb_lib_task now runs permanently so no restart is needed.
 
 // ==============================================================
 // VCP Connection Task
@@ -625,7 +527,7 @@ static void vcp_task(void *arg)
     screen_log("[USB] Starting USB host...\n");
     ESP_LOGI(TAG, "Starting USB host lib task");
 
-    xEventGroupClearBits(s_usb_event_group, USB_LIB_STOPPED_BIT | USB_DEV_DISCONNECTED_BIT);
+    xEventGroupClearBits(s_usb_event_group, USB_DEV_DISCONNECTED_BIT);
 
     xTaskCreate(usb_lib_task, "usb_lib", 4096,
                 xTaskGetCurrentTaskHandle(),
@@ -667,35 +569,14 @@ static void vcp_task(void *arg)
     }
 
     // ---- Connection loop ----
+    // usb_lib_task runs permanently, so we only need to wait for a device
+    // to appear (via new_dev_cb semaphore) and open it.
     while (1) {
-        // Check if USB lib has stopped (enumeration failure -> restart host)
-        EventBits_t bits = xEventGroupGetBits(s_usb_event_group);
-        if (bits & USB_LIB_STOPPED_BIT) {
-            // USB host stopped (e.g. CHECK_CONFIG FAILED after enumeration cancel).
-            // Restart the host instead of rebooting so we can retry automatically.
-            xEventGroupClearBits(s_usb_event_group, USB_LIB_STOPPED_BIT);
-            vTaskDelay(pdMS_TO_TICKS(1000));
-            usb_host_restart();
-            continue;
-        }
-
         screen_log("[USB] Waiting for device...\n");
         ESP_LOGI(TAG, "Waiting for USB device...");
 
-        // Wait for new_dev_cb to signal that a device has appeared.
-        // Use a timeout so we can periodically check USB_LIB_STOPPED_BIT
-        // (which is set when enumeration fails and usb_lib_task exits).
-        BaseType_t sem_taken = xSemaphoreTake(s_dev_present_sem, pdMS_TO_TICKS(2000));
-        if (sem_taken != pdTRUE) {
-            // Timeout: check if USB lib stopped (CHECK_CONFIG FAILED etc.)
-            bits = xEventGroupGetBits(s_usb_event_group);
-            if (bits & USB_LIB_STOPPED_BIT) {
-                xEventGroupClearBits(s_usb_event_group, USB_LIB_STOPPED_BIT);
-                vTaskDelay(pdMS_TO_TICKS(1000));
-                usb_host_restart();
-            }
-            continue;
-        }
+        // Wait indefinitely for new_dev_cb to signal a device has appeared.
+        xSemaphoreTake(s_dev_present_sem, portMAX_DELAY);
 
         // Small delay to let the USB host enumerate the device fully
         vTaskDelay(pdMS_TO_TICKS(200));
@@ -787,9 +668,9 @@ static void vcp_task(void *arg)
                  s_baud_rate, is_vcp ? "(VCP)" : "(CDC)");
         update_status_bar();
 
-        // Wait for disconnect or lib-stopped
+        // Wait for device disconnect
         xEventGroupWaitBits(s_usb_event_group,
-                            USB_DEV_DISCONNECTED_BIT | USB_LIB_STOPPED_BIT,
+                            USB_DEV_DISCONNECTED_BIT,
                             pdTRUE, pdFALSE, portMAX_DELAY);
 
         s_vcp_dev       = nullptr;
@@ -799,14 +680,7 @@ static void vcp_task(void *arg)
         ESP_LOGI(TAG, "USB device closed");
         update_status_bar();
 
-        // Check if lib stopped after disconnect (restart host)
-        bits = xEventGroupGetBits(s_usb_event_group);
-        if (bits & USB_LIB_STOPPED_BIT) {
-            xEventGroupClearBits(s_usb_event_group, USB_LIB_STOPPED_BIT);
-            vTaskDelay(pdMS_TO_TICKS(1000));
-            usb_host_restart();
-        }
-
+        // Brief pause before looking for the next device
         vTaskDelay(pdMS_TO_TICKS(500));
     }
 }
