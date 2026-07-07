@@ -103,6 +103,10 @@ static QueueHandle_t s_usb_rx_queue = NULL;
 // Semaphore: posted by new_dev_cb when a USB device appears
 static SemaphoreHandle_t s_dev_present_sem = NULL;
 
+// VID/PID of the most recently detected USB device (set by new_dev_cb)
+static volatile uint16_t s_dev_vid = 0;
+static volatile uint16_t s_dev_pid = 0;
+
 // Event group bits
 #define USB_DEV_DISCONNECTED_BIT  BIT0   // Set by usb_event_cb on device disconnect
 static EventGroupHandle_t s_usb_event_group = NULL;
@@ -414,7 +418,17 @@ static void usb_event_cb(const cdc_acm_host_dev_event_data_t *event, void *user_
 
 static void usb_new_dev_cb(usb_device_handle_t usb_dev)
 {
-    // Just wake up vcp_task; it will open the device
+    // Read VID/PID so vcp_task can decide which open path to use
+    usb_device_info_t dev_info = {};
+    if (usb_host_device_info(usb_dev, &dev_info) == ESP_OK && dev_info.dev_desc) {
+        s_dev_vid = dev_info.dev_desc->idVendor;
+        s_dev_pid = dev_info.dev_desc->idProduct;
+        ESP_LOGI(TAG, "new_dev_cb: VID=%04x PID=%04x", s_dev_vid, s_dev_pid);
+    } else {
+        s_dev_vid = 0;
+        s_dev_pid = 0;
+    }
+    // Wake up vcp_task; it will open the device
     if (s_dev_present_sem) {
         xSemaphoreGive(s_dev_present_sem);
     }
@@ -575,22 +589,50 @@ static void vcp_task(void *arg)
         screen_log("[USB] Waiting for device...\n");
         ESP_LOGI(TAG, "Waiting for USB device...");
 
-        // Wait indefinitely for new_dev_cb to signal a device has appeared.
-        xSemaphoreTake(s_dev_present_sem, portMAX_DELAY);
+        // Wait for new_dev_cb to signal a device has appeared.
+        // Use a 3 s timeout so that if enumeration fails (CHECK_FULL_DEV_DESC
+        // FAILED etc.) and new_dev_cb is never called, we still retry instead
+        // of blocking forever.
+        BaseType_t sem_taken = xSemaphoreTake(s_dev_present_sem, pdMS_TO_TICKS(3000));
+        if (sem_taken != pdTRUE) {
+            // Timeout: no device appeared yet, loop back and wait again.
+            continue;
+        }
 
         // Small delay to let the USB host enumerate the device fully
         vTaskDelay(pdMS_TO_TICKS(200));
 
+        // Drain any extra semaphore counts that may have accumulated
+        // (e.g. new_dev_cb called twice for the same physical device).
+        while (xSemaphoreTake(s_dev_present_sem, 0) == pdTRUE) {}
+
         // Clear disconnect bit before opening
         xEventGroupClearBits(s_usb_event_group, USB_DEV_DISCONNECTED_BIT);
 
+        // Snapshot the VID/PID detected by new_dev_cb
+        uint16_t dev_vid = s_dev_vid;
+        uint16_t dev_pid = s_dev_pid;
+        ESP_LOGI(TAG, "Opening device VID=%04x PID=%04x", dev_vid, dev_pid);
+        (void)dev_pid; // suppress unused-variable warning if not used below
+
         // ---- Try to open as VCP (FTDI/CP210x/CH34x) first ----
-        // Use connection_timeout_ms=100 so open() returns quickly if device
-        // is not a VCP type (no 5-second wait that causes spurious errors).
+        // Skip VCP::open() for known non-VCP devices (e.g. Raspberry Pi g_serial).
+        // VCP::open() iterates all VCP drivers with ANY_VID/ANY_PID, which means
+        // it will try to open ANY connected device as FTDI/CP210x/CH34x, sending
+        // vendor-specific commands that corrupt the device state for subsequent
+        // standard CDC-ACM open.
+        //
+        // Known VCP VIDs: FTDI=0x0403, CP210x=0x10C4, CH34x=0x1A86
+        static const uint16_t VCP_VIDS[] = {0x0403u, 0x10C4u, 0x1A86u};
+        bool is_known_vcp_vid = false;
+        for (uint16_t vid : VCP_VIDS) {
+            if (dev_vid == vid) { is_known_vcp_vid = true; break; }
+        }
+
         CdcAcmDevice *dev = nullptr;
         bool is_vcp = false;
 
-        {
+        if (is_known_vcp_vid) {
             cdc_acm_host_device_config_t vcp_cfg = {};
             vcp_cfg.connection_timeout_ms = 100;   // Short timeout: device is already present
             vcp_cfg.out_buffer_size       = 512;
@@ -605,6 +647,8 @@ static void vcp_task(void *arg)
                 is_vcp = true;
                 ESP_LOGI(TAG, "VCP device opened (FTDI/CP210x/CH34x)");
             }
+        } else {
+            ESP_LOGI(TAG, "VID=%04x not a known VCP vendor, skipping VCP::open()", dev_vid);
         }
 
         // ---- If not VCP, try standard CDC-ACM (e.g. Raspberry Pi) ----
