@@ -418,17 +418,9 @@ static void usb_event_cb(const cdc_acm_host_dev_event_data_t *event, void *user_
 
 static void usb_new_dev_cb(usb_device_handle_t usb_dev)
 {
-    // Read VID/PID so vcp_task can decide which open path to use
-    usb_device_info_t dev_info = {};
-    if (usb_host_device_info(usb_dev, &dev_info) == ESP_OK && dev_info.dev_desc) {
-        s_dev_vid = dev_info.dev_desc->idVendor;
-        s_dev_pid = dev_info.dev_desc->idProduct;
-        ESP_LOGI(TAG, "new_dev_cb: VID=%04x PID=%04x", s_dev_vid, s_dev_pid);
-    } else {
-        s_dev_vid = 0;
-        s_dev_pid = 0;
-    }
-    // Wake up vcp_task; it will open the device
+    // VID/PID was already captured in usb_enum_filter_cb() which is called
+    // earlier in the enumeration pipeline and receives the device descriptor.
+    // Wake up vcp_task; it will open the device.
     if (s_dev_present_sem) {
         xSemaphoreGive(s_dev_present_sem);
     }
@@ -470,6 +462,12 @@ static bool usb_enum_filter_cb(const usb_device_desc_t *dev_desc,
 {
     uint16_t vid = dev_desc->idVendor;
     uint16_t pid = dev_desc->idProduct;
+
+    // Store VID/PID so vcp_task can decide which open path to use.
+    // This callback is called before new_dev_cb, so the values are ready
+    // by the time vcp_task wakes up.
+    s_dev_vid = vid;
+    s_dev_pid = pid;
 
     if (vid == RPI_G_SERIAL_VID && pid == RPI_G_SERIAL_PID) {
         // Raspberry Pi g_serial CDC-ACM: bConfigurationValue is 2
