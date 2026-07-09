@@ -58,9 +58,9 @@ static const char *TAG = "terminal";
 // ==============================================================
 // Terminal Screen Configuration
 // ==============================================================
-#define TERM_FONT_W     8
-#define TERM_FONT_H     8
-#define STATUS_BAR_H    10
+#define TERM_FONT_W     16
+#define TERM_FONT_H     16
+#define STATUS_BAR_H    20
 #define TERM_COLS       (720 / TERM_FONT_W)
 #define TERM_ROWS       ((1280 - STATUS_BAR_H) / TERM_FONT_H)
 
@@ -254,7 +254,7 @@ static void ui_create(void)
     lv_obj_set_style_bg_opa(scr, LV_OPA_COVER, 0);
 
     term_label = lv_label_create(scr);
-    lv_obj_set_style_text_font(term_label, &lv_font_unscii_8, 0);
+    lv_obj_set_style_text_font(term_label, &lv_font_unscii_16, 0);
     lv_obj_set_style_text_color(term_label, lv_color_make(0, 255, 0), 0);
     lv_obj_set_style_text_letter_space(term_label, 0, 0);
     lv_obj_set_style_text_line_space(term_label, 0, 0);
@@ -264,7 +264,7 @@ static void ui_create(void)
     lv_label_set_text(term_label, "");
 
     status_label = lv_label_create(scr);
-    lv_obj_set_style_text_font(status_label, &lv_font_unscii_8, 0);
+    lv_obj_set_style_text_font(status_label, &lv_font_unscii_16, 0);
     lv_obj_set_style_text_color(status_label, lv_color_make(0, 0, 0), 0);
     lv_obj_set_style_bg_color(status_label, lv_color_make(0, 200, 0), 0);
     lv_obj_set_style_bg_opa(status_label, LV_OPA_COVER, 0);
