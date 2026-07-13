@@ -5,6 +5,7 @@
  *  - USB Host CDC-ACM with VCP support (CH34x, CP210x, FTDI)
  *  - Standard CDC-ACM fallback for devices like Raspberry Pi USB gadget
  *  - Bidirectional communication: keyboard -> USB TX, USB RX -> screen
+ *  - VT100 terminal emulation (cursor movement, scroll region, erase, SGR 8-color)
  *  - ENTER key sends LF (\n)
  *  - Baud rate configurable via Ctrl+B
  *
@@ -14,10 +15,7 @@
  *    the next connection can be handled without reinstalling the host.
  *  - new_dev_cb detects device connection and signals vcp_task via semaphore
  *  - vcp_task opens the device immediately without polling/timeout loops
- *  - VCP::open() is NOT used (it has a mandatory 5s timeout that causes
- *    spurious CDC_ACM_HOST_ERROR events from residual async transfers)
- *  - Instead, we use CdcAcmDevice::open() directly with connection_timeout_ms=0
- *    so it opens the already-connected device immediately
+ *  - VCP::open() is NOT used for non-VCP devices (Raspberry Pi etc.)
  *  - CDC_ACM_HOST_ERROR is ignored; only CDC_ACM_HOST_DEVICE_DISCONNECTED
  *    triggers reconnect
  *
@@ -26,6 +24,7 @@
 
 #include <stdio.h>
 #include <string.h>
+#include <stdlib.h>
 #include <inttypes.h>
 #include <esp_log.h>
 #include <esp_err.h>
@@ -61,15 +60,74 @@ static const char *TAG = "terminal";
 #define TERM_FONT_W     16
 #define TERM_FONT_H     16
 #define STATUS_BAR_H    20
-#define TERM_COLS       (720 / TERM_FONT_W)
-#define TERM_ROWS       ((1280 - STATUS_BAR_H) / TERM_FONT_H)
+#define TERM_COLS       (720 / TERM_FONT_W)   // 45
+#define TERM_ROWS       ((1280 - STATUS_BAR_H) / TERM_FONT_H)  // 78
 
-static char term_buffer[TERM_ROWS][TERM_COLS + 1];
+// ==============================================================
+// Terminal Cell and Color Definitions
+// ==============================================================
+
+// ANSI/VT100 SGR color indices (0-7 standard, 8-15 bright)
+// Index 0=Black 1=Red 2=Green 3=Yellow 4=Blue 5=Magenta 6=Cyan 7=White
+// Index 8-15 = bright versions
+static const lv_color_t TERM_COLORS[16] = {
+    lv_color_make(0,   0,   0),    // 0 Black
+    lv_color_make(170, 0,   0),    // 1 Red
+    lv_color_make(0,   170, 0),    // 2 Green
+    lv_color_make(170, 170, 0),    // 3 Yellow
+    lv_color_make(0,   0,   170),  // 4 Blue
+    lv_color_make(170, 0,   170),  // 5 Magenta
+    lv_color_make(0,   170, 170),  // 6 Cyan
+    lv_color_make(170, 170, 170),  // 7 White (light gray)
+    lv_color_make(85,  85,  85),   // 8 Bright Black (dark gray)
+    lv_color_make(255, 85,  85),   // 9 Bright Red
+    lv_color_make(85,  255, 85),   // 10 Bright Green
+    lv_color_make(255, 255, 85),   // 11 Bright Yellow
+    lv_color_make(85,  85,  255),  // 12 Bright Blue
+    lv_color_make(255, 85,  255),  // 13 Bright Magenta
+    lv_color_make(85,  255, 255),  // 14 Bright Cyan
+    lv_color_make(255, 255, 255),  // 15 Bright White
+};
+
+#define DEFAULT_FG  7   // White
+#define DEFAULT_BG  0   // Black
+
+typedef struct {
+    char    ch;     // character (space = empty)
+    uint8_t fg;     // foreground color index 0-15
+    uint8_t bg;     // background color index 0-15
+    uint8_t bold;   // bold/bright flag
+} TermCell;
+
+static TermCell term_buffer[TERM_ROWS][TERM_COLS];
+
+// Current cursor position
 static int cursor_row = 0;
 static int cursor_col = 0;
 
-static lv_obj_t *term_label   = NULL;
-static lv_obj_t *status_label = NULL;
+// Saved cursor position (ESC 7 / ESC[s)
+static int saved_row = 0;
+static int saved_col = 0;
+
+// Current SGR attributes
+static uint8_t cur_fg   = DEFAULT_FG;
+static uint8_t cur_bg   = DEFAULT_BG;
+static uint8_t cur_bold = 0;
+
+// Scroll region (inclusive, 0-based)
+static int scroll_top = 0;
+static int scroll_bot = TERM_ROWS - 1;
+
+// Cursor visibility
+static bool cursor_visible = true;
+static bool cursor_blink_state = true;  // true = shown
+
+// LVGL objects
+static lv_obj_t  *term_canvas  = NULL;  // canvas for terminal area
+static lv_obj_t  *status_label = NULL;
+static lv_timer_t *cursor_timer = NULL;
+static lv_obj_t  *row_spangroups[TERM_ROWS] = {};  // one spangroup per terminal row
+static bool       row_dirty[TERM_ROWS] = {};    // true if row needs redraw
 
 static m5::tab5::m5tab5_component s_tab5_board;
 static m5::M5Tab5Keyboard         s_keyboard;
@@ -103,18 +161,18 @@ static QueueHandle_t s_usb_rx_queue = NULL;
 // Semaphore: posted by new_dev_cb when a USB device appears
 static SemaphoreHandle_t s_dev_present_sem = NULL;
 
-// VID/PID of the most recently detected USB device (set by new_dev_cb)
+// VID/PID of the most recently detected USB device (set by enum_filter_cb)
 static volatile uint16_t s_dev_vid = 0;
 static volatile uint16_t s_dev_pid = 0;
 
 // Event group bits
-#define USB_DEV_DISCONNECTED_BIT  BIT0   // Set by usb_event_cb on device disconnect
+#define USB_DEV_DISCONNECTED_BIT  BIT0
 static EventGroupHandle_t s_usb_event_group = NULL;
 
 static TaskHandle_t s_main_task_handle = NULL;
 
 // ==============================================================
-// Screen logging helper (thread-safe)
+// Screen logging helper (thread-safe, from other tasks)
 // ==============================================================
 static QueueHandle_t s_screen_log_queue = NULL;
 typedef struct {
@@ -137,66 +195,583 @@ static void screen_log(const char *fmt, ...)
 // Terminal Buffer Management
 // ==============================================================
 
-static void term_clear(void)
+static void term_cell_clear(TermCell *cell)
 {
-    for (int r = 0; r < TERM_ROWS; r++) {
-        memset(term_buffer[r], ' ', TERM_COLS);
-        term_buffer[r][TERM_COLS] = '\0';
-    }
-    cursor_row = 0;
-    cursor_col = 0;
+    cell->ch   = ' ';
+    cell->fg   = DEFAULT_FG;
+    cell->bg   = DEFAULT_BG;
+    cell->bold = 0;
 }
 
-static void term_scroll_up(void)
+static void term_mark_dirty(int row)
 {
-    for (int r = 0; r < TERM_ROWS - 1; r++) {
-        memcpy(term_buffer[r], term_buffer[r + 1], TERM_COLS);
+    if (row >= 0 && row < TERM_ROWS) row_dirty[row] = true;
+}
+
+static void term_mark_all_dirty(void)
+{
+    for (int r = 0; r < TERM_ROWS; r++) row_dirty[r] = true;
+}
+
+static void term_clear_region(int row_start, int col_start, int row_end, int col_end)
+{
+    for (int r = row_start; r <= row_end; r++) {
+        int cs = (r == row_start) ? col_start : 0;
+        int ce = (r == row_end)   ? col_end   : TERM_COLS - 1;
+        for (int c = cs; c <= ce; c++) {
+            term_cell_clear(&term_buffer[r][c]);
+        }
+        term_mark_dirty(r);
     }
-    memset(term_buffer[TERM_ROWS - 1], ' ', TERM_COLS);
-    term_buffer[TERM_ROWS - 1][TERM_COLS] = '\0';
+}
+
+static void term_clear_all(void)
+{
+    term_clear_region(0, 0, TERM_ROWS - 1, TERM_COLS - 1);
+    cursor_row = 0;
+    cursor_col = 0;
+    scroll_top = 0;
+    scroll_bot = TERM_ROWS - 1;
+    cur_fg     = DEFAULT_FG;
+    cur_bg     = DEFAULT_BG;
+    cur_bold   = 0;
+}
+
+// Scroll the scroll region up by n lines (content moves up, bottom fills with blank)
+static void term_scroll_up(int n)
+{
+    if (n <= 0) return;
+    if (n > (scroll_bot - scroll_top + 1)) n = scroll_bot - scroll_top + 1;
+    for (int r = scroll_top; r <= scroll_bot - n; r++) {
+        memcpy(term_buffer[r], term_buffer[r + n], sizeof(TermCell) * TERM_COLS);
+        term_mark_dirty(r);
+    }
+    for (int r = scroll_bot - n + 1; r <= scroll_bot; r++) {
+        for (int c = 0; c < TERM_COLS; c++) term_cell_clear(&term_buffer[r][c]);
+        term_mark_dirty(r);
+    }
+}
+
+// Scroll the scroll region down by n lines (content moves down, top fills with blank)
+static void term_scroll_down(int n)
+{
+    if (n <= 0) return;
+    if (n > (scroll_bot - scroll_top + 1)) n = scroll_bot - scroll_top + 1;
+    for (int r = scroll_bot; r >= scroll_top + n; r--) {
+        memcpy(term_buffer[r], term_buffer[r - n], sizeof(TermCell) * TERM_COLS);
+        term_mark_dirty(r);
+    }
+    for (int r = scroll_top; r < scroll_top + n; r++) {
+        for (int c = 0; c < TERM_COLS; c++) term_cell_clear(&term_buffer[r][c]);
+        term_mark_dirty(r);
+    }
 }
 
 static void term_newline(void)
 {
     cursor_col = 0;
-    cursor_row++;
-    if (cursor_row >= TERM_ROWS) {
-        term_scroll_up();
-        cursor_row = TERM_ROWS - 1;
+    if (cursor_row == scroll_bot) {
+        term_scroll_up(1);
+    } else {
+        cursor_row++;
+        if (cursor_row >= TERM_ROWS) cursor_row = TERM_ROWS - 1;
     }
 }
 
-static void term_put_char(char c)
+static void term_put_char_raw(char c)
 {
-    if (c == '\n') {
-        term_newline();
-    } else if (c == '\r') {
+    if (cursor_row < 0 || cursor_row >= TERM_ROWS) return;
+    if (cursor_col < 0 || cursor_col >= TERM_COLS) return;
+    term_buffer[cursor_row][cursor_col].ch   = c;
+    term_buffer[cursor_row][cursor_col].fg   = cur_bold ? (cur_fg | 8) : cur_fg;
+    term_buffer[cursor_row][cursor_col].bg   = cur_bg;
+    term_buffer[cursor_row][cursor_col].bold = cur_bold;
+    term_mark_dirty(cursor_row);
+    cursor_col++;
+    if (cursor_col >= TERM_COLS) {
+        // Auto-wrap
         cursor_col = 0;
-    } else if (c == '\b' || c == 0x7F) {
-        if (cursor_col > 0) {
-            cursor_col--;
-            term_buffer[cursor_row][cursor_col] = ' ';
-        }
-    } else if (c == '\t') {
-        int next_tab = (cursor_col + 8) & ~7;
-        if (next_tab >= TERM_COLS) {
-            term_newline();
+        if (cursor_row == scroll_bot) {
+            term_scroll_up(1);
         } else {
-            cursor_col = next_tab;
-        }
-    } else if (c >= 0x20 && c < 0x7F) {
-        term_buffer[cursor_row][cursor_col] = c;
-        cursor_col++;
-        if (cursor_col >= TERM_COLS) {
-            term_newline();
+            cursor_row++;
+            if (cursor_row >= TERM_ROWS) cursor_row = TERM_ROWS - 1;
         }
     }
 }
 
-static void term_put_string(const char *str)
+// ==============================================================
+// VT100 Escape Sequence Parser
+// ==============================================================
+
+typedef enum {
+    VT_STATE_NORMAL = 0,
+    VT_STATE_ESC,           // received ESC
+    VT_STATE_CSI,           // received ESC [
+    VT_STATE_CSI_PRIV,      // received ESC [ ?
+    VT_STATE_ESC_HASH,      // received ESC #
+    VT_STATE_ESC_CHARSET,   // received ESC ( or ESC ) - consume next byte
+} vt_state_t;
+
+#define VT_MAX_PARAMS  8
+static vt_state_t vt_state    = VT_STATE_NORMAL;
+static int        vt_params[VT_MAX_PARAMS];
+static int        vt_num_params = 0;
+static bool       vt_param_started = false;
+
+static void vt_reset_params(void)
 {
-    while (*str) {
-        term_put_char(*str++);
+    for (int i = 0; i < VT_MAX_PARAMS; i++) vt_params[i] = -1;
+    vt_num_params   = 0;
+    vt_param_started = false;
+}
+
+static int vt_param(int idx, int def)
+{
+    if (idx < 0 || idx >= vt_num_params) return def;
+    if (vt_params[idx] < 0) return def;
+    return vt_params[idx];
+}
+
+static void vt_clamp_cursor(void)
+{
+    if (cursor_row < 0)          cursor_row = 0;
+    if (cursor_row >= TERM_ROWS) cursor_row = TERM_ROWS - 1;
+    if (cursor_col < 0)          cursor_col = 0;
+    if (cursor_col >= TERM_COLS) cursor_col = TERM_COLS - 1;
+}
+
+// SGR: set graphic rendition
+static void vt_sgr(void)
+{
+    int n = (vt_num_params == 0) ? 1 : vt_num_params;
+    for (int i = 0; i < n; i++) {
+        int p = vt_param(i, 0);
+        if (p == 0) {
+            cur_fg   = DEFAULT_FG;
+            cur_bg   = DEFAULT_BG;
+            cur_bold = 0;
+        } else if (p == 1) {
+            cur_bold = 1;
+        } else if (p == 2 || p == 22) {
+            cur_bold = 0;
+        } else if (p >= 30 && p <= 37) {
+            cur_fg = (uint8_t)(p - 30);
+        } else if (p == 39) {
+            cur_fg = DEFAULT_FG;
+        } else if (p >= 40 && p <= 47) {
+            cur_bg = (uint8_t)(p - 40);
+        } else if (p == 49) {
+            cur_bg = DEFAULT_BG;
+        } else if (p >= 90 && p <= 97) {
+            cur_fg = (uint8_t)(p - 90 + 8);
+        } else if (p >= 100 && p <= 107) {
+            cur_bg = (uint8_t)(p - 100 + 8);
+        }
+    }
+}
+
+// Process a complete CSI sequence (ESC [ params final_char)
+static void vt_process_csi(char final_ch)
+{
+    switch (final_ch) {
+    // ---- Cursor movement ----
+    case 'A': { // Cursor Up
+        int n = vt_param(0, 1); if (n < 1) n = 1;
+        cursor_row -= n;
+        vt_clamp_cursor();
+        break;
+    }
+    case 'B': { // Cursor Down
+        int n = vt_param(0, 1); if (n < 1) n = 1;
+        cursor_row += n;
+        vt_clamp_cursor();
+        break;
+    }
+    case 'C': { // Cursor Forward (Right)
+        int n = vt_param(0, 1); if (n < 1) n = 1;
+        cursor_col += n;
+        vt_clamp_cursor();
+        break;
+    }
+    case 'D': { // Cursor Back (Left)
+        int n = vt_param(0, 1); if (n < 1) n = 1;
+        cursor_col -= n;
+        vt_clamp_cursor();
+        break;
+    }
+    case 'E': { // Cursor Next Line
+        int n = vt_param(0, 1); if (n < 1) n = 1;
+        cursor_row += n; cursor_col = 0;
+        vt_clamp_cursor();
+        break;
+    }
+    case 'F': { // Cursor Previous Line
+        int n = vt_param(0, 1); if (n < 1) n = 1;
+        cursor_row -= n; cursor_col = 0;
+        vt_clamp_cursor();
+        break;
+    }
+    case 'G': { // Cursor Horizontal Absolute
+        int n = vt_param(0, 1); if (n < 1) n = 1;
+        cursor_col = n - 1;
+        vt_clamp_cursor();
+        break;
+    }
+    case 'H': // Cursor Position
+    case 'f': { // Horizontal and Vertical Position
+        int row = vt_param(0, 1); if (row < 1) row = 1;
+        int col = vt_param(1, 1); if (col < 1) col = 1;
+        cursor_row = row - 1;
+        cursor_col = col - 1;
+        vt_clamp_cursor();
+        break;
+    }
+    case 'd': { // Line Position Absolute
+        int n = vt_param(0, 1); if (n < 1) n = 1;
+        cursor_row = n - 1;
+        vt_clamp_cursor();
+        break;
+    }
+    case 's': { // Save Cursor Position
+        saved_row = cursor_row;
+        saved_col = cursor_col;
+        break;
+    }
+    case 'u': { // Restore Cursor Position
+        cursor_row = saved_row;
+        cursor_col = saved_col;
+        vt_clamp_cursor();
+        break;
+    }
+    // ---- Erase ----
+    case 'J': { // Erase in Display
+        int n = vt_param(0, 0);
+        if (n == 0) {
+            // Erase from cursor to end of screen
+            term_clear_region(cursor_row, cursor_col, TERM_ROWS - 1, TERM_COLS - 1);
+        } else if (n == 1) {
+            // Erase from start of screen to cursor
+            term_clear_region(0, 0, cursor_row, cursor_col);
+        } else if (n == 2 || n == 3) {
+            // Erase entire screen (keep cursor position)
+            term_clear_region(0, 0, TERM_ROWS - 1, TERM_COLS - 1);
+        }
+        break;
+    }
+    case 'K': { // Erase in Line
+        int n = vt_param(0, 0);
+        if (n == 0) {
+            // Erase from cursor to end of line
+            for (int c = cursor_col; c < TERM_COLS; c++) term_cell_clear(&term_buffer[cursor_row][c]);
+        } else if (n == 1) {
+            // Erase from start of line to cursor
+            for (int c = 0; c <= cursor_col; c++) term_cell_clear(&term_buffer[cursor_row][c]);
+        } else if (n == 2) {
+            // Erase entire line
+            for (int c = 0; c < TERM_COLS; c++) term_cell_clear(&term_buffer[cursor_row][c]);
+        }
+        term_mark_dirty(cursor_row);
+        break;
+    }
+    // ---- Scroll ----
+    case 'S': { // Scroll Up (pan up, new lines at bottom)
+        int n = vt_param(0, 1); if (n < 1) n = 1;
+        term_scroll_up(n);
+        break;
+    }
+    case 'T': { // Scroll Down (pan down, new lines at top)
+        int n = vt_param(0, 1); if (n < 1) n = 1;
+        term_scroll_down(n);
+        break;
+    }
+    case 'r': { // Set Scrolling Region (top;bot, 1-based)
+        int top = vt_param(0, 1); if (top < 1) top = 1;
+        int bot = vt_param(1, TERM_ROWS); if (bot < 1 || bot > TERM_ROWS) bot = TERM_ROWS;
+        if (top < bot) {
+            scroll_top = top - 1;
+            scroll_bot = bot - 1;
+            cursor_row = 0;
+            cursor_col = 0;
+        }
+        break;
+    }
+    // ---- Line insert/delete ----
+    case 'L': { // Insert Line(s) - insert n blank lines at cursor, push down
+        int n = vt_param(0, 1); if (n < 1) n = 1;
+        // Only within scroll region
+        if (cursor_row >= scroll_top && cursor_row <= scroll_bot) {
+            int old_top = scroll_top;
+            scroll_top = cursor_row;
+            term_scroll_down(n);
+            scroll_top = old_top;
+        }
+        break;
+    }
+    case 'M': { // Delete Line(s) - delete n lines at cursor, pull up
+        int n = vt_param(0, 1); if (n < 1) n = 1;
+        if (cursor_row >= scroll_top && cursor_row <= scroll_bot) {
+            int old_top = scroll_top;
+            scroll_top = cursor_row;
+            term_scroll_up(n);
+            scroll_top = old_top;
+        }
+        break;
+    }
+    // ---- Character insert/delete ----
+    case '@': { // Insert Character(s) - insert n spaces at cursor, shift right
+        int n = vt_param(0, 1); if (n < 1) n = 1;
+        if (cursor_row < TERM_ROWS) {
+            // Shift characters right by n
+            for (int c = TERM_COLS - 1; c >= cursor_col + n; c--) {
+                term_buffer[cursor_row][c] = term_buffer[cursor_row][c - n];
+            }
+            for (int c = cursor_col; c < cursor_col + n && c < TERM_COLS; c++) {
+                term_cell_clear(&term_buffer[cursor_row][c]);
+            }
+            term_mark_dirty(cursor_row);
+        }
+        break;
+    }
+    case 'P': { // Delete Character(s) - delete n chars at cursor, shift left
+        int n = vt_param(0, 1); if (n < 1) n = 1;
+        if (cursor_row < TERM_ROWS) {
+            for (int c = cursor_col; c < TERM_COLS - n; c++) {
+                term_buffer[cursor_row][c] = term_buffer[cursor_row][c + n];
+            }
+            for (int c = TERM_COLS - n; c < TERM_COLS; c++) {
+                term_cell_clear(&term_buffer[cursor_row][c]);
+            }
+            term_mark_dirty(cursor_row);
+        }
+        break;
+    }
+    case 'X': { // Erase Character(s) - erase n chars at cursor (no shift)
+        int n = vt_param(0, 1); if (n < 1) n = 1;
+        for (int c = cursor_col; c < cursor_col + n && c < TERM_COLS; c++) {
+            term_cell_clear(&term_buffer[cursor_row][c]);
+        }
+        term_mark_dirty(cursor_row);
+        break;
+    }
+    // ---- SGR ----
+    case 'm': {
+        vt_sgr();
+        break;
+    }
+    // ---- Device status / cursor report (respond not needed for terminal) ----
+    case 'n': // DSR - Device Status Report (ignore)
+        break;
+    case 'c': // DA - Device Attributes (ignore)
+        break;
+    default:
+        ESP_LOGD(TAG, "VT100: unhandled CSI %d final='%c'", vt_param(0,-1), final_ch);
+        break;
+    }
+}
+
+// Process CSI ? sequences (private modes)
+static void vt_process_csi_priv(char final_ch)
+{
+    int n = vt_param(0, 0);
+    if (final_ch == 'h') {
+        // Set mode
+        if (n == 25) { cursor_visible = true; }
+        // 1049: alternate screen buffer (ignore)
+        // 1: application cursor keys (ignore)
+        // 7: auto-wrap (always on, ignore)
+    } else if (final_ch == 'l') {
+        // Reset mode
+        if (n == 25) { cursor_visible = false; }
+    }
+}
+
+// Main byte processor: feed one byte at a time
+static void vt100_process_byte(uint8_t byte)
+{
+    char c = (char)byte;
+
+    switch (vt_state) {
+    case VT_STATE_NORMAL:
+        if (c == 0x1B) {  // ESC
+            vt_state = VT_STATE_ESC;
+        } else if (c == '\n') {
+            if (cursor_row == scroll_bot) {
+                term_scroll_up(1);
+            } else {
+                cursor_row++;
+                if (cursor_row >= TERM_ROWS) cursor_row = TERM_ROWS - 1;
+            }
+        } else if (c == '\r') {
+            cursor_col = 0;
+        } else if (c == '\b' || c == 0x7F) {
+            if (cursor_col > 0) {
+                cursor_col--;
+                term_cell_clear(&term_buffer[cursor_row][cursor_col]);
+                term_mark_dirty(cursor_row);
+            }
+        } else if (c == '\t') {
+            int next_tab = (cursor_col + 8) & ~7;
+            if (next_tab >= TERM_COLS) {
+                cursor_col = TERM_COLS - 1;
+            } else {
+                cursor_col = next_tab;
+            }
+        } else if (c == '\a') {
+            // Bell - ignore
+        } else if (c == 0x0E || c == 0x0F) {
+            // SO/SI (charset shift) - ignore
+        } else if ((uint8_t)c >= 0x20 && (uint8_t)c < 0x7F) {
+            term_put_char_raw(c);
+        }
+        // Bytes >= 0x80 (UTF-8 multibyte) are ignored (no Japanese font yet)
+        break;
+
+    case VT_STATE_ESC:
+        if (c == '[') {
+            vt_state = VT_STATE_CSI;
+            vt_reset_params();
+        } else if (c == '7') {
+            // Save cursor
+            saved_row = cursor_row;
+            saved_col = cursor_col;
+            vt_state = VT_STATE_NORMAL;
+        } else if (c == '8') {
+            // Restore cursor
+            cursor_row = saved_row;
+            cursor_col = saved_col;
+            vt_clamp_cursor();
+            vt_state = VT_STATE_NORMAL;
+        } else if (c == 'c') {
+            // Full reset (RIS)
+            term_clear_all();
+            vt_state = VT_STATE_NORMAL;
+        } else if (c == 'D') {
+            // Index: move cursor down, scroll if at bottom
+            if (cursor_row == scroll_bot) {
+                term_scroll_up(1);
+            } else {
+                cursor_row++;
+                if (cursor_row >= TERM_ROWS) cursor_row = TERM_ROWS - 1;
+            }
+            vt_state = VT_STATE_NORMAL;
+        } else if (c == 'M') {
+            // Reverse Index: move cursor up, scroll down if at top
+            if (cursor_row == scroll_top) {
+                term_scroll_down(1);
+            } else {
+                cursor_row--;
+                if (cursor_row < 0) cursor_row = 0;
+            }
+            vt_state = VT_STATE_NORMAL;
+        } else if (c == 'E') {
+            // Next Line
+            cursor_col = 0;
+            if (cursor_row == scroll_bot) {
+                term_scroll_up(1);
+            } else {
+                cursor_row++;
+                if (cursor_row >= TERM_ROWS) cursor_row = TERM_ROWS - 1;
+            }
+            vt_state = VT_STATE_NORMAL;
+        } else if (c == '#') {
+            vt_state = VT_STATE_ESC_HASH;
+        } else if (c == '(' || c == ')' || c == '*' || c == '+') {
+            // Character set designation - consume next byte (charset id)
+            vt_state = VT_STATE_ESC_CHARSET;
+        } else {
+            // Unknown ESC sequence - ignore
+            vt_state = VT_STATE_NORMAL;
+        }
+        break;
+
+    case VT_STATE_CSI:
+        if (c == '?') {
+            vt_state = VT_STATE_CSI_PRIV;
+            vt_reset_params();
+        } else if (c >= '0' && c <= '9') {
+            if (!vt_param_started) {
+                if (vt_num_params < VT_MAX_PARAMS) {
+                    vt_params[vt_num_params] = c - '0';
+                    vt_num_params++;
+                }
+                vt_param_started = true;
+            } else {
+                int idx = vt_num_params - 1;
+                if (idx < VT_MAX_PARAMS) {
+                    if (vt_params[idx] < 0) vt_params[idx] = 0;
+                    vt_params[idx] = vt_params[idx] * 10 + (c - '0');
+                }
+            }
+        } else if (c == ';') {
+            if (!vt_param_started && vt_num_params < VT_MAX_PARAMS) {
+                vt_params[vt_num_params] = -1;
+                vt_num_params++;
+            }
+            vt_param_started = false;
+        } else if (c >= 0x40 && c <= 0x7E) {
+            // Final byte
+            if (vt_param_started) {
+                // last param already counted
+            }
+            vt_process_csi(c);
+            vt_state = VT_STATE_NORMAL;
+        } else {
+            // Unexpected - reset
+            vt_state = VT_STATE_NORMAL;
+        }
+        break;
+
+    case VT_STATE_CSI_PRIV:
+        if (c >= '0' && c <= '9') {
+            if (!vt_param_started) {
+                if (vt_num_params < VT_MAX_PARAMS) {
+                    vt_params[vt_num_params] = c - '0';
+                    vt_num_params++;
+                }
+                vt_param_started = true;
+            } else {
+                int idx = vt_num_params - 1;
+                if (idx < VT_MAX_PARAMS) {
+                    if (vt_params[idx] < 0) vt_params[idx] = 0;
+                    vt_params[idx] = vt_params[idx] * 10 + (c - '0');
+                }
+            }
+        } else if (c == ';') {
+            if (!vt_param_started && vt_num_params < VT_MAX_PARAMS) {
+                vt_params[vt_num_params] = -1;
+                vt_num_params++;
+            }
+            vt_param_started = false;
+        } else if (c >= 0x40 && c <= 0x7E) {
+            vt_process_csi_priv(c);
+            vt_state = VT_STATE_NORMAL;
+        } else {
+            vt_state = VT_STATE_NORMAL;
+        }
+        break;
+
+    case VT_STATE_ESC_HASH:
+        // ESC # n sequences (e.g. ESC#8 = fill screen with 'E')
+        if (c == '8') {
+            // DECALN: fill screen with 'E' (alignment test)
+            for (int r = 0; r < TERM_ROWS; r++)
+                for (int col = 0; col < TERM_COLS; col++) {
+                    term_buffer[r][col].ch   = 'E';
+                    term_buffer[r][col].fg   = DEFAULT_FG;
+                    term_buffer[r][col].bg   = DEFAULT_BG;
+                    term_buffer[r][col].bold = 0;
+                }
+            term_mark_all_dirty();
+        }
+        vt_state = VT_STATE_NORMAL;
+        break;
+
+    case VT_STATE_ESC_CHARSET:
+        // Consume charset designator byte (e.g. 'B' for ASCII, '0' for graphics)
+        // We don't implement charset switching; just return to normal state.
+        vt_state = VT_STATE_NORMAL;
+        break;
     }
 }
 
@@ -204,22 +779,100 @@ static void term_put_string(const char *str)
 // LVGL Display Update
 // ==============================================================
 
+// Recolor format: #RRGGBB text# (LVGL recolor syntax)
+// We build a string for each row with color spans.
+// Span text buffer: worst case all 45 cells different colors + cursor
+// Each span text: up to TERM_COLS chars + NUL
+#define SPAN_TEXT_BUF  (TERM_COLS + 2)
+
+// Rebuild a single row's spangroup from term_buffer.
+// Must be called with LVGL lock held.
+static void term_rebuild_row(int r)
+{
+    lv_obj_t *sg = row_spangroups[r];
+    if (sg == NULL) return;
+
+    // Delete all existing spans
+    uint32_t span_count = lv_spangroup_get_span_count(sg);
+    for (uint32_t i = 0; i < span_count; i++) {
+        lv_span_t *sp = lv_spangroup_get_child(sg, 0);
+        if (sp) lv_spangroup_delete_span(sg, sp);
+    }
+
+    // Build new spans: group consecutive cells with same fg/bg/cursor
+    static char span_text[SPAN_TEXT_BUF];
+    uint8_t last_fg = 255, last_bg = 255;
+    lv_span_t *cur_span = NULL;
+    int span_len = 0;
+
+    for (int c = 0; c <= TERM_COLS; c++) {
+        // Flush span at end or on color change
+        bool is_cursor = false;
+        uint8_t fg = 0, bg = 0;
+
+        if (c < TERM_COLS) {
+            TermCell *cell = &term_buffer[r][c];
+            fg = cell->fg & 15;
+            bg = cell->bg & 15;
+            is_cursor = (r == cursor_row && c == cursor_col &&
+                         cursor_visible && cursor_blink_state);
+            if (is_cursor) { uint8_t tmp = fg; fg = bg; bg = tmp; }
+        }
+
+        bool color_changed = (c == TERM_COLS) || (fg != last_fg || bg != last_bg);
+
+        if (color_changed && cur_span != NULL && span_len > 0) {
+            // Finalize current span text
+            span_text[span_len] = '\0';
+            lv_span_set_text(cur_span, span_text);
+            cur_span = NULL;
+            span_len = 0;
+        }
+
+        if (c >= TERM_COLS) break;
+
+        if (cur_span == NULL) {
+            cur_span = lv_spangroup_new_span(sg);
+            if (cur_span == NULL) break;
+            lv_style_t *style = lv_span_get_style(cur_span);
+            lv_style_set_text_color(style, TERM_COLORS[fg]);
+            last_fg = fg;
+            last_bg = bg;
+            span_len = 0;
+        }
+
+        // Append character to span text
+        TermCell *cell = &term_buffer[r][c];
+        char ch = cell->ch;
+        span_text[span_len++] = (ch >= 0x20 && ch < 0x7F) ? ch : ' ';
+    }
+
+    lv_spangroup_refr_mode(sg);
+}
+
 static void term_refresh_display(void)
 {
-    if (term_label == NULL) return;
+    if (term_canvas == NULL) return;
 
-    static char display_buf[TERM_ROWS * (TERM_COLS + 1) + 1];
-    char *p = display_buf;
-
-    for (int r = 0; r < TERM_ROWS; r++) {
-        memcpy(p, term_buffer[r], TERM_COLS);
-        p += TERM_COLS;
-        *p++ = '\n';
+    // Also mark cursor rows dirty (current and previously drawn)
+    static int prev_cursor_row = -1;
+    static int prev_cursor_col = -1;
+    if (prev_cursor_row != cursor_row || prev_cursor_col != cursor_col) {
+        term_mark_dirty(prev_cursor_row);
+        term_mark_dirty(cursor_row);
+        prev_cursor_row = cursor_row;
+        prev_cursor_col = cursor_col;
+    } else {
+        term_mark_dirty(cursor_row);
     }
-    *p = '\0';
 
     lvgl_port_lock(0);
-    lv_label_set_text(term_label, display_buf);
+    for (int r = 0; r < TERM_ROWS; r++) {
+        if (row_dirty[r]) {
+            term_rebuild_row(r);
+            row_dirty[r] = false;
+        }
+    }
     lvgl_port_unlock();
 }
 
@@ -242,6 +895,20 @@ static void update_status_bar(void)
 }
 
 // ==============================================================
+// Cursor blink timer callback
+// ==============================================================
+static void cursor_blink_cb(lv_timer_t *timer)
+{
+    (void)timer;
+    if (!cursor_visible) {
+        cursor_blink_state = false;
+        return;
+    }
+    cursor_blink_state = !cursor_blink_state;
+    term_refresh_display();
+}
+
+// ==============================================================
 // LVGL UI Setup
 // ==============================================================
 
@@ -253,16 +920,33 @@ static void ui_create(void)
     lv_obj_set_style_bg_color(scr, lv_color_black(), 0);
     lv_obj_set_style_bg_opa(scr, LV_OPA_COVER, 0);
 
-    term_label = lv_label_create(scr);
-    lv_obj_set_style_text_font(term_label, &lv_font_unscii_16, 0);
-    lv_obj_set_style_text_color(term_label, lv_color_make(0, 255, 0), 0);
-    lv_obj_set_style_text_letter_space(term_label, 0, 0);
-    lv_obj_set_style_text_line_space(term_label, 0, 0);
-    lv_obj_set_pos(term_label, 0, 0);
-    lv_obj_set_size(term_label, 720, 1280 - STATUS_BAR_H);
-    lv_label_set_long_mode(term_label, LV_LABEL_LONG_CLIP);
-    lv_label_set_text(term_label, "");
+    // Terminal area container
+    term_canvas = lv_obj_create(scr);
+    lv_obj_set_pos(term_canvas, 0, 0);
+    lv_obj_set_size(term_canvas, 720, 1280 - STATUS_BAR_H);
+    lv_obj_set_style_bg_color(term_canvas, lv_color_black(), 0);
+    lv_obj_set_style_bg_opa(term_canvas, LV_OPA_COVER, 0);
+    lv_obj_set_style_border_width(term_canvas, 0, 0);
+    lv_obj_set_style_pad_all(term_canvas, 0, 0);
+    lv_obj_clear_flag(term_canvas, LV_OBJ_FLAG_SCROLLABLE);
 
+    // Create one spangroup per row for per-cell color support
+    for (int r = 0; r < TERM_ROWS; r++) {
+        row_spangroups[r] = lv_spangroup_create(term_canvas);
+        lv_obj_set_style_text_font(row_spangroups[r], &lv_font_unscii_16, 0);
+        lv_obj_set_style_text_letter_space(row_spangroups[r], 0, 0);
+        lv_obj_set_style_text_line_space(row_spangroups[r], 0, 0);
+        lv_obj_set_style_bg_color(row_spangroups[r], lv_color_black(), 0);
+        lv_obj_set_style_bg_opa(row_spangroups[r], LV_OPA_COVER, 0);
+        lv_obj_set_style_pad_all(row_spangroups[r], 0, 0);
+        lv_obj_set_pos(row_spangroups[r], 0, r * TERM_FONT_H);
+        lv_obj_set_size(row_spangroups[r], 720, TERM_FONT_H);
+        lv_spangroup_set_overflow(row_spangroups[r], LV_SPAN_OVERFLOW_CLIP);
+        lv_spangroup_set_mode(row_spangroups[r], LV_SPAN_MODE_FIXED);
+        row_dirty[r] = true;  // initial draw
+    }
+
+    // Status bar
     status_label = lv_label_create(scr);
     lv_obj_set_style_text_font(status_label, &lv_font_unscii_16, 0);
     lv_obj_set_style_text_color(status_label, lv_color_make(0, 0, 0), 0);
@@ -271,6 +955,9 @@ static void ui_create(void)
     lv_obj_set_pos(status_label, 0, 1280 - STATUS_BAR_H);
     lv_obj_set_size(status_label, 720, STATUS_BAR_H);
     lv_label_set_text(status_label, " TAB5 Serial Terminal - Initializing...");
+
+    // Cursor blink timer (500ms interval)
+    cursor_timer = lv_timer_create(cursor_blink_cb, 500, NULL);
 
     lvgl_port_unlock();
 }
@@ -338,9 +1025,6 @@ static esp_err_t app_lcd_lvgl_init(m5::tab5::m5tab5_component &board)
         touch_cfg.disp             = s_lvgl_disp;
         touch_cfg.handle           = touch_handle;
         s_lvgl_touch_indev = lvgl_port_add_touch(&touch_cfg);
-        if (s_lvgl_touch_indev != nullptr) {
-            lvgl_port_set_touch_rotation(s_lvgl_touch_indev, LV_DISPLAY_ROTATION_90);
-        }
     }
 
     return ESP_OK;
@@ -398,7 +1082,7 @@ static void usb_event_cb(const cdc_acm_host_dev_event_data_t *event, void *user_
     case CDC_ACM_HOST_ERROR:
         // Ignore: CDC_ACM_HOST_ERROR is fired spuriously from residual async
         // transfer callbacks. Real disconnection is reported via
-        // CDC_ACM_HOST_DEVICE_DISCONNECTED (USB_HOST_CLIENT_EVENT_DEV_GONE).
+        // CDC_ACM_HOST_DEVICE_DISCONNECTED.
         ESP_LOGD(TAG, "CDC error %d (ignored)", event->data.error);
         break;
 
@@ -418,8 +1102,7 @@ static void usb_event_cb(const cdc_acm_host_dev_event_data_t *event, void *user_
 
 static void usb_new_dev_cb(usb_device_handle_t usb_dev)
 {
-    // VID/PID was already captured in usb_enum_filter_cb() which is called
-    // earlier in the enumeration pipeline and receives the device descriptor.
+    // VID/PID was already captured in usb_enum_filter_cb().
     // Wake up vcp_task; it will open the device.
     if (s_dev_present_sem) {
         xSemaphoreGive(s_dev_present_sem);
@@ -435,24 +1118,8 @@ static void usb_new_dev_cb(usb_device_handle_t usb_dev)
  *
  * Raspberry Pi g_serial gadget (loaded with use_acm=1, the default) exposes
  * its CDC-ACM function under configuration #2 ("CDC ACM config").
- * This is because the Linux g_serial driver hard-codes bConfigurationValue=2
- * for CDC-ACM mode, even though bNumConfigurations=1 (only one configuration
- * exists, but its value is 2).
- *
- * ESP-IDF's USB host enumerator always tries SET_CONFIGURATION(1) unless
- * told otherwise via this callback, which causes the Pi to STALL and
- * enumeration to fail with "CHECK_CONFIG FAILED".
- *
  * We identify the Pi g_serial gadget by its VID:PID (0x0525:0xa4a7) and
  * override bConfigurationValue to 2.
- *
- * NOTE: ESP-IDF's enum.c normally rejects bConfigurationValue > bNumConfigurations.
- * That check must be patched out in:
- *   components/usb/enum.c  select_active_configuration()
- * Change:
- *   if ((bConfigurationValue == 0) || (bConfigurationValue > dev_desc->bNumConfigurations))
- * to:
- *   if (bConfigurationValue == 0)
  */
 #define RPI_G_SERIAL_VID  0x0525u
 #define RPI_G_SERIAL_PID  0xa4a7u
@@ -463,15 +1130,10 @@ static bool usb_enum_filter_cb(const usb_device_desc_t *dev_desc,
     uint16_t vid = dev_desc->idVendor;
     uint16_t pid = dev_desc->idProduct;
 
-    // Store VID/PID so vcp_task can decide which open path to use.
-    // This callback is called before new_dev_cb, so the values are ready
-    // by the time vcp_task wakes up.
     s_dev_vid = vid;
     s_dev_pid = pid;
 
     if (vid == RPI_G_SERIAL_VID && pid == RPI_G_SERIAL_PID) {
-        // Raspberry Pi g_serial CDC-ACM: bConfigurationValue is 2
-        // even though bNumConfigurations == 1.
         *bConfigurationValue = 2;
         ESP_LOGI(TAG, "enum_filter: Raspberry Pi g_serial detected (VID=%04x PID=%04x), selecting config #2",
                  vid, pid);
@@ -479,7 +1141,7 @@ static bool usb_enum_filter_cb(const usb_device_desc_t *dev_desc,
         ESP_LOGD(TAG, "enum_filter: VID=%04x PID=%04x bNumConfigs=%d, using default config #%d",
                  vid, pid, dev_desc->bNumConfigurations, *bConfigurationValue);
     }
-    return true; // always proceed with enumeration
+    return true;
 }
 
 static void usb_lib_task(void *arg)
@@ -505,30 +1167,19 @@ static void usb_lib_task(void *arg)
     }
 
     // Run forever: never call usb_host_uninstall().
-    // When NO_CLIENTS is received, free all devices and keep looping so
-    // the next device connection is handled without reinstalling the host.
-    // This avoids the ESP_ERR_INVALID_STATE problem that occurs when
-    // usb_host_install() is called too soon after usb_host_uninstall().
     while (1) {
         uint32_t event_flags;
         usb_host_lib_handle_events(portMAX_DELAY, &event_flags);
 
         if (event_flags & USB_HOST_LIB_EVENT_FLAGS_NO_CLIENTS) {
-            // All CDC-ACM clients removed (device disconnected or enum failed).
-            // Free devices so the host can accept the next connection.
             ESP_LOGI(TAG, "USB lib: no clients, freeing devices");
             usb_host_device_free_all();
         }
         if (event_flags & USB_HOST_LIB_EVENT_FLAGS_ALL_FREE) {
-            // All devices freed.  Keep running; do NOT uninstall.
             ESP_LOGI(TAG, "USB lib: all devices free, waiting for next connection");
         }
     }
-    // Never reached
 }
-
-// usb_host_restart() has been removed.
-// usb_lib_task now runs permanently so no restart is needed.
 
 // ==============================================================
 // VCP Connection Task
@@ -559,7 +1210,7 @@ static void vcp_task(void *arg)
         .driver_task_stack_size = 4096,
         .driver_task_priority   = USB_CDC_PRIORITY,
         .xCoreID                = 0,
-        .new_dev_cb             = usb_new_dev_cb,  // Notified when any USB device appears
+        .new_dev_cb             = usb_new_dev_cb,
     };
     esp_err_t err = cdc_acm_host_install(&driver_config);
     if (err != ESP_OK) {
@@ -581,45 +1232,27 @@ static void vcp_task(void *arg)
     }
 
     // ---- Connection loop ----
-    // usb_lib_task runs permanently, so we only need to wait for a device
-    // to appear (via new_dev_cb semaphore) and open it.
     while (1) {
         screen_log("[USB] Waiting for device...\n");
         ESP_LOGI(TAG, "Waiting for USB device...");
 
-        // Wait for new_dev_cb to signal a device has appeared.
-        // Use a 3 s timeout so that if enumeration fails (CHECK_FULL_DEV_DESC
-        // FAILED etc.) and new_dev_cb is never called, we still retry instead
-        // of blocking forever.
         BaseType_t sem_taken = xSemaphoreTake(s_dev_present_sem, pdMS_TO_TICKS(3000));
         if (sem_taken != pdTRUE) {
-            // Timeout: no device appeared yet, loop back and wait again.
             continue;
         }
 
-        // Small delay to let the USB host enumerate the device fully
         vTaskDelay(pdMS_TO_TICKS(200));
 
-        // Drain any extra semaphore counts that may have accumulated
-        // (e.g. new_dev_cb called twice for the same physical device).
+        // Drain extra semaphore counts
         while (xSemaphoreTake(s_dev_present_sem, 0) == pdTRUE) {}
 
-        // Clear disconnect bit before opening
         xEventGroupClearBits(s_usb_event_group, USB_DEV_DISCONNECTED_BIT);
 
-        // Snapshot the VID/PID detected by new_dev_cb
         uint16_t dev_vid = s_dev_vid;
         uint16_t dev_pid = s_dev_pid;
         ESP_LOGI(TAG, "Opening device VID=%04x PID=%04x", dev_vid, dev_pid);
-        (void)dev_pid; // suppress unused-variable warning if not used below
+        (void)dev_pid;
 
-        // ---- Try to open as VCP (FTDI/CP210x/CH34x) first ----
-        // Skip VCP::open() for known non-VCP devices (e.g. Raspberry Pi g_serial).
-        // VCP::open() iterates all VCP drivers with ANY_VID/ANY_PID, which means
-        // it will try to open ANY connected device as FTDI/CP210x/CH34x, sending
-        // vendor-specific commands that corrupt the device state for subsequent
-        // standard CDC-ACM open.
-        //
         // Known VCP VIDs: FTDI=0x0403, CP210x=0x10C4, CH34x=0x1A86
         static const uint16_t VCP_VIDS[] = {0x0403u, 0x10C4u, 0x1A86u};
         bool is_known_vcp_vid = false;
@@ -632,7 +1265,7 @@ static void vcp_task(void *arg)
 
         if (is_known_vcp_vid) {
             cdc_acm_host_device_config_t vcp_cfg = {};
-            vcp_cfg.connection_timeout_ms = 100;   // Short timeout: device is already present
+            vcp_cfg.connection_timeout_ms = 100;
             vcp_cfg.out_buffer_size       = 512;
             vcp_cfg.in_buffer_size        = 512;
             vcp_cfg.event_cb              = usb_event_cb;
@@ -649,14 +1282,13 @@ static void vcp_task(void *arg)
             ESP_LOGI(TAG, "VID=%04x not a known VCP vendor, skipping VCP::open()", dev_vid);
         }
 
-        // ---- If not VCP, try standard CDC-ACM (e.g. Raspberry Pi) ----
         if (dev == nullptr) {
             cdc_acm_host_open_config_t cdc_cfg = {};
             cdc_cfg.vid                   = CDC_HOST_ANY_VID;
             cdc_cfg.pid                   = CDC_HOST_ANY_PID;
             cdc_cfg.interface_idx         = 0;
             cdc_cfg.dev_addr              = CDC_HOST_ANY_DEV_ADDR;
-            cdc_cfg.connection_timeout_ms = 1000;  // Device is present; short timeout
+            cdc_cfg.connection_timeout_ms = 1000;
             cdc_cfg.out_buffer_size       = 512;
             cdc_cfg.in_buffer_size        = 512;
             cdc_cfg.event_cb              = usb_event_cb;
@@ -675,16 +1307,11 @@ static void vcp_task(void *arg)
         }
 
         if (dev == nullptr) {
-            // Could not open: wait a bit and retry
             screen_log("[USB] Open failed, retrying...\n");
             vTaskDelay(pdMS_TO_TICKS(500));
             continue;
         }
 
-        // ---- Device connected ----
-        // Set line coding only for VCP devices (FTDI/CP210x/CH34x).
-        // Standard CDC-ACM devices (Raspberry Pi) do NOT support SET_LINE_CODING
-        // and respond with STALL.
         if (is_vcp) {
             cdc_acm_line_coding_t line_coding = {
                 .dwDTERate   = s_baud_rate,
@@ -710,7 +1337,6 @@ static void vcp_task(void *arg)
                  s_baud_rate, is_vcp ? "(VCP)" : "(CDC)");
         update_status_bar();
 
-        // Wait for device disconnect
         xEventGroupWaitBits(s_usb_event_group,
                             USB_DEV_DISCONNECTED_BIT,
                             pdTRUE, pdFALSE, portMAX_DELAY);
@@ -722,7 +1348,6 @@ static void vcp_task(void *arg)
         ESP_LOGI(TAG, "USB device closed");
         update_status_bar();
 
-        // Brief pause before looking for the next device
         vTaskDelay(pdMS_TO_TICKS(500));
     }
 }
@@ -745,7 +1370,6 @@ extern "C" void app_main(void)
         return;
     }
 
-    // Enable USB-A 5V power
     s_tab5_board.usb5v_enable(true);
     ESP_LOGI(TAG, "USB-A 5V power enabled");
 
@@ -756,10 +1380,17 @@ extern "C" void app_main(void)
         return;
     }
     ui_create();
-    term_clear();
-    term_put_string("M5Stack TAB5 Serial Terminal\n");
-    term_put_string("============================\n");
-    term_put_string("Initializing USB host...\n");
+    term_clear_all();
+
+    // Initial welcome message (processed through VT100 parser)
+    const char *welcome =
+        "\033[2J\033[H"                     // clear screen, home
+        "\033[1;32mM5Stack TAB5 Serial Terminal\033[0m\n"
+        "\033[32m============================\033[0m\n"
+        "Initializing USB host...\n";
+    for (const char *p = welcome; *p; p++) {
+        vt100_process_byte((uint8_t)*p);
+    }
     term_refresh_display();
 
     // ---- Queues, semaphores, and event groups ----
@@ -772,10 +1403,15 @@ extern "C" void app_main(void)
     // ---- VCP task ----
     xTaskCreate(vcp_task, "vcp_task", 8192, NULL, USB_VCP_PRIORITY, NULL);
 
-    // Wait for USB host to be ready (first time)
+    // Wait for USB host to be ready
     ulTaskNotifyTake(pdTRUE, pdMS_TO_TICKS(10000));
     ESP_LOGI(TAG, "USB ready, starting main loop");
-    term_put_string("Connect a USB-serial device to the USB-A port.\n\n");
+
+    // Print ready message through VT100 parser
+    const char *ready_msg = "Connect a USB-serial device to the USB-A port.\n\n";
+    for (const char *p = ready_msg; *p; p++) {
+        vt100_process_byte((uint8_t)*p);
+    }
     term_refresh_display();
 
     // ---- Keyboard init ----
@@ -795,7 +1431,8 @@ extern "C" void app_main(void)
         s_keyboard.enableStringMode(keyboard_event_cb, NULL);
     } else {
         ESP_LOGW(TAG, "Keyboard not detected (err=%d)", kb_err);
-        term_put_string("[WARNING] Keyboard not detected!\n");
+        const char *warn = "\033[1;33m[WARNING] Keyboard not detected!\033[0m\n";
+        for (const char *p = warn; *p; p++) vt100_process_byte((uint8_t)*p);
         term_refresh_display();
     }
 
@@ -809,15 +1446,17 @@ extern "C" void app_main(void)
         screen_log_msg_t log_msg;
         bool need_refresh = false;
         while (xQueueReceive(s_screen_log_queue, &log_msg, 0) == pdTRUE) {
-            term_put_string(log_msg.msg);
+            for (const char *p = log_msg.msg; *p; p++) {
+                vt100_process_byte((uint8_t)*p);
+            }
             need_refresh = true;
         }
 
-        // Process USB RX data
+        // Process USB RX data through VT100 parser
         usb_rx_msg_t rx_msg;
         while (xQueueReceive(s_usb_rx_queue, &rx_msg, 0) == pdTRUE) {
             for (size_t i = 0; i < rx_msg.len; i++) {
-                term_put_char((char)rx_msg.data[i]);
+                vt100_process_byte(rx_msg.data[i]);
             }
             need_refresh = true;
         }
@@ -835,8 +1474,10 @@ extern "C" void app_main(void)
             if (ctrl) {
                 char k = key_msg.str[0];
                 if (k == 'c' || k == 'C') {
-                    term_clear();
-                    term_put_string("[Screen cleared]\n");
+                    // Ctrl+C: clear screen
+                    term_clear_all();
+                    const char *msg = "\033[1;32m[Screen cleared]\033[0m\n";
+                    for (const char *p = msg; *p; p++) vt100_process_byte((uint8_t)*p);
                     term_refresh_display();
                     continue;
                 }
@@ -859,8 +1500,8 @@ extern "C" void app_main(void)
                         s_vcp_dev->line_coding_set(&lc);
                     }
                     char msg[64];
-                    snprintf(msg, sizeof(msg), "\n[Baud: %"PRIu32"]\n", s_baud_rate);
-                    term_put_string(msg);
+                    snprintf(msg, sizeof(msg), "\n\033[1;33m[Baud: %"PRIu32"]\033[0m\n", s_baud_rate);
+                    for (const char *p = msg; *p; p++) vt100_process_byte((uint8_t)*p);
                     term_refresh_display();
                     update_status_bar();
                     continue;
@@ -874,7 +1515,6 @@ extern "C" void app_main(void)
             }
 
             // TAB5 keyboard STRING mode sends ENTER key as the literal string "enter"
-            // (not as \r or \n). Detect this and send LF (\n) to the USB device.
             if (strcmp(key_msg.str, "enter") == 0) {
                 if (s_usb_connected && s_vcp_dev) {
                     uint8_t lf = '\n';
@@ -883,7 +1523,7 @@ extern "C" void app_main(void)
                         ESP_LOGW(TAG, "TX error: %s", esp_err_to_name(tx_err));
                     }
                 }
-                term_put_char('\n');
+                vt100_process_byte('\n');
                 term_refresh_display();
                 continue;
             }
@@ -897,18 +1537,18 @@ extern "C" void app_main(void)
                         uint8_t lf = '\n';
                         s_vcp_dev->tx_blocking(&lf, 1, 1000);
                     }
-                    term_put_char('\n');
+                    vt100_process_byte('\n');
                 } else if (c == '\b' || c == 0x7F) {
                     if (s_usb_connected && s_vcp_dev) {
                         uint8_t bs = '\b';
                         s_vcp_dev->tx_blocking(&bs, 1, 1000);
                     }
-                    term_put_char('\b');
+                    vt100_process_byte('\b');
                 } else {
                     if (s_usb_connected && s_vcp_dev) {
                         s_vcp_dev->tx_blocking((uint8_t *)&c, 1, 1000);
                     }
-                    term_put_char(c);
+                    vt100_process_byte((uint8_t)c);
                 }
             }
             term_refresh_display();
