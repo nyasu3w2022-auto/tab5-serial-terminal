@@ -596,6 +596,8 @@ static void vt100_process_byte(uint8_t byte)
         if (c == 0x1B) {  // ESC
             vt_state = VT_STATE_ESC;
         } else if (c == '\n') {
+            // LF: move down and reset column (implicit CR+LF for internal messages)
+            cursor_col = 0;
             if (cursor_row == scroll_bot) {
                 term_scroll_up(1);
             } else {
@@ -1514,41 +1516,61 @@ extern "C" void app_main(void)
                 continue;
             }
 
-            // TAB5 keyboard STRING mode sends ENTER key as the literal string "enter"
-            if (strcmp(key_msg.str, "enter") == 0) {
-                if (s_usb_connected && s_vcp_dev) {
-                    uint8_t lf = '\n';
-                    esp_err_t tx_err = s_vcp_dev->tx_blocking(&lf, 1, 1000);
-                    if (tx_err != ESP_OK) {
-                        ESP_LOGW(TAG, "TX error: %s", esp_err_to_name(tx_err));
+            // TAB5 keyboard STRING mode: map special key names to VT100 sequences
+            // and send to USB; no local echo (remote device echoes back).
+            struct {
+                const char *name;
+                const char *seq;
+            } special_keys[] = {
+                { "enter",     "\r"         },
+                { "backspace", "\x7f"       },  // DEL (most terminals expect 0x7F)
+                { "tab",       "\t"         },
+                { "up",        "\x1b[A"     },
+                { "down",      "\x1b[B"     },
+                { "right",     "\x1b[C"     },
+                { "left",      "\x1b[D"     },
+                { "home",      "\x1b[H"     },
+                { "end",       "\x1b[F"     },
+                { "pageup",    "\x1b[5~"    },
+                { "pagedown",  "\x1b[6~"    },
+                { "insert",    "\x1b[2~"    },
+                { "delete",    "\x1b[3~"    },
+                { "f1",        "\x1bOP"     },
+                { "f2",        "\x1bOQ"     },
+                { "f3",        "\x1bOR"     },
+                { "f4",        "\x1bOS"     },
+                { "f5",        "\x1b[15~"   },
+                { "f6",        "\x1b[17~"   },
+                { "f7",        "\x1b[18~"   },
+                { "f8",        "\x1b[19~"   },
+                { "f9",        "\x1b[20~"   },
+                { "f10",       "\x1b[21~"   },
+                { "f11",       "\x1b[23~"   },
+                { "f12",       "\x1b[24~"   },
+                { "escape",    "\x1b"       },
+                { NULL, NULL }
+            };
+
+            bool handled = false;
+            for (int k = 0; special_keys[k].name != NULL; k++) {
+                if (strcasecmp(key_msg.str, special_keys[k].name) == 0) {
+                    if (s_usb_connected && s_vcp_dev) {
+                        const char *seq = special_keys[k].seq;
+                        s_vcp_dev->tx_blocking((const uint8_t *)seq, strlen(seq), 1000);
                     }
+                    handled = true;
+                    break;
                 }
-                vt100_process_byte('\n');
-                term_refresh_display();
-                continue;
             }
 
-            // Normal character processing
-            for (int i = 0; key_msg.str[i] != '\0'; i++) {
-                char c = key_msg.str[i];
-
-                if (c == '\r' || c == '\n') {
-                    if (s_usb_connected && s_vcp_dev) {
-                        uint8_t lf = '\n';
-                        s_vcp_dev->tx_blocking(&lf, 1, 1000);
-                    }
-                    vt100_process_byte('\n');
-                } else if (c == '\b' || c == 0x7F) {
-                    if (s_usb_connected && s_vcp_dev) {
-                        uint8_t bs = '\b';
-                        s_vcp_dev->tx_blocking(&bs, 1, 1000);
-                    }
-                    vt100_process_byte('\b');
-                } else {
+            if (!handled) {
+                // Normal printable characters: send to USB, no local echo
+                for (int i = 0; key_msg.str[i] != '\0'; i++) {
+                    char c = key_msg.str[i];
                     if (s_usb_connected && s_vcp_dev) {
                         s_vcp_dev->tx_blocking((uint8_t *)&c, 1, 1000);
                     }
-                    vt100_process_byte((uint8_t)c);
+                    // No local echo: remote device will echo back via USB RX
                 }
             }
             term_refresh_display();
