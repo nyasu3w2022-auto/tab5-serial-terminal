@@ -341,11 +341,45 @@ static void vt_clamp_cursor(void)
     if (cursor_col >= TERM_COLS) cursor_col = TERM_COLS - 1;
 }
 
+// Map 256-color index to nearest 16-color index
+// 0-7: standard colors (map directly)
+// 8-15: bright colors (map directly)
+// 16-231: 6x6x6 color cube -> nearest 8-color
+// 232-255: grayscale -> nearest 8-color
+static uint8_t color256_to_16(int idx)
+{
+    if (idx < 0)   idx = 0;
+    if (idx > 255) idx = 255;
+    if (idx < 16)  return (uint8_t)idx;  // direct map
+    if (idx >= 232) {
+        // Grayscale 232-255: map to black(0)/dark-gray(8)/light-gray(7)/white(15)
+        int v = idx - 232;  // 0..23
+        if (v < 6)  return 0;   // black
+        if (v < 12) return 8;   // dark gray
+        if (v < 18) return 7;   // light gray
+        return 15;              // white
+    }
+    // 6x6x6 cube: index 16..231
+    int cube = idx - 16;
+    int b = cube % 6;
+    int g = (cube / 6) % 6;
+    int r = cube / 36;
+    // Map each channel 0..5 -> 0..1 (threshold at 3)
+    int rb = (r >= 3) ? 1 : 0;
+    int gb = (g >= 3) ? 1 : 0;
+    int bb = (b >= 3) ? 1 : 0;
+    // Bright variant if any channel is high
+    bool bright = (r >= 4 || g >= 4 || b >= 4);
+    uint8_t base = (uint8_t)(rb | (gb << 1) | (bb << 2));
+    return bright ? (base | 8) : base;
+}
+
 // SGR: set graphic rendition
 static void vt_sgr(void)
 {
     int n = (vt_num_params == 0) ? 1 : vt_num_params;
-    for (int i = 0; i < n; i++) {
+    int i = 0;
+    while (i < n) {
         int p = vt_param(i, 0);
         if (p == 0) {
             cur_fg   = DEFAULT_FG;
@@ -367,8 +401,42 @@ static void vt_sgr(void)
             cur_fg = (uint8_t)(p - 90 + 8);
         } else if (p >= 100 && p <= 107) {
             cur_bg = (uint8_t)(p - 100 + 8);
+        } else if (p == 38) {
+            // 256-color or truecolor foreground
+            int mode = vt_param(i + 1, -1);
+            if (mode == 5 && i + 2 < n) {
+                // ESC[38;5;Nm - 256 color
+                cur_fg = color256_to_16(vt_param(i + 2, 0));
+                i += 2;
+            } else if (mode == 2 && i + 4 < n) {
+                // ESC[38;2;R;G;Bm - truecolor: approximate to nearest 8-color
+                int r = vt_param(i + 2, 0);
+                int g = vt_param(i + 3, 0);
+                int b = vt_param(i + 4, 0);
+                bool bright = (r > 170 || g > 170 || b > 170);
+                uint8_t base = (uint8_t)((r > 85 ? 1 : 0) | (g > 85 ? 2 : 0) | (b > 85 ? 4 : 0));
+                cur_fg = bright ? (base | 8) : base;
+                i += 4;
+            }
+        } else if (p == 48) {
+            // 256-color or truecolor background
+            int mode = vt_param(i + 1, -1);
+            if (mode == 5 && i + 2 < n) {
+                cur_bg = color256_to_16(vt_param(i + 2, 0));
+                i += 2;
+            } else if (mode == 2 && i + 4 < n) {
+                int r = vt_param(i + 2, 0);
+                int g = vt_param(i + 3, 0);
+                int b = vt_param(i + 4, 0);
+                bool bright = (r > 170 || g > 170 || b > 170);
+                uint8_t base = (uint8_t)((r > 85 ? 1 : 0) | (g > 85 ? 2 : 0) | (b > 85 ? 4 : 0));
+                cur_bg = bright ? (base | 8) : base;
+                i += 4;
+            }
         }
+        i++;
     }
+    ESP_LOGD(TAG, "SGR: fg=%d bg=%d bold=%d (params=%d)", cur_fg, cur_bg, cur_bold, n);
 }
 
 // Process a complete CSI sequence (ESC [ params final_char)
@@ -838,6 +906,9 @@ static void term_rebuild_row(int r)
             if (cur_span == NULL) break;
             lv_style_t *style = lv_span_get_style(cur_span);
             lv_style_set_text_color(style, TERM_COLORS[fg]);
+            // Note: lv_span style only supports text properties (color, font, decor, opa).
+            // Background color per-span is not supported by LVGL v9 spangroup.
+            // Row background is set via lv_obj_set_style_bg_color() on the spangroup object.
             last_fg = fg;
             last_bg = bg;
             span_len = 0;
@@ -849,7 +920,9 @@ static void term_rebuild_row(int r)
         span_text[span_len++] = (ch >= 0x20 && ch < 0x7F) ? ch : ' ';
     }
 
-    lv_spangroup_refr_mode(sg);
+    // LV_SPAN_MODE_FIXED: refr_mode just calls refresh_self_size.
+    // Explicitly invalidate to trigger redraw.
+    lv_obj_invalidate(sg);
 }
 
 static void term_refresh_display(void)
