@@ -1629,7 +1629,7 @@ extern "C" void app_main(void)
                 if (strcasecmp(key_msg.str, special_keys[k].name) == 0) {
                     if (s_usb_connected && s_vcp_dev) {
                         const char *seq = special_keys[k].seq;
-                        s_vcp_dev->tx_blocking((const uint8_t *)seq, strlen(seq), 1000);
+                        s_vcp_dev->tx_blocking((uint8_t *)seq, strlen(seq), 1000);
                     }
                     handled = true;
                     break;
