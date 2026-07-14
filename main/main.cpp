@@ -25,10 +25,12 @@
 #include <stdio.h>
 #include <string.h>
 #include <stdlib.h>
+#include <ctype.h>
 #include <inttypes.h>
 #include <esp_log.h>
 #include <esp_err.h>
 #include <esp_system.h>
+#include <esp_heap_caps.h>
 #include <freertos/FreeRTOS.h>
 #include <freertos/task.h>
 #include <freertos/queue.h>
@@ -126,7 +128,8 @@ static bool cursor_blink_state = true;  // true = shown
 static lv_obj_t  *term_canvas  = NULL;  // canvas for terminal area
 static lv_obj_t  *status_label = NULL;
 static lv_timer_t *cursor_timer = NULL;
-static lv_obj_t  *row_spangroups[TERM_ROWS] = {};  // one spangroup per terminal row
+static lv_obj_t  *row_canvases[TERM_ROWS] = {};  // one canvas per terminal row for color drawing
+static uint8_t   *row_canvas_bufs[TERM_ROWS] = {};  // PSRAM buffers for each canvas row
 static bool       row_dirty[TERM_ROWS] = {};    // true if row needs redraw
 
 static m5::tab5::m5tab5_component s_tab5_board;
@@ -664,13 +667,12 @@ static void vt100_process_byte(uint8_t byte)
         if (c == 0x1B) {  // ESC
             vt_state = VT_STATE_ESC;
         } else if (c == '\n') {
-            // LF: move down and reset column (implicit CR+LF for internal messages)
-            cursor_col = 0;
+            // LF: move cursor down only (VT100 standard: LF does not reset column)
+            // Note: remote devices typically send CR+LF, so \r resets column separately.
             if (cursor_row == scroll_bot) {
                 term_scroll_up(1);
-            } else {
+            } else if (cursor_row < TERM_ROWS - 1) {
                 cursor_row++;
-                if (cursor_row >= TERM_ROWS) cursor_row = TERM_ROWS - 1;
             }
         } else if (c == '\r') {
             cursor_col = 0;
@@ -849,80 +851,78 @@ static void vt100_process_byte(uint8_t byte)
 // LVGL Display Update
 // ==============================================================
 
-// Recolor format: #RRGGBB text# (LVGL recolor syntax)
-// We build a string for each row with color spans.
-// Span text buffer: worst case all 45 cells different colors + cursor
-// Each span text: up to TERM_COLS chars + NUL
-#define SPAN_TEXT_BUF  (TERM_COLS + 2)
+// Text buffer for one row: TERM_COLS chars + NUL
+#define ROW_TEXT_BUF  (TERM_COLS + 1)
 
-// Rebuild a single row's spangroup from term_buffer.
+// Rebuild a single row's canvas from term_buffer.
+// Uses lv_canvas + lv_draw_label for per-cell color support.
 // Must be called with LVGL lock held.
 static void term_rebuild_row(int r)
 {
-    lv_obj_t *sg = row_spangroups[r];
-    if (sg == NULL) return;
+    lv_obj_t *cv = row_canvases[r];
+    if (cv == NULL) return;
 
-    // Delete all existing spans
-    uint32_t span_count = lv_spangroup_get_span_count(sg);
-    for (uint32_t i = 0; i < span_count; i++) {
-        lv_span_t *sp = lv_spangroup_get_child(sg, 0);
-        if (sp) lv_spangroup_delete_span(sg, sp);
-    }
+    // Fill background with black
+    lv_canvas_fill_bg(cv, lv_color_black(), LV_OPA_COVER);
 
-    // Build new spans: group consecutive cells with same fg/bg/cursor
-    static char span_text[SPAN_TEXT_BUF];
-    uint8_t last_fg = 255, last_bg = 255;
-    lv_span_t *cur_span = NULL;
-    int span_len = 0;
+    // Init drawing layer
+    lv_layer_t layer;
+    lv_canvas_init_layer(cv, &layer);
+
+    // Draw each run of same-colored cells as one lv_draw_label call
+    static char run_text[ROW_TEXT_BUF];
+    int run_start = 0;
+    int run_len   = 0;
+    uint8_t run_fg = 255;
+    bool run_cursor = false;
 
     for (int c = 0; c <= TERM_COLS; c++) {
-        // Flush span at end or on color change
+        uint8_t fg = 0;
         bool is_cursor = false;
-        uint8_t fg = 0, bg = 0;
 
         if (c < TERM_COLS) {
             TermCell *cell = &term_buffer[r][c];
             fg = cell->fg & 15;
-            bg = cell->bg & 15;
             is_cursor = (r == cursor_row && c == cursor_col &&
                          cursor_visible && cursor_blink_state);
-            if (is_cursor) { uint8_t tmp = fg; fg = bg; bg = tmp; }
         }
 
-        bool color_changed = (c == TERM_COLS) || (fg != last_fg || bg != last_bg);
+        bool flush = (c == TERM_COLS) || (fg != run_fg) || (is_cursor != run_cursor);
 
-        if (color_changed && cur_span != NULL && span_len > 0) {
-            // Finalize current span text
-            span_text[span_len] = '\0';
-            lv_span_set_text(cur_span, span_text);
-            cur_span = NULL;
-            span_len = 0;
+        if (flush && run_len > 0) {
+            run_text[run_len] = '\0';
+            lv_draw_label_dsc_t dsc;
+            lv_draw_label_dsc_init(&dsc);
+            dsc.font        = &lv_font_unscii_16;
+            dsc.color       = run_cursor ? lv_color_white() : TERM_COLORS[run_fg];
+            dsc.text        = run_text;
+            dsc.text_local  = 1;  // LVGL copies text (safe for static buffer reuse)
+            dsc.letter_space = 0;
+            dsc.line_space  = 0;
+            if (run_cursor) dsc.decor = LV_TEXT_DECOR_UNDERLINE;
+            lv_area_t area = {
+                .x1 = (int32_t)(run_start * TERM_FONT_W),
+                .y1 = 0,
+                .x2 = (int32_t)(c * TERM_FONT_W - 1),
+                .y2 = TERM_FONT_H - 1,
+            };
+            lv_draw_label(&layer, &dsc, &area);
+            run_len = 0;
         }
 
         if (c >= TERM_COLS) break;
 
-        if (cur_span == NULL) {
-            cur_span = lv_spangroup_new_span(sg);
-            if (cur_span == NULL) break;
-            lv_style_t *style = lv_span_get_style(cur_span);
-            lv_style_set_text_color(style, TERM_COLORS[fg]);
-            // Note: lv_span style only supports text properties (color, font, decor, opa).
-            // Background color per-span is not supported by LVGL v9 spangroup.
-            // Row background is set via lv_obj_set_style_bg_color() on the spangroup object.
-            last_fg = fg;
-            last_bg = bg;
-            span_len = 0;
+        if (run_len == 0) {
+            run_start  = c;
+            run_fg     = fg;
+            run_cursor = is_cursor;
         }
-
-        // Append character to span text
         TermCell *cell = &term_buffer[r][c];
         char ch = cell->ch;
-        span_text[span_len++] = (ch >= 0x20 && ch < 0x7F) ? ch : ' ';
+        run_text[run_len++] = (ch >= 0x20 && ch < 0x7F) ? ch : ' ';
     }
 
-    // LV_SPAN_MODE_FIXED: refr_mode just calls refresh_self_size.
-    // Explicitly invalidate to trigger redraw.
-    lv_obj_invalidate(sg);
+    lv_canvas_finish_layer(cv, &layer);
 }
 
 static void term_refresh_display(void)
@@ -1005,19 +1005,23 @@ static void ui_create(void)
     lv_obj_set_style_pad_all(term_canvas, 0, 0);
     lv_obj_clear_flag(term_canvas, LV_OBJ_FLAG_SCROLLABLE);
 
-    // Create one spangroup per row for per-cell color support
+    // Create one canvas per row for per-cell color support.
+    // Canvas uses lv_draw_label with per-run color for reliable color rendering.
+    // Buffer: 720 * TERM_FONT_H * 2 bytes (RGB565) per row, allocated from PSRAM.
     for (int r = 0; r < TERM_ROWS; r++) {
-        row_spangroups[r] = lv_spangroup_create(term_canvas);
-        lv_obj_set_style_text_font(row_spangroups[r], &lv_font_unscii_16, 0);
-        lv_obj_set_style_text_letter_space(row_spangroups[r], 0, 0);
-        lv_obj_set_style_text_line_space(row_spangroups[r], 0, 0);
-        lv_obj_set_style_bg_color(row_spangroups[r], lv_color_black(), 0);
-        lv_obj_set_style_bg_opa(row_spangroups[r], LV_OPA_COVER, 0);
-        lv_obj_set_style_pad_all(row_spangroups[r], 0, 0);
-        lv_obj_set_pos(row_spangroups[r], 0, r * TERM_FONT_H);
-        lv_obj_set_size(row_spangroups[r], 720, TERM_FONT_H);
-        lv_spangroup_set_overflow(row_spangroups[r], LV_SPAN_OVERFLOW_CLIP);
-        lv_spangroup_set_mode(row_spangroups[r], LV_SPAN_MODE_FIXED);
+        // Allocate canvas buffer from PSRAM
+        // RGB565: 2 bytes/pixel, 4-byte stride alignment
+        size_t buf_size = LV_CANVAS_BUF_SIZE(720, TERM_FONT_H, 16, 4);
+        row_canvas_bufs[r] = (uint8_t *)heap_caps_malloc(buf_size, MALLOC_CAP_SPIRAM);
+        if (row_canvas_bufs[r] == NULL) {
+            ESP_LOGE(TAG, "Failed to allocate canvas buffer for row %d", r);
+            continue;
+        }
+        row_canvases[r] = lv_canvas_create(term_canvas);
+        lv_canvas_set_buffer(row_canvases[r], row_canvas_bufs[r], 720, TERM_FONT_H, LV_COLOR_FORMAT_RGB565);
+        lv_obj_set_pos(row_canvases[r], 0, r * TERM_FONT_H);
+        lv_obj_set_size(row_canvases[r], 720, TERM_FONT_H);
+        lv_canvas_fill_bg(row_canvases[r], lv_color_black(), LV_OPA_COVER);
         row_dirty[r] = true;  // initial draw
     }
 
@@ -1547,8 +1551,10 @@ extern "C" void app_main(void)
             bool ctrl = (key_msg.modifier & 0x01) != 0;
 
             if (ctrl) {
-                char k = key_msg.str[0];
-                if (k == 'c' || k == 'C') {
+                // str_data contains the key name (e.g. "c", "escape", "up")
+                // Convert to uppercase for control char calculation
+                char k = (char)toupper((unsigned char)key_msg.str[0]);
+                if (k == 'C') {
                     // Ctrl+C: clear screen
                     term_clear_all();
                     const char *msg = "\033[1;32m[Screen cleared]\033[0m\n";
@@ -1582,7 +1588,15 @@ extern "C" void app_main(void)
                     continue;
                 }
                 // Other Ctrl+key: send as control character to USB
-                if (s_usb_connected && s_vcp_dev && k >= '@' && k <= '_') {
+                // k is already uppercased; '@'(0x40) to '_'(0x5F) maps to 0x00-0x1F
+                // Also handle special key names with Ctrl (e.g. Ctrl+escape = ESC)
+                if (strcasecmp(key_msg.str, "escape") == 0 || strcasecmp(key_msg.str, "esc") == 0) {
+                    // Ctrl+ESC: send ESC
+                    if (s_usb_connected && s_vcp_dev) {
+                        uint8_t esc = 0x1B;
+                        s_vcp_dev->tx_blocking(&esc, 1, 1000);
+                    }
+                } else if (s_usb_connected && s_vcp_dev && k >= '@' && k <= '_') {
                     uint8_t ctrl_char = (uint8_t)(k - '@');
                     s_vcp_dev->tx_blocking(&ctrl_char, 1, 1000);
                 }
@@ -1621,6 +1635,7 @@ extern "C" void app_main(void)
                 { "f11",       "\x1b[23~"   },
                 { "f12",       "\x1b[24~"   },
                 { "escape",    "\x1b"       },
+                { "esc",       "\x1b"       },  // TAB5 keyboard sends "esc" (not "escape")
                 { NULL, NULL }
             };
 
