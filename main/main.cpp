@@ -59,11 +59,16 @@ static const char *TAG = "terminal";
 // ==============================================================
 // Terminal Screen Configuration
 // ==============================================================
+// NOTE: TAB5 display is physically 720x1280 (portrait), but LVGL uses
+// LV_DISPLAY_ROTATION_90 with PPA, so the LVGL logical coordinate space
+// is 1280x720 (landscape). All UI coordinates must use the rotated values.
+#define LVGL_W          1280   // LVGL logical width  (after 90-degree rotation)
+#define LVGL_H          720    // LVGL logical height (after 90-degree rotation)
 #define TERM_FONT_W     16
 #define TERM_FONT_H     16
 #define STATUS_BAR_H    20
-#define TERM_COLS       (720 / TERM_FONT_W)   // 45
-#define TERM_ROWS       ((1280 - STATUS_BAR_H) / TERM_FONT_H)  // 78
+#define TERM_COLS       (LVGL_W / TERM_FONT_W)              // 80
+#define TERM_ROWS       ((LVGL_H - STATUS_BAR_H) / TERM_FONT_H)  // 43
 
 // ==============================================================
 // Terminal Cell and Color Definitions
@@ -891,21 +896,29 @@ static void term_rebuild_row(int r)
 
         if (flush && run_len > 0) {
             run_text[run_len] = '\0';
-            lv_draw_label_dsc_t dsc;
-            lv_draw_label_dsc_init(&dsc);
-            dsc.font        = &lv_font_unscii_16;
-            dsc.color       = run_cursor ? lv_color_white() : TERM_COLORS[run_fg];
-            dsc.text        = run_text;
-            dsc.text_local  = 1;  // LVGL copies text (safe for static buffer reuse)
-            dsc.letter_space = 0;
-            dsc.line_space  = 0;
-            if (run_cursor) dsc.decor = LV_TEXT_DECOR_UNDERLINE;
             lv_area_t area = {
                 .x1 = (int32_t)(run_start * TERM_FONT_W),
                 .y1 = 0,
                 .x2 = (int32_t)(c * TERM_FONT_W - 1),
                 .y2 = TERM_FONT_H - 1,
             };
+            // For cursor: draw white background rect, then black text (inverted)
+            if (run_cursor) {
+                lv_draw_rect_dsc_t rdsc;
+                lv_draw_rect_dsc_init(&rdsc);
+                rdsc.bg_color = lv_color_white();
+                rdsc.bg_opa   = LV_OPA_COVER;
+                rdsc.radius   = 0;
+                lv_draw_rect(&layer, &rdsc, &area);
+            }
+            lv_draw_label_dsc_t dsc;
+            lv_draw_label_dsc_init(&dsc);
+            dsc.font        = &lv_font_unscii_16;
+            dsc.color       = run_cursor ? lv_color_black() : TERM_COLORS[run_fg];
+            dsc.text        = run_text;
+            dsc.text_local  = 1;  // LVGL copies text (safe for static buffer reuse)
+            dsc.letter_space = 0;
+            dsc.line_space  = 0;
             lv_draw_label(&layer, &dsc, &area);
             run_len = 0;
         }
@@ -996,9 +1009,10 @@ static void ui_create(void)
     lv_obj_set_style_bg_opa(scr, LV_OPA_COVER, 0);
 
     // Terminal area container
+    // LVGL logical size is 1280x720 (rotated from physical 720x1280)
     term_canvas = lv_obj_create(scr);
     lv_obj_set_pos(term_canvas, 0, 0);
-    lv_obj_set_size(term_canvas, 720, 1280 - STATUS_BAR_H);
+    lv_obj_set_size(term_canvas, LVGL_W, LVGL_H - STATUS_BAR_H);
     lv_obj_set_style_bg_color(term_canvas, lv_color_black(), 0);
     lv_obj_set_style_bg_opa(term_canvas, LV_OPA_COVER, 0);
     lv_obj_set_style_border_width(term_canvas, 0, 0);
@@ -1011,16 +1025,17 @@ static void ui_create(void)
     for (int r = 0; r < TERM_ROWS; r++) {
         // Allocate canvas buffer from PSRAM
         // RGB565: 2 bytes/pixel, 4-byte stride alignment
-        size_t buf_size = LV_CANVAS_BUF_SIZE(720, TERM_FONT_H, 16, 4);
+        // Canvas width = LVGL_W = 1280 (logical width after rotation)
+        size_t buf_size = LV_CANVAS_BUF_SIZE(LVGL_W, TERM_FONT_H, 16, 4);
         row_canvas_bufs[r] = (uint8_t *)heap_caps_malloc(buf_size, MALLOC_CAP_SPIRAM);
         if (row_canvas_bufs[r] == NULL) {
             ESP_LOGE(TAG, "Failed to allocate canvas buffer for row %d", r);
             continue;
         }
         row_canvases[r] = lv_canvas_create(term_canvas);
-        lv_canvas_set_buffer(row_canvases[r], row_canvas_bufs[r], 720, TERM_FONT_H, LV_COLOR_FORMAT_RGB565);
+        lv_canvas_set_buffer(row_canvases[r], row_canvas_bufs[r], LVGL_W, TERM_FONT_H, LV_COLOR_FORMAT_RGB565);
         lv_obj_set_pos(row_canvases[r], 0, r * TERM_FONT_H);
-        lv_obj_set_size(row_canvases[r], 720, TERM_FONT_H);
+        lv_obj_set_size(row_canvases[r], LVGL_W, TERM_FONT_H);
         lv_canvas_fill_bg(row_canvases[r], lv_color_black(), LV_OPA_COVER);
         row_dirty[r] = true;  // initial draw
     }
@@ -1031,8 +1046,8 @@ static void ui_create(void)
     lv_obj_set_style_text_color(status_label, lv_color_make(0, 0, 0), 0);
     lv_obj_set_style_bg_color(status_label, lv_color_make(0, 200, 0), 0);
     lv_obj_set_style_bg_opa(status_label, LV_OPA_COVER, 0);
-    lv_obj_set_pos(status_label, 0, 1280 - STATUS_BAR_H);
-    lv_obj_set_size(status_label, 720, STATUS_BAR_H);
+    lv_obj_set_pos(status_label, 0, LVGL_H - STATUS_BAR_H);
+    lv_obj_set_size(status_label, LVGL_W, STATUS_BAR_H);
     lv_label_set_text(status_label, " TAB5 Serial Terminal - Initializing...");
 
     // Cursor blink timer (500ms interval)
@@ -1312,7 +1327,7 @@ static void vcp_task(void *arg)
 
     // ---- Connection loop ----
     while (1) {
-        screen_log("[USB] Waiting for device...\n");
+        screen_log("[USB] Waiting for device...\r\n");
         ESP_LOGI(TAG, "Waiting for USB device...");
 
         BaseType_t sem_taken = xSemaphoreTake(s_dev_present_sem, pdMS_TO_TICKS(3000));
@@ -1386,7 +1401,7 @@ static void vcp_task(void *arg)
         }
 
         if (dev == nullptr) {
-            screen_log("[USB] Open failed, retrying...\n");
+            screen_log("[USB] Open failed, retrying...\r\n");
             vTaskDelay(pdMS_TO_TICKS(500));
             continue;
         }
@@ -1410,7 +1425,7 @@ static void vcp_task(void *arg)
 
         s_vcp_dev       = dev;
         s_usb_connected = true;
-        screen_log("[USB] Connected! Baud:%"PRIu32" %s\n",
+        screen_log("[USB] Connected! Baud:%"PRIu32" %s\r\n",
                    s_baud_rate, is_vcp ? "(VCP)" : "(CDC)");
         ESP_LOGI(TAG, "USB connected, baud=%"PRIu32" %s",
                  s_baud_rate, is_vcp ? "(VCP)" : "(CDC)");
@@ -1423,7 +1438,7 @@ static void vcp_task(void *arg)
         s_vcp_dev       = nullptr;
         s_usb_connected = false;
         delete dev;
-        screen_log("[USB] Disconnected.\n");
+        screen_log("[USB] Disconnected.\r\n");
         ESP_LOGI(TAG, "USB device closed");
         update_status_bar();
 
@@ -1462,11 +1477,12 @@ extern "C" void app_main(void)
     term_clear_all();
 
     // Initial welcome message (processed through VT100 parser)
+    // Use \r\n for internal messages since VT100 parser handles LF-only now
     const char *welcome =
         "\033[2J\033[H"                     // clear screen, home
-        "\033[1;32mM5Stack TAB5 Serial Terminal\033[0m\n"
-        "\033[32m============================\033[0m\n"
-        "Initializing USB host...\n";
+        "\033[1;32mM5Stack TAB5 Serial Terminal\033[0m\r\n"
+        "\033[32m============================\033[0m\r\n"
+        "Initializing USB host...\r\n";
     for (const char *p = welcome; *p; p++) {
         vt100_process_byte((uint8_t)*p);
     }
@@ -1487,7 +1503,7 @@ extern "C" void app_main(void)
     ESP_LOGI(TAG, "USB ready, starting main loop");
 
     // Print ready message through VT100 parser
-    const char *ready_msg = "Connect a USB-serial device to the USB-A port.\n\n";
+    const char *ready_msg = "Connect a USB-serial device to the USB-A port.\r\n\r\n";
     for (const char *p = ready_msg; *p; p++) {
         vt100_process_byte((uint8_t)*p);
     }
@@ -1510,7 +1526,7 @@ extern "C" void app_main(void)
         s_keyboard.enableStringMode(keyboard_event_cb, NULL);
     } else {
         ESP_LOGW(TAG, "Keyboard not detected (err=%d)", kb_err);
-        const char *warn = "\033[1;33m[WARNING] Keyboard not detected!\033[0m\n";
+        const char *warn = "\033[1;33m[WARNING] Keyboard not detected!\033[0m\r\n";
         for (const char *p = warn; *p; p++) vt100_process_byte((uint8_t)*p);
         term_refresh_display();
     }
