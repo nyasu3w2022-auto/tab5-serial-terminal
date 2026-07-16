@@ -44,7 +44,7 @@
 #include "lvgl_port_disp.h"
 #include "lvgl_port_touch.h"
 #include "lvgl.h"
-
+#include "font/lv_font_fmt_txt.h"  // for lv_font_fmt_txt_dsc_t direct bitmap access
 // USB Host
 #include "usb/usb_host.h"
 #include "usb/cdc_acm_host.h"
@@ -858,11 +858,16 @@ static void vt100_process_byte(uint8_t byte)
 
 // Rebuild a single row's canvas from term_buffer.
 // Directly writes RGB565 pixels into the canvas buffer for reliable color rendering.
+// Accesses lv_font_fmt_txt_dsc_t internals to get raw A1 bitmap without draw_buf.
 // Must be called with LVGL lock held.
 static void term_rebuild_row(int r)
 {
     uint16_t *buf = (uint16_t *)row_canvas_bufs[r];
     if (buf == NULL) return;
+
+    // Access font internals for raw bitmap data (avoids lv_font_get_glyph_bitmap NULL crash)
+    const lv_font_t *font = &lv_font_unscii_16;
+    const lv_font_fmt_txt_dsc_t *fdsc = (const lv_font_fmt_txt_dsc_t *)font->dsc;
 
     // Row stride in uint16_t units (LVGL_W pixels wide)
     const int stride = LVGL_W;
@@ -880,36 +885,35 @@ static void term_rebuild_row(int r)
         uint16_t fg16 = lv_color_to_u16(fg_col);
         uint16_t bg16 = lv_color_to_u16(bg_col);
 
-        // Get glyph bitmap from font
+        // Get glyph descriptor via public API (fills g_dsc.gid.index)
         char ch = cell->ch;
         uint32_t letter = (ch >= 0x20 && ch < 0x7F) ? (uint32_t)(uint8_t)ch : (uint32_t)' ';
         lv_font_glyph_dsc_t g_dsc;
-        bool found = lv_font_get_glyph_dsc(&lv_font_unscii_16, &g_dsc, letter, 0);
+        bool found = lv_font_get_glyph_dsc(font, &g_dsc, letter, 0);
 
         // Pixel base for this cell in the row buffer
         uint16_t *cell_base = buf + c * TERM_FONT_W;
 
-        if (!found || g_dsc.format != LV_FONT_GLYPH_FORMAT_A1) {
-            // No glyph or unsupported format: fill cell with bg color
+        if (!found || g_dsc.box_w == 0 || g_dsc.box_h == 0) {
+            // No glyph: fill cell with bg color
             for (int y = 0; y < TERM_FONT_H; y++) {
                 uint16_t *row_ptr = cell_base + y * stride;
                 for (int x = 0; x < TERM_FONT_W; x++) row_ptr[x] = bg16;
             }
-            if (found) lv_font_glyph_release_draw_data(&g_dsc);
             continue;
         }
 
-        // Get bitmap pointer (A1 format: 1 bit per pixel, MSB first)
-        const uint8_t *bitmap = (const uint8_t *)lv_font_get_glyph_bitmap(&g_dsc, NULL);
+        // Get raw A1 bitmap directly from font internal structure
+        // g_dsc.gid.index is the glyph index set by lv_font_get_glyph_dsc_fmt_txt()
+        uint32_t gid = g_dsc.gid.index;
+        const lv_font_fmt_txt_glyph_dsc_t *gdsc = &fdsc->glyph_dsc[gid];
+        const uint8_t *bitmap = &fdsc->glyph_bitmap[gdsc->bitmap_index];
 
         int bw = g_dsc.box_w;   // glyph bounding box width
         int bh = g_dsc.box_h;   // glyph bounding box height
-        int ox = g_dsc.ofs_x;   // x offset from cell left
-        int oy = g_dsc.ofs_y;   // y offset from baseline (positive = up)
-        // baseline is at y = TERM_FONT_H - 1 (bottom of cell, 0-indexed)
-        // glyph top row in cell = (TERM_FONT_H - 1) - oy - (bh - 1)
-        //                       = TERM_FONT_H - oy - bh
-        int cell_y_start = TERM_FONT_H - oy - bh;
+        int ox = g_dsc.ofs_x;   // x offset from cell left edge
+        // ofs_y in lv_font_fmt_txt: offset from TOP of line (positive = down)
+        int cell_y_start = (int)g_dsc.ofs_y;
 
         // Fill entire cell with background first
         for (int y = 0; y < TERM_FONT_H; y++) {
@@ -917,8 +921,9 @@ static void term_rebuild_row(int r)
             for (int x = 0; x < TERM_FONT_W; x++) row_ptr[x] = bg16;
         }
 
-        // Draw glyph pixels
-        int bits_per_row = bw;  // A1: 1 bit per pixel
+        // Draw glyph pixels (A1 format: 1 bit per pixel, MSB first, row-major)
+        // Bits are packed: bit 7 of byte 0 = pixel (0,0), bit 6 = pixel (1,0), etc.
+        // Each row is NOT byte-aligned per pixel; rows are packed continuously.
         for (int gy = 0; gy < bh; gy++) {
             int cy = cell_y_start + gy;
             if (cy < 0 || cy >= TERM_FONT_H) continue;
@@ -926,15 +931,14 @@ static void term_rebuild_row(int r)
             for (int gx = 0; gx < bw; gx++) {
                 int cx = ox + gx;
                 if (cx < 0 || cx >= TERM_FONT_W) continue;
-                int bit_idx = gy * bits_per_row + gx;
+                int bit_idx = gy * bw + gx;
                 int byte_idx = bit_idx >> 3;
                 int bit_pos  = 7 - (bit_idx & 7);  // MSB first
                 uint8_t bit  = (bitmap[byte_idx] >> bit_pos) & 1;
                 row_ptr[cx] = bit ? fg16 : bg16;
             }
         }
-
-        lv_font_glyph_release_draw_data(&g_dsc);
+        // No release needed: we accessed raw bitmap directly, not via draw_buf cache
     }
 
     // Invalidate the canvas object so LVGL redraws it
