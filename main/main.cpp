@@ -856,86 +856,89 @@ static void vt100_process_byte(uint8_t byte)
 // LVGL Display Update
 // ==============================================================
 
-// Text buffer for one row: TERM_COLS chars + NUL
-#define ROW_TEXT_BUF  (TERM_COLS + 1)
-
 // Rebuild a single row's canvas from term_buffer.
-// Uses lv_canvas + lv_draw_label for per-cell color support.
+// Directly writes RGB565 pixels into the canvas buffer for reliable color rendering.
 // Must be called with LVGL lock held.
 static void term_rebuild_row(int r)
 {
-    lv_obj_t *cv = row_canvases[r];
-    if (cv == NULL) return;
+    uint16_t *buf = (uint16_t *)row_canvas_bufs[r];
+    if (buf == NULL) return;
 
-    // Fill background with black
-    lv_canvas_fill_bg(cv, lv_color_black(), LV_OPA_COVER);
+    // Row stride in uint16_t units (LVGL_W pixels wide)
+    const int stride = LVGL_W;
 
-    // Init drawing layer
-    lv_layer_t layer;
-    lv_canvas_init_layer(cv, &layer);
-
-    // Draw each run of same-colored cells as one lv_draw_label call
-    static char run_text[ROW_TEXT_BUF];
-    int run_start = 0;
-    int run_len   = 0;
-    uint8_t run_fg = 255;
-    bool run_cursor = false;
-
-    for (int c = 0; c <= TERM_COLS; c++) {
-        uint8_t fg = 0;
-        bool is_cursor = false;
-
-        if (c < TERM_COLS) {
-            TermCell *cell = &term_buffer[r][c];
-            fg = cell->fg & 15;
-            is_cursor = (r == cursor_row && c == cursor_col &&
-                         cursor_visible && cursor_blink_state);
-        }
-
-        bool flush = (c == TERM_COLS) || (fg != run_fg) || (is_cursor != run_cursor);
-
-        if (flush && run_len > 0) {
-            run_text[run_len] = '\0';
-            lv_area_t area = {
-                .x1 = (int32_t)(run_start * TERM_FONT_W),
-                .y1 = 0,
-                .x2 = (int32_t)(c * TERM_FONT_W - 1),
-                .y2 = TERM_FONT_H - 1,
-            };
-            // For cursor: draw white background rect, then black text (inverted)
-            if (run_cursor) {
-                lv_draw_rect_dsc_t rdsc;
-                lv_draw_rect_dsc_init(&rdsc);
-                rdsc.bg_color = lv_color_white();
-                rdsc.bg_opa   = LV_OPA_COVER;
-                rdsc.radius   = 0;
-                lv_draw_rect(&layer, &rdsc, &area);
-            }
-            lv_draw_label_dsc_t dsc;
-            lv_draw_label_dsc_init(&dsc);
-            dsc.font        = &lv_font_unscii_16;
-            dsc.color       = run_cursor ? lv_color_black() : TERM_COLORS[run_fg];
-            dsc.text        = run_text;
-            dsc.text_local  = 1;  // LVGL copies text (safe for static buffer reuse)
-            dsc.letter_space = 0;
-            dsc.line_space  = 0;
-            lv_draw_label(&layer, &dsc, &area);
-            run_len = 0;
-        }
-
-        if (c >= TERM_COLS) break;
-
-        if (run_len == 0) {
-            run_start  = c;
-            run_fg     = fg;
-            run_cursor = is_cursor;
-        }
+    for (int c = 0; c < TERM_COLS; c++) {
         TermCell *cell = &term_buffer[r][c];
+        bool is_cursor = (r == cursor_row && c == cursor_col &&
+                          cursor_visible && cursor_blink_state);
+
+        // Determine actual fg/bg colors (invert for cursor)
+        uint8_t fg_idx = cell->fg & 15;
+        uint8_t bg_idx = cell->bg & 15;
+        lv_color_t fg_col = is_cursor ? lv_color_black() : TERM_COLORS[fg_idx];
+        lv_color_t bg_col = is_cursor ? lv_color_white() : TERM_COLORS[bg_idx];
+        uint16_t fg16 = lv_color_to_u16(fg_col);
+        uint16_t bg16 = lv_color_to_u16(bg_col);
+
+        // Get glyph bitmap from font
         char ch = cell->ch;
-        run_text[run_len++] = (ch >= 0x20 && ch < 0x7F) ? ch : ' ';
+        uint32_t letter = (ch >= 0x20 && ch < 0x7F) ? (uint32_t)(uint8_t)ch : (uint32_t)' ';
+        lv_font_glyph_dsc_t g_dsc;
+        bool found = lv_font_get_glyph_dsc(&lv_font_unscii_16, &g_dsc, letter, 0);
+
+        // Pixel base for this cell in the row buffer
+        uint16_t *cell_base = buf + c * TERM_FONT_W;
+
+        if (!found || g_dsc.format != LV_FONT_GLYPH_FORMAT_A1) {
+            // No glyph or unsupported format: fill cell with bg color
+            for (int y = 0; y < TERM_FONT_H; y++) {
+                uint16_t *row_ptr = cell_base + y * stride;
+                for (int x = 0; x < TERM_FONT_W; x++) row_ptr[x] = bg16;
+            }
+            if (found) lv_font_glyph_release_draw_data(&g_dsc);
+            continue;
+        }
+
+        // Get bitmap pointer (A1 format: 1 bit per pixel, MSB first)
+        const uint8_t *bitmap = (const uint8_t *)lv_font_get_glyph_bitmap(&g_dsc, NULL);
+
+        int bw = g_dsc.box_w;   // glyph bounding box width
+        int bh = g_dsc.box_h;   // glyph bounding box height
+        int ox = g_dsc.ofs_x;   // x offset from cell left
+        int oy = g_dsc.ofs_y;   // y offset from baseline (positive = up)
+        // baseline is at y = TERM_FONT_H - 1 (bottom of cell, 0-indexed)
+        // glyph top row in cell = (TERM_FONT_H - 1) - oy - (bh - 1)
+        //                       = TERM_FONT_H - oy - bh
+        int cell_y_start = TERM_FONT_H - oy - bh;
+
+        // Fill entire cell with background first
+        for (int y = 0; y < TERM_FONT_H; y++) {
+            uint16_t *row_ptr = cell_base + y * stride;
+            for (int x = 0; x < TERM_FONT_W; x++) row_ptr[x] = bg16;
+        }
+
+        // Draw glyph pixels
+        int bits_per_row = bw;  // A1: 1 bit per pixel
+        for (int gy = 0; gy < bh; gy++) {
+            int cy = cell_y_start + gy;
+            if (cy < 0 || cy >= TERM_FONT_H) continue;
+            uint16_t *row_ptr = cell_base + cy * stride;
+            for (int gx = 0; gx < bw; gx++) {
+                int cx = ox + gx;
+                if (cx < 0 || cx >= TERM_FONT_W) continue;
+                int bit_idx = gy * bits_per_row + gx;
+                int byte_idx = bit_idx >> 3;
+                int bit_pos  = 7 - (bit_idx & 7);  // MSB first
+                uint8_t bit  = (bitmap[byte_idx] >> bit_pos) & 1;
+                row_ptr[cx] = bit ? fg16 : bg16;
+            }
+        }
+
+        lv_font_glyph_release_draw_data(&g_dsc);
     }
 
-    lv_canvas_finish_layer(cv, &layer);
+    // Invalidate the canvas object so LVGL redraws it
+    if (row_canvases[r]) lv_obj_invalidate(row_canvases[r]);
 }
 
 static void term_refresh_display(void)
@@ -1430,6 +1433,18 @@ static void vcp_task(void *arg)
         ESP_LOGI(TAG, "USB connected, baud=%"PRIu32" %s",
                  s_baud_rate, is_vcp ? "(VCP)" : "(CDC)");
         update_status_bar();
+
+        // Notify the remote device of our terminal window size via ANSI sequence
+        // ESC[8;<rows>;<cols>t  (xterm window resize: set text area size in chars)
+        // This causes the remote shell to update TIOCSWINSZ (stty size).
+        {
+            char winsz_seq[32];
+            int winsz_len = snprintf(winsz_seq, sizeof(winsz_seq),
+                                     "\033[8;%d;%dt", TERM_ROWS, TERM_COLS);
+            if (winsz_len > 0 && s_vcp_dev != nullptr) {
+                s_vcp_dev->tx_blocking((uint8_t *)winsz_seq, (size_t)winsz_len, 1000);
+            }
+        }
 
         xEventGroupWaitBits(s_usb_event_group,
                             USB_DEV_DISCONNECTED_BIT,
