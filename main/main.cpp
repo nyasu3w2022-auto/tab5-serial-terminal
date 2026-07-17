@@ -444,7 +444,7 @@ static void vt_sgr(void)
         }
         i++;
     }
-    ESP_LOGD(TAG, "SGR: fg=%d bg=%d bold=%d (params=%d)", cur_fg, cur_bg, cur_bold, n);
+    ESP_LOGI(TAG, "SGR: fg=%d bg=%d bold=%d (params=%d)", cur_fg, cur_bg, cur_bold, n);
 }
 
 // Process a complete CSI sequence (ESC [ params final_char)
@@ -912,8 +912,11 @@ static void term_rebuild_row(int r)
         int bw = g_dsc.box_w;   // glyph bounding box width
         int bh = g_dsc.box_h;   // glyph bounding box height
         int ox = g_dsc.ofs_x;   // x offset from cell left edge
-        // ofs_y in lv_font_fmt_txt: offset from TOP of line (positive = down)
-        int cell_y_start = (int)g_dsc.ofs_y;
+        // ofs_y: offset from baseline upward (positive = up), baseline at bottom of cell
+        // baseline_y = (TERM_FONT_H - 1) - font->base_line
+        // cell_y_start = baseline_y - ofs_y - bh + 1
+        int baseline_y = (TERM_FONT_H - 1) - (int)font->base_line;
+        int cell_y_start = baseline_y - (int)g_dsc.ofs_y - bh + 1;
 
         // Fill entire cell with background first
         for (int y = 0; y < TERM_FONT_H; y++) {
@@ -941,8 +944,12 @@ static void term_rebuild_row(int r)
         // No release needed: we accessed raw bitmap directly, not via draw_buf cache
     }
 
-    // Invalidate the canvas object so LVGL redraws it
-    if (row_canvases[r]) lv_obj_invalidate(row_canvases[r]);
+    // Re-set the buffer to force LVGL image cache invalidation, then invalidate the object.
+    // Without this, LVGL keeps a cached copy of the old image and ignores our pixel writes.
+    if (row_canvases[r]) {
+        lv_canvas_set_buffer(row_canvases[r], row_canvas_bufs[r], LVGL_W, TERM_FONT_H, LV_COLOR_FORMAT_RGB565);
+        lv_obj_invalidate(row_canvases[r]);
+    }
 }
 
 static void term_refresh_display(void)
