@@ -124,6 +124,11 @@ static uint8_t cur_bold = 0;
 // Scroll region (inclusive, 0-based)
 static int scroll_top = 0;
 static int scroll_bot = TERM_ROWS - 1;
+// Pending wrap (deferred wrap / VT100 "last column" flag):
+// Set when a character is written to the last column (TERM_COLS-1).
+// The actual line wrap is deferred until the next printable character arrives.
+// Cleared by CR, LF, cursor-movement ESC sequences, and vt_clamp_cursor().
+static bool pending_wrap = false;
 
 // Cursor visibility
 static bool cursor_visible = true;
@@ -236,13 +241,14 @@ static void term_clear_region(int row_start, int col_start, int row_end, int col
 static void term_clear_all(void)
 {
     term_clear_region(0, 0, TERM_ROWS - 1, TERM_COLS - 1);
-    cursor_row = 0;
-    cursor_col = 0;
-    scroll_top = 0;
-    scroll_bot = TERM_ROWS - 1;
-    cur_fg     = DEFAULT_FG;
-    cur_bg     = DEFAULT_BG;
-    cur_bold   = 0;
+    cursor_row   = 0;
+    cursor_col   = 0;
+    pending_wrap = false;
+    scroll_top   = 0;
+    scroll_bot   = TERM_ROWS - 1;
+    cur_fg       = DEFAULT_FG;
+    cur_bg       = DEFAULT_BG;
+    cur_bold     = 0;
 }
 
 // Scroll the scroll region up by n lines (content moves up, bottom fills with blank)
@@ -289,6 +295,18 @@ static void term_newline(void)
 static void term_put_char_raw(char c)
 {
     if (cursor_row < 0 || cursor_row >= TERM_ROWS) return;
+    // Deferred wrap (VT100 "pending wrap" / "last column" flag):
+    // If the previous character filled the last column, wrap now before writing.
+    if (pending_wrap) {
+        pending_wrap = false;
+        cursor_col = 0;
+        if (cursor_row == scroll_bot) {
+            term_scroll_up(1);
+        } else {
+            cursor_row++;
+            if (cursor_row >= TERM_ROWS) cursor_row = TERM_ROWS - 1;
+        }
+    }
     if (cursor_col < 0 || cursor_col >= TERM_COLS) return;
     term_buffer[cursor_row][cursor_col].ch   = c;
     term_buffer[cursor_row][cursor_col].fg   = cur_bold ? (cur_fg | 8) : cur_fg;
@@ -297,14 +315,10 @@ static void term_put_char_raw(char c)
     term_mark_dirty(cursor_row);
     cursor_col++;
     if (cursor_col >= TERM_COLS) {
-        // Auto-wrap
-        cursor_col = 0;
-        if (cursor_row == scroll_bot) {
-            term_scroll_up(1);
-        } else {
-            cursor_row++;
-            if (cursor_row >= TERM_ROWS) cursor_row = TERM_ROWS - 1;
-        }
+        // Reached last column: set pending wrap flag instead of wrapping immediately.
+        // The wrap will happen when the next printable character arrives.
+        cursor_col = TERM_COLS - 1;
+        pending_wrap = true;
     }
 }
 
@@ -347,6 +361,7 @@ static void vt_clamp_cursor(void)
     if (cursor_row >= TERM_ROWS) cursor_row = TERM_ROWS - 1;
     if (cursor_col < 0)          cursor_col = 0;
     if (cursor_col >= TERM_COLS) cursor_col = TERM_COLS - 1;
+    pending_wrap = false;
 }
 
 // Map 256-color index to nearest 16-color index
@@ -510,8 +525,9 @@ static void vt_process_csi(char final_ch)
         break;
     }
     case 's': { // Save Cursor Position
-        saved_row = cursor_row;
-        saved_col = cursor_col;
+        saved_row    = cursor_row;
+        saved_col    = cursor_col;
+        pending_wrap = false;
         break;
     }
     case 'u': { // Restore Cursor Position
@@ -565,10 +581,11 @@ static void vt_process_csi(char final_ch)
         int top = vt_param(0, 1); if (top < 1) top = 1;
         int bot = vt_param(1, TERM_ROWS); if (bot < 1 || bot > TERM_ROWS) bot = TERM_ROWS;
         if (top < bot) {
-            scroll_top = top - 1;
-            scroll_bot = bot - 1;
-            cursor_row = 0;
-            cursor_col = 0;
+            scroll_top   = top - 1;
+            scroll_bot   = bot - 1;
+            cursor_row   = 0;
+            cursor_col   = 0;
+            pending_wrap = false;
         }
         break;
     }
@@ -674,20 +691,24 @@ static void vt100_process_byte(uint8_t byte)
         } else if (c == '\n') {
             // LF: move cursor down only (VT100 standard: LF does not reset column)
             // Note: remote devices typically send CR+LF, so \r resets column separately.
+            pending_wrap = false;
             if (cursor_row == scroll_bot) {
                 term_scroll_up(1);
             } else if (cursor_row < TERM_ROWS - 1) {
                 cursor_row++;
             }
         } else if (c == '\r') {
+            pending_wrap = false;
             cursor_col = 0;
         } else if (c == '\b' || c == 0x7F) {
+            pending_wrap = false;
             if (cursor_col > 0) {
                 cursor_col--;
                 term_cell_clear(&term_buffer[cursor_row][cursor_col]);
                 term_mark_dirty(cursor_row);
             }
         } else if (c == '\t') {
+            pending_wrap = false;
             int next_tab = (cursor_col + 8) & ~7;
             if (next_tab >= TERM_COLS) {
                 cursor_col = TERM_COLS - 1;
@@ -712,6 +733,7 @@ static void vt100_process_byte(uint8_t byte)
             // Save cursor
             saved_row = cursor_row;
             saved_col = cursor_col;
+            pending_wrap = false;
             vt_state = VT_STATE_NORMAL;
         } else if (c == '8') {
             // Restore cursor
@@ -725,6 +747,7 @@ static void vt100_process_byte(uint8_t byte)
             vt_state = VT_STATE_NORMAL;
         } else if (c == 'D') {
             // Index: move cursor down, scroll if at bottom
+            pending_wrap = false;
             if (cursor_row == scroll_bot) {
                 term_scroll_up(1);
             } else {
@@ -734,6 +757,7 @@ static void vt100_process_byte(uint8_t byte)
             vt_state = VT_STATE_NORMAL;
         } else if (c == 'M') {
             // Reverse Index: move cursor up, scroll down if at top
+            pending_wrap = false;
             if (cursor_row == scroll_top) {
                 term_scroll_down(1);
             } else {
@@ -743,6 +767,7 @@ static void vt100_process_byte(uint8_t byte)
             vt_state = VT_STATE_NORMAL;
         } else if (c == 'E') {
             // Next Line
+            pending_wrap = false;
             cursor_col = 0;
             if (cursor_row == scroll_bot) {
                 term_scroll_up(1);
