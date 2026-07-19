@@ -465,6 +465,17 @@ static void vt_sgr(void)
 // Process a complete CSI sequence (ESC [ params final_char)
 static void vt_process_csi(char final_ch)
 {
+    // DEBUG: log all CSI sequences
+    {
+        char params_str[64] = "";
+        int ppos = 0;
+        for (int pi = 0; pi < vt_num_params && ppos < 60; pi++) {
+            if (pi > 0) params_str[ppos++] = ';';
+            if (vt_params[pi] >= 0) ppos += snprintf(params_str + ppos, sizeof(params_str) - ppos, "%d", vt_params[pi]);
+        }
+        params_str[ppos] = '\0';
+        ESP_LOGI(TAG, "CSI [%s%c  row=%d col=%d pw=%d", params_str, final_ch, cursor_row, cursor_col, (int)pending_wrap);
+    }
     switch (final_ch) {
     // ---- Cursor movement ----
     case 'A': { // Cursor Up
@@ -1601,6 +1612,21 @@ extern "C" void app_main(void)
         // Process USB RX data through VT100 parser
         usb_rx_msg_t rx_msg;
         while (xQueueReceive(s_usb_rx_queue, &rx_msg, 0) == pdTRUE) {
+            // DEBUG: log raw received bytes as hex dump
+            {
+                char hexbuf[256];
+                int hpos = 0;
+                for (size_t i = 0; i < rx_msg.len && hpos < (int)sizeof(hexbuf) - 4; i++) {
+                    uint8_t b = rx_msg.data[i];
+                    if (b >= 0x20 && b < 0x7F) {
+                        hexbuf[hpos++] = (char)b;
+                    } else {
+                        hpos += snprintf(hexbuf + hpos, sizeof(hexbuf) - hpos, "<%02X>", b);
+                    }
+                }
+                hexbuf[hpos] = '\0';
+                ESP_LOGI(TAG, "RX(%zu): %s", rx_msg.len, hexbuf);
+            }
             for (size_t i = 0; i < rx_msg.len; i++) {
                 vt100_process_byte(rx_msg.data[i]);
             }
