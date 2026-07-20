@@ -663,11 +663,36 @@ static void vt_process_csi(char final_ch)
         vt_sgr();
         break;
     }
-    // ---- Device status / cursor report (respond not needed for terminal) ----
-    case 'n': // DSR - Device Status Report (ignore)
+    // ---- Device status / cursor report ----
+    case 'n': { // DSR - Device Status Report
+        int param = vt_param(0, 0);
+        if (param == 6) {
+            // CPR (Cursor Position Report): respond with ESC[row;colR
+            char resp[32];
+            int len = snprintf(resp, sizeof(resp), "\x1b[%d;%dR", cursor_row + 1, cursor_col + 1);
+            ESP_LOGI(TAG, "DSR CPR: responding ESC[%d;%dR", cursor_row + 1, cursor_col + 1);
+            if (s_usb_connected && s_vcp_dev) {
+                s_vcp_dev->tx_blocking((uint8_t *)resp, (size_t)len, 1000);
+            }
+        } else if (param == 5) {
+            // Terminal status: respond ESC[0n (terminal OK)
+            const char *resp = "\x1b[0n";
+            if (s_usb_connected && s_vcp_dev) {
+                s_vcp_dev->tx_blocking((uint8_t *)resp, 4, 1000);
+            }
+        }
         break;
-    case 'c': // DA - Device Attributes (ignore)
+    }
+    case 'c': { // DA - Device Attributes
+        // Respond as VT100: ESC[?1;0c
+        if (vt_param(0, 0) == 0) {
+            const char *resp = "\x1b[?1;0c";
+            if (s_usb_connected && s_vcp_dev) {
+                s_vcp_dev->tx_blocking((uint8_t *)resp, strlen(resp), 1000);
+            }
+        }
         break;
+    }
     default:
         ESP_LOGD(TAG, "VT100: unhandled CSI %d final='%c'", vt_param(0,-1), final_ch);
         break;
@@ -715,7 +740,7 @@ static void vt100_process_byte(uint8_t byte)
             pending_wrap = false;
             if (cursor_col > 0) {
                 cursor_col--;
-                term_cell_clear(&term_buffer[cursor_row][cursor_col]);
+                // VT100 BS moves cursor left only; does NOT erase character
                 term_mark_dirty(cursor_row);
             }
         } else if (c == '\t') {
@@ -1715,6 +1740,7 @@ extern "C" void app_main(void)
                 { "pagedown",  "\x1b[6~"    },
                 { "insert",    "\x1b[2~"    },
                 { "delete",    "\x1b[3~"    },
+                { "del",       "\x1b[3~"    },  // TAB5 keyboard sends "del" (not "delete")
                 { "f1",        "\x1bOP"     },
                 { "f2",        "\x1bOQ"     },
                 { "f3",        "\x1bOR"     },
