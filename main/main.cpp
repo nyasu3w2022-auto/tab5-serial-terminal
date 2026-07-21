@@ -36,6 +36,7 @@
 #include <freertos/queue.h>
 #include <freertos/event_groups.h>
 #include <freertos/semphr.h>
+#include <freertos/ringbuf.h>
 
 #include "m5_tab5_component.h"
 #include "m5_tab5_keyboard.h"
@@ -165,11 +166,9 @@ typedef struct {
 } key_event_msg_t;
 static QueueHandle_t s_key_queue = NULL;
 
-typedef struct {
-    uint8_t data[64];
-    size_t  len;
-} usb_rx_msg_t;
-static QueueHandle_t s_usb_rx_queue = NULL;
+// USB RX ring buffer: 16 KB to absorb bursts without dropping bytes
+#define USB_RX_RINGBUF_SIZE  16384
+static RingbufHandle_t s_usb_rx_ringbuf = NULL;
 
 // Semaphore: posted by new_dev_cb when a USB device appears
 static SemaphoreHandle_t s_dev_present_sem = NULL;
@@ -1223,16 +1222,13 @@ static void keyboard_event_cb(m5_tab5_key_event_t event, void *arg)
 
 static bool usb_rx_cb(const uint8_t *data, size_t data_len, void *arg)
 {
-    if (s_usb_rx_queue == NULL || data_len == 0) return true;
-
-    size_t offset = 0;
-    while (offset < data_len) {
-        usb_rx_msg_t msg = {};
-        msg.len = data_len - offset;
-        if (msg.len > sizeof(msg.data)) msg.len = sizeof(msg.data);
-        memcpy(msg.data, data + offset, msg.len);
-        xQueueSend(s_usb_rx_queue, &msg, 0);
-        offset += msg.len;
+    if (s_usb_rx_ringbuf == NULL || data_len == 0) return true;
+    // Write all bytes into the ring buffer.
+    // Timeout=0: never block in the USB host callback (would stall USB transfers).
+    // With 16 KB buffer this should not drop data under normal conditions.
+    BaseType_t sent = xRingbufferSend(s_usb_rx_ringbuf, data, data_len, 0);
+    if (sent != pdTRUE) {
+        ESP_LOGW(TAG, "USB RX ringbuf full, dropped %zu bytes", data_len);
     }
     return true;
 }
@@ -1577,7 +1573,7 @@ extern "C" void app_main(void)
 
     // ---- Queues, semaphores, and event groups ----
     s_key_queue        = xQueueCreate(32, sizeof(key_event_msg_t));
-    s_usb_rx_queue     = xQueueCreate(64, sizeof(usb_rx_msg_t));
+    s_usb_rx_ringbuf   = xRingbufferCreate(USB_RX_RINGBUF_SIZE, RINGBUF_TYPE_BYTEBUF);
     s_screen_log_queue = xQueueCreate(32, sizeof(screen_log_msg_t));
     s_usb_event_group  = xEventGroupCreate();
     s_dev_present_sem  = xSemaphoreCreateCounting(8, 0);
@@ -1634,28 +1630,21 @@ extern "C" void app_main(void)
             need_refresh = true;
         }
 
-        // Process USB RX data through VT100 parser
-        usb_rx_msg_t rx_msg;
-        while (xQueueReceive(s_usb_rx_queue, &rx_msg, 0) == pdTRUE) {
-            // DEBUG: log raw received bytes as hex dump
-            {
-                char hexbuf[256];
-                int hpos = 0;
-                for (size_t i = 0; i < rx_msg.len && hpos < (int)sizeof(hexbuf) - 4; i++) {
-                    uint8_t b = rx_msg.data[i];
-                    if (b >= 0x20 && b < 0x7F) {
-                        hexbuf[hpos++] = (char)b;
-                    } else {
-                        hpos += snprintf(hexbuf + hpos, sizeof(hexbuf) - hpos, "<%02X>", b);
-                    }
+        // Process USB RX data through VT100 parser (ring buffer, no data loss)
+        {
+            size_t rx_len = 0;
+            uint8_t *rx_data = (uint8_t *)xRingbufferReceiveUpTo(
+                s_usb_rx_ringbuf, &rx_len, 0, 512);
+            while (rx_data != NULL && rx_len > 0) {
+                for (size_t i = 0; i < rx_len; i++) {
+                    vt100_process_byte(rx_data[i]);
                 }
-                hexbuf[hpos] = '\0';
-                ESP_LOGI(TAG, "RX(%zu): %s", rx_msg.len, hexbuf);
+                vRingbufferReturnItem(s_usb_rx_ringbuf, rx_data);
+                need_refresh = true;
+                // Continue draining until ring buffer is empty
+                rx_data = (uint8_t *)xRingbufferReceiveUpTo(
+                    s_usb_rx_ringbuf, &rx_len, 0, 512);
             }
-            for (size_t i = 0; i < rx_msg.len; i++) {
-                vt100_process_byte(rx_msg.data[i]);
-            }
-            need_refresh = true;
         }
 
         if (need_refresh) {
@@ -1665,7 +1654,7 @@ extern "C" void app_main(void)
 
         // Process keyboard input
         key_event_msg_t key_msg;
-        if (xQueueReceive(s_key_queue, &key_msg, pdMS_TO_TICKS(20)) == pdTRUE) {
+        if (xQueueReceive(s_key_queue, &key_msg, pdMS_TO_TICKS(5)) == pdTRUE) {
             bool ctrl = (key_msg.modifier & 0x01) != 0;
 
             if (ctrl) {
