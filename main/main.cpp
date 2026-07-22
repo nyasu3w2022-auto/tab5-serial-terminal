@@ -1352,7 +1352,7 @@ static void usb_lib_task(void *arg)
 
 static void vcp_task(void *arg)
 {
-    screen_log("[USB] Starting USB host...\n");
+    screen_log("[USB] Starting USB host...\r\n");
     ESP_LOGI(TAG, "Starting USB host lib task");
 
     xEventGroupClearBits(s_usb_event_group, USB_DEV_DISCONNECTED_BIT);
@@ -1574,6 +1574,11 @@ extern "C" void app_main(void)
     // ---- Queues, semaphores, and event groups ----
     s_key_queue        = xQueueCreate(32, sizeof(key_event_msg_t));
     s_usb_rx_ringbuf   = xRingbufferCreate(USB_RX_RINGBUF_SIZE, RINGBUF_TYPE_BYTEBUF);
+    if (s_usb_rx_ringbuf == NULL) {
+        ESP_LOGE(TAG, "Failed to create USB RX ring buffer (OOM?), rebooting");
+        vTaskDelay(pdMS_TO_TICKS(2000));
+        esp_restart();
+    }
     s_screen_log_queue = xQueueCreate(32, sizeof(screen_log_msg_t));
     s_usb_event_group  = xEventGroupCreate();
     s_dev_present_sem  = xSemaphoreCreateCounting(8, 0);
