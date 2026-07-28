@@ -1,0 +1,73 @@
+#pragma once
+/*
+ * settings.h — Persistent application settings (stored in NVS).
+ *
+ * Settings are loaded at boot and saved whenever the user closes
+ * the settings screen.  All values are stored under NVS namespace
+ * "term_cfg".
+ *
+ * SPDX-License-Identifier: MIT
+ */
+
+#include <stdint.h>
+#include <stdbool.h>
+
+// ==============================================================
+// Enumerations
+// ==============================================================
+
+/** Serial interface selection (PortA UART support is future work). */
+typedef enum {
+    SERIAL_IF_USB = 0,  /**< USB-A CDC-ACM (current implementation) */
+    SERIAL_IF_PORTA,    /**< PortA UART (not yet implemented)        */
+} serial_if_t;
+
+/** ESP-IDF log level selection. */
+typedef enum {
+    LOG_LEVEL_NONE    = 0,
+    LOG_LEVEL_ERROR   = 1,
+    LOG_LEVEL_WARN    = 2,
+    LOG_LEVEL_INFO    = 3,
+    LOG_LEVEL_DEBUG   = 4,
+    LOG_LEVEL_VERBOSE = 5,
+} app_log_level_t;
+
+// ==============================================================
+// Settings Structure
+// ==============================================================
+
+typedef struct {
+    uint32_t       baud_rate;   /**< Serial baud rate (default: 115200) */
+    serial_if_t    serial_if;   /**< Interface: USB or PortA            */
+    app_log_level_t log_level;  /**< ESP-IDF log level                  */
+} app_settings_t;
+
+// ==============================================================
+// Default Values
+// ==============================================================
+
+#define SETTINGS_DEFAULT_BAUD      115200
+#define SETTINGS_DEFAULT_SERIAL_IF SERIAL_IF_USB
+#define SETTINGS_DEFAULT_LOG_LEVEL LOG_LEVEL_INFO
+
+// ==============================================================
+// API
+// ==============================================================
+
+/**
+ * @brief Load settings from NVS.  If NVS has no saved values,
+ *        defaults are returned.  Must be called once at boot.
+ */
+void settings_load(app_settings_t *out);
+
+/**
+ * @brief Save settings to NVS.
+ * @return true on success.
+ */
+bool settings_save(const app_settings_t *s);
+
+/**
+ * @brief Apply settings to the running system
+ *        (baud rate, log level, etc.).
+ */
+void settings_apply(const app_settings_t *s);

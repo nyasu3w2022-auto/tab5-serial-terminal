@@ -2,10 +2,18 @@
  * main.cpp — TAB5 Serial Terminal: application entry point and main loop.
  *
  * Architecture:
- *   terminal.cpp  — VT100 parser and terminal buffer management
- *   display.cpp   — LVGL-based display rendering and UI
- *   usb_serial.cpp — USB Host CDC-ACM/VCP, keyboard events, screen log
- *   main.cpp      — app_main, main loop, keyboard dispatch
+ *   terminal.cpp    — VT100 parser and terminal buffer management
+ *   display.cpp     — LVGL-based display rendering and UI
+ *   usb_serial.cpp  — USB Host CDC-ACM/VCP, keyboard events, screen log
+ *   settings.cpp    — NVS-backed persistent settings
+ *   settings_ui.cpp — LVGL settings screen overlay
+ *   main.cpp        — app_main, main loop, keyboard dispatch
+ *
+ * Keyboard shortcuts (local, not sent to remote):
+ *   Ctrl+C        — Clear terminal screen
+ *   Ctrl+L        — Force full redisplay
+ *   Ctrl+B        — Cycle baud rate (quick toggle)
+ *   Ctrl+Alt+S    — Open / close settings screen
  *
  * SPDX-License-Identifier: MIT
  */
@@ -16,6 +24,7 @@
 #include <inttypes.h>
 #include <esp_log.h>
 #include <esp_err.h>
+#include <nvs_flash.h>
 #include <freertos/FreeRTOS.h>
 #include <freertos/task.h>
 #include <freertos/ringbuf.h>
@@ -27,11 +36,16 @@
 #include "terminal.h"
 #include "display.h"
 #include "usb_serial.h"
+#include "settings.h"
+#include "settings_ui.h"
 
 static const char *TAG = "main";
 
 static m5::tab5::m5tab5_component s_tab5_board;
 static m5::M5Tab5Keyboard         s_keyboard;
+
+// Current application settings (loaded from NVS at boot)
+static app_settings_t s_settings = {};
 
 // ==============================================================
 // Keyboard Input Dispatch
@@ -75,12 +89,41 @@ static const struct {
 
 /**
  * @brief Handle one keyboard event from the key queue.
+ *
+ * modifier bits (str_modifier from TAB5 keyboard):
+ *   0x01 = Ctrl
+ *   0x04 = Alt
+ *   0x05 = Ctrl+Alt
+ *
  * @return true if display refresh is needed.
  */
 static bool handle_key_event(const key_event_msg_t *msg)
 {
     bool ctrl = (msg->modifier & 0x01) != 0;
+    bool alt  = (msg->modifier & 0x04) != 0;
 
+    // ---- Ctrl+Alt combinations (local shortcuts, never sent to remote) ----
+    if (ctrl && alt) {
+        char k = (char)toupper((unsigned char)msg->str[0]);
+        if (k == 'S') {
+            // Ctrl+Alt+S: toggle settings screen
+            if (settings_ui_is_open()) {
+                settings_ui_close();
+            } else {
+                settings_ui_open(&s_settings);
+            }
+            return true;
+        }
+        // Other Ctrl+Alt combinations: silently ignore (don't send to remote)
+        return false;
+    }
+
+    // ---- If settings screen is open, swallow all other keys ----
+    if (settings_ui_is_open()) {
+        return false;
+    }
+
+    // ---- Ctrl-only combinations ----
     if (ctrl) {
         char k = (char)toupper((unsigned char)msg->str[0]);
 
@@ -97,13 +140,14 @@ static bool handle_key_event(const key_event_msg_t *msg)
             return true;
         }
         if (k == 'B') {
-            // Ctrl+B: cycle baud rate
+            // Ctrl+B: cycle baud rate (quick toggle; also updates s_settings)
             static const uint32_t baud_rates[] = {
                 9600, 19200, 38400, 57600, 115200, 230400, 460800, 921600
             };
             static int baud_idx = 4;  // default: 115200
             baud_idx = (baud_idx + 1) % (int)(sizeof(baud_rates) / sizeof(baud_rates[0]));
-            usb_set_baud_rate(baud_rates[baud_idx]);
+            s_settings.baud_rate = baud_rates[baud_idx];
+            usb_set_baud_rate(s_settings.baud_rate);
             char buf[64];
             snprintf(buf, sizeof(buf),
                      "\n\033[1;33m[Baud: %"PRIu32"]\033[0m\n", usb_get_baud_rate());
@@ -124,6 +168,13 @@ static bool handle_key_event(const key_event_msg_t *msg)
             usb_tx(&ctrl_char, 1);
         }
         return false;
+    }
+
+    // ---- Alt-only combinations: send ESC + key (standard terminal convention) ----
+    if (alt) {
+        uint8_t esc = 0x1B;
+        usb_tx(&esc, 1);
+        // Fall through to send the key itself
     }
 
     // Special key names → VT100 sequences
@@ -151,6 +202,21 @@ extern "C" void app_main(void)
 {
     ESP_LOGI(TAG, "=== TAB5 Serial Terminal ===");
 
+    // ---- NVS init (required for settings persistence) ----
+    esp_err_t nvs_ret = nvs_flash_init();
+    if (nvs_ret == ESP_ERR_NVS_NO_FREE_PAGES ||
+        nvs_ret == ESP_ERR_NVS_NEW_VERSION_FOUND) {
+        ESP_LOGW(TAG, "NVS partition erased and re-initialized");
+        nvs_flash_erase();
+        nvs_ret = nvs_flash_init();
+    }
+    if (nvs_ret != ESP_OK) {
+        ESP_LOGE(TAG, "NVS init failed: %s", esp_err_to_name(nvs_ret));
+    }
+
+    // ---- Load settings from NVS ----
+    settings_load(&s_settings);
+
     // ---- Board init ----
     m5::tab5::m5tab5_component_config_t board_cfg = {};
     esp_err_t ret = s_tab5_board.begin(board_cfg);
@@ -160,6 +226,9 @@ extern "C" void app_main(void)
     }
     s_tab5_board.usb5v_enable(true);
     ESP_LOGI(TAG, "USB-A 5V power enabled");
+
+    // ---- Apply loaded settings ----
+    settings_apply(&s_settings);
 
     // ---- LCD/LVGL init ----
     ret = app_lcd_lvgl_init(s_tab5_board);
@@ -234,7 +303,9 @@ extern "C" void app_main(void)
         }
 
         // 2. Process USB RX data through VT100 parser (drain ring buffer completely)
-        {
+        //    Skip if settings screen is open (avoid corrupting terminal state while
+        //    the overlay is visible; data is buffered in the ring buffer).
+        if (!settings_ui_is_open()) {
             size_t rx_len = 0;
             uint8_t *rx_data = (uint8_t *)xRingbufferReceiveUpTo(rx_rb, &rx_len, 0, 512);
             while (rx_data != NULL && rx_len > 0) {

@@ -1,0 +1,37 @@
+#pragma once
+/*
+ * settings_ui.h — LVGL-based settings screen.
+ *
+ * The settings screen is a full-screen overlay that appears on top of
+ * the terminal canvas when the user presses Ctrl+Alt+S.  When the user
+ * presses "Save & Close" or Ctrl+Alt+S again, the overlay is destroyed
+ * and the terminal canvas is restored.
+ *
+ * SPDX-License-Identifier: MIT
+ */
+
+#include "settings.h"
+#include <stdbool.h>
+
+/**
+ * @brief Open the settings screen.
+ *
+ * Creates the LVGL overlay and populates it with the current settings.
+ * Must be called from the main task (LVGL lock is acquired internally).
+ *
+ * @param current  Current settings to display as initial values.
+ */
+void settings_ui_open(const app_settings_t *current);
+
+/**
+ * @brief Close the settings screen.
+ *
+ * Destroys the LVGL overlay.  Called automatically by the "Save & Close"
+ * button; can also be called programmatically (e.g. second Ctrl+Alt+S).
+ */
+void settings_ui_close(void);
+
+/**
+ * @brief Returns true if the settings screen is currently visible.
+ */
+bool settings_ui_is_open(void);
