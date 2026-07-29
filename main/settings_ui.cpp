@@ -86,13 +86,16 @@ static lv_obj_t *create_row(lv_obj_t *parent, int y_pos,
     lv_obj_t *dd = lv_dropdown_create(parent);
     lv_dropdown_set_options(dd, options);
     lv_dropdown_set_selected(dd, (uint16_t)selected_idx);
-    lv_obj_set_size(dd, 400, 44);
-    lv_obj_set_pos(dd, 320, y_pos);
+    // Taller height (56px) for easier touch on Tab5 touchscreen
+    lv_obj_set_size(dd, 500, 56);
+    lv_obj_set_pos(dd, 300, y_pos);
     lv_obj_set_style_text_font(dd, &lv_font_unscii_16, 0);
     lv_obj_set_style_bg_color(dd, lv_color_make(40, 40, 60), 0);
     lv_obj_set_style_text_color(dd, lv_color_white(), 0);
     lv_obj_set_style_border_color(dd, lv_color_make(100, 100, 180), 0);
-    lv_obj_set_style_border_width(dd, 1, 0);
+    lv_obj_set_style_border_width(dd, 2, 0);
+    // Extend touch hit area by 10px on all sides
+    lv_obj_set_ext_click_area(dd, 10);
 
     // Style the dropdown list
     lv_obj_t *list = lv_dropdown_get_list(dd);
@@ -100,6 +103,9 @@ static lv_obj_t *create_row(lv_obj_t *parent, int y_pos,
         lv_obj_set_style_bg_color(list, lv_color_make(30, 30, 50), 0);
         lv_obj_set_style_text_color(list, lv_color_white(), 0);
         lv_obj_set_style_text_font(list, &lv_font_unscii_16, 0);
+        // Larger row height for easier touch selection
+        lv_obj_set_style_pad_top(list, 8, LV_PART_ITEMS);
+        lv_obj_set_style_pad_bottom(list, 8, LV_PART_ITEMS);
     }
 
     return dd;
@@ -236,11 +242,14 @@ void settings_ui_open(const app_settings_t *current)
     lv_obj_set_style_border_width(sep2, 0, 0);
 
     // ---- Save & Close button ----
+    // Larger size (480x72) and extended hit area for easier touch on Tab5
     lv_obj_t *btn = lv_btn_create(s_overlay);
-    lv_obj_set_size(btn, 320, 56);
-    lv_obj_align(btn, LV_ALIGN_BOTTOM_MID, 0, -40);
+    lv_obj_set_size(btn, 480, 72);
+    lv_obj_align(btn, LV_ALIGN_BOTTOM_MID, 0, -30);
     lv_obj_set_style_bg_color(btn, lv_color_make(0, 140, 60), 0);
     lv_obj_set_style_bg_color(btn, lv_color_make(0, 180, 80), LV_STATE_PRESSED);
+    lv_obj_set_style_radius(btn, 12, 0);
+    lv_obj_set_ext_click_area(btn, 16);
     lv_obj_add_event_cb(btn, save_close_cb, LV_EVENT_CLICKED, NULL);
 
     lv_obj_t *btn_lbl = lv_label_create(btn);

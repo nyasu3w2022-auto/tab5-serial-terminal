@@ -302,16 +302,19 @@ extern "C" void app_main(void)
             need_refresh = true;
         }
 
-        // 2. Process USB RX data through VT100 parser (drain ring buffer completely)
-        //    Skip if settings screen is open (avoid corrupting terminal state while
-        //    the overlay is visible; data is buffered in the ring buffer).
-        if (!settings_ui_is_open()) {
+        // 2. Process USB RX data through VT100 parser (drain ring buffer completely).
+        //    While the settings screen is open, data is still parsed into term_buffer
+        //    (keeping terminal state up to date) but term_refresh_display() is NOT
+        //    called so the LVGL overlay remains visible undisturbed.
+        //    When the settings screen closes, settings_ui_close() calls
+        //    term_mark_all_dirty() + term_refresh_display() to show the updated screen.
+        {
             size_t rx_len = 0;
             uint8_t *rx_data = (uint8_t *)xRingbufferReceiveUpTo(rx_rb, &rx_len, 0, 512);
             while (rx_data != NULL && rx_len > 0) {
                 for (size_t i = 0; i < rx_len; i++) vt100_process_byte(rx_data[i]);
                 vRingbufferReturnItem(rx_rb, rx_data);
-                need_refresh = true;
+                if (!settings_ui_is_open()) need_refresh = true;
                 rx_data = (uint8_t *)xRingbufferReceiveUpTo(rx_rb, &rx_len, 0, 512);
             }
         }
