@@ -141,7 +141,7 @@ static void touch_read_callback(lv_indev_t *indev, lv_indev_data_t *data)
             ctx->last_points[i].y = y;
 
             if (i == 0) {
-                // ESP_LOGI(TAG, "Touch[%d/%d]: (%ld, %ld)", i, touch_cnt, x, y);
+                ESP_LOGI(TAG, "Touch[%d/%d]: raw=(%u,%u) scaled=(%ld,%ld)", i, touch_cnt, touch_x[i], touch_y[i], x, y);
             }
         }
 

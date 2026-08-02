@@ -253,19 +253,18 @@ esp_err_t app_lcd_lvgl_init(m5::tab5::m5tab5_component &board)
 
     esp_lcd_touch_handle_t touch_handle = board.touch_panel();
     if (touch_handle != nullptr) {
-        // GT911 physical resolution: 720 x 1280
-        // LVGL logical resolution after 90-degree rotation: 1280 x 720
-        // The touch port's rotation transform uses:
-        //   new_x = hres - 1 - (scaled_y)   [ROTATION_90]
-        //   new_y = scaled_x
-        // So we need:
-        //   scale.x = LCD_V_RES / LCD_H_RES  (maps GT911 x 0..720 -> 0..1280 after rotation)
-        //   scale.y = LCD_H_RES / LCD_V_RES  (maps GT911 y 0..1280 -> 0..720 after rotation)
+        // GT911 physical resolution: 720 x 1280 (portrait)
+        // LVGL logical resolution after 90-degree SW rotation: 1280 x 720 (landscape)
+        // The lvgl_port touch callback applies ROTATION_90 transform:
+        //   new_x = hres - 1 - (touch_y * scale.y)
+        //   new_y = touch_x * scale.x
+        // With scale = 1.0 (default), GT911 raw coords map correctly:
+        //   touch_y (0..1280) -> new_x (0..1279)  OK
+        //   touch_x (0..720)  -> new_y (0..719)   OK
+        // No additional scaling is needed.
         lvgl_touch_cfg_t touch_cfg = {};
         touch_cfg.disp             = s_lvgl_disp;
         touch_cfg.handle           = touch_handle;
-        touch_cfg.scale.x          = (float)LCD_V_RES / (float)LCD_H_RES;  // 1280.0f / 720.0f
-        touch_cfg.scale.y          = (float)LCD_H_RES / (float)LCD_V_RES;  // 720.0f / 1280.0f
         s_lvgl_touch_indev = lvgl_port_add_touch(&touch_cfg);
     }
 
