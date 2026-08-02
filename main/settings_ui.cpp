@@ -89,6 +89,7 @@ static lv_obj_t *create_row(lv_obj_t *parent, int y_pos,
     // Taller height (56px) for easier touch on Tab5 touchscreen
     lv_obj_set_size(dd, 500, 56);
     lv_obj_set_pos(dd, 300, y_pos);
+    lv_obj_add_flag(dd, LV_OBJ_FLAG_CLICKABLE);  // ensure hit-test works in LVGL v9
     lv_obj_set_style_text_font(dd, &lv_font_unscii_16, 0);
     lv_obj_set_style_bg_color(dd, lv_color_make(40, 40, 60), 0);
     lv_obj_set_style_text_color(dd, lv_color_white(), 0);
@@ -242,10 +243,15 @@ void settings_ui_open(const app_settings_t *current)
     lv_obj_set_style_border_width(sep2, 0, 0);
 
     // ---- Save & Close button ----
-    // Larger size (480x72) and extended hit area for easier touch on Tab5
-    lv_obj_t *btn = lv_btn_create(s_overlay);
+    // Use lv_button_create (LVGL v9 API); lv_btn_create is v8 and may fall back
+    // to lv_obj_create which lacks LV_OBJ_FLAG_CLICKABLE by default.
+    lv_obj_t *btn = lv_button_create(s_overlay);
     lv_obj_set_size(btn, 480, 72);
-    lv_obj_align(btn, LV_ALIGN_BOTTOM_MID, 0, -30);
+    // Use absolute position instead of lv_obj_align to avoid layout timing issues
+    // LVGL_W=1280, btn_w=480 -> x=(1280-480)/2=400
+    // overlay_h=700, btn_h=72, margin=30 -> y=700-72-30=598
+    lv_obj_set_pos(btn, (LVGL_W - 480) / 2, (LVGL_H - STATUS_BAR_H) - 72 - 30);
+    lv_obj_add_flag(btn, LV_OBJ_FLAG_CLICKABLE);
     lv_obj_set_style_bg_color(btn, lv_color_make(0, 140, 60), 0);
     lv_obj_set_style_bg_color(btn, lv_color_make(0, 180, 80), LV_STATE_PRESSED);
     lv_obj_set_style_radius(btn, 12, 0);
