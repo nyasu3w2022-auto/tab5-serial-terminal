@@ -157,8 +157,8 @@ static void touch_read_callback(lv_indev_t *indev, lv_indev_data_t *data)
         // 1. Identify Primary Target (Handled by LVGL core)
         lv_obj_t *primary_target = NULL;
         lv_point_t pt_primary    = ctx->last_points[0];
-        primary_target           = lv_indev_search_obj(scr, &pt_primary);
-
+                primary_target           = lv_indev_search_obj(scr, &pt_primary);
+        ESP_LOGI(TAG, "primary_target=%p pt=(%ld,%ld)", (void*)primary_target, pt_primary.x, pt_primary.y);
         // 2. Identify Current Targets (Indices 0..N)
         // We track Primary (0) for repeat logic, and Secondary (1..N) for everything.
         lv_obj_t *current_objs[10] = {0};
