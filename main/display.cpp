@@ -266,6 +266,13 @@ esp_err_t app_lcd_lvgl_init(m5::tab5::m5tab5_component &board)
         touch_cfg.disp             = s_lvgl_disp;
         touch_cfg.handle           = touch_handle;
         s_lvgl_touch_indev = lvgl_port_add_touch(&touch_cfg);
+        if (s_lvgl_touch_indev) {
+            // SW rotation is LV_DISPLAY_ROTATION_90, so we must set the same
+            // rotation on the touch device so that raw GT911 coordinates
+            // (portrait: x=0..720, y=0..1280) are transformed to LVGL logical
+            // coordinates (landscape: x=0..1279, y=0..719).
+            lvgl_port_set_touch_rotation(s_lvgl_touch_indev, LV_DISPLAY_ROTATION_90);
+        }
     }
 
     return ESP_OK;
