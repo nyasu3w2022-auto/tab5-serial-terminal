@@ -77,10 +77,11 @@ static vt100_tx_cb_t s_tx_cb = nullptr;
 
 static void term_cell_clear(TermCell *cell)
 {
-    cell->ch   = ' ';
-    cell->fg   = DEFAULT_FG;
-    cell->bg   = DEFAULT_BG;
-    cell->bold = 0;
+    cell->codepoint = 0x20;
+    cell->fg        = DEFAULT_FG;
+    cell->bg        = DEFAULT_BG;
+    cell->bold      = 0;
+    cell->wide      = 0;
 }
 
 void term_mark_dirty(int row)
@@ -148,9 +149,12 @@ static void term_scroll_down(int n)
     }
 }
 
-static void term_put_char_raw(char c)
+// Write a Unicode codepoint at the current cursor position.
+// is_wide=true means the character occupies 2 columns (CJK full-width).
+static void term_put_codepoint(uint32_t cp, bool is_wide)
 {
     if (cursor_row < 0 || cursor_row >= TERM_ROWS) return;
+
     // Deferred wrap: if previous char filled the last column, wrap now before writing.
     if (pending_wrap) {
         pending_wrap = false;
@@ -162,13 +166,46 @@ static void term_put_char_raw(char c)
             if (cursor_row >= TERM_ROWS) cursor_row = TERM_ROWS - 1;
         }
     }
+
     if (cursor_col < 0 || cursor_col >= TERM_COLS) return;
-    term_buffer[cursor_row][cursor_col].ch   = c;
-    term_buffer[cursor_row][cursor_col].fg   = cur_bold ? (cur_fg | 8) : cur_fg;
-    term_buffer[cursor_row][cursor_col].bg   = cur_bg;
-    term_buffer[cursor_row][cursor_col].bold = cur_bold;
+
+    // For wide characters, ensure there is room for both cells.
+    // If the character would start at the last column, wrap first.
+    if (is_wide && cursor_col == TERM_COLS - 1) {
+        // Fill the last cell with space and wrap
+        term_cell_clear(&term_buffer[cursor_row][cursor_col]);
+        cursor_col = 0;
+        if (cursor_row == scroll_bot) {
+            term_scroll_up(1);
+        } else {
+            cursor_row++;
+            if (cursor_row >= TERM_ROWS) cursor_row = TERM_ROWS - 1;
+        }
+    }
+
+    uint8_t effective_fg = cur_bold ? (cur_fg | 8) : cur_fg;
+
+    // Write the primary (left) cell
+    term_buffer[cursor_row][cursor_col].codepoint = cp;
+    term_buffer[cursor_row][cursor_col].fg        = effective_fg;
+    term_buffer[cursor_row][cursor_col].bg        = cur_bg;
+    term_buffer[cursor_row][cursor_col].bold      = cur_bold;
+    term_buffer[cursor_row][cursor_col].wide      = is_wide ? 1 : 0;
     term_mark_dirty(cursor_row);
     cursor_col++;
+
+    if (is_wide) {
+        // Write the right (continuation) cell
+        if (cursor_col < TERM_COLS) {
+            term_buffer[cursor_row][cursor_col].codepoint = 0x20;
+            term_buffer[cursor_row][cursor_col].fg        = effective_fg;
+            term_buffer[cursor_row][cursor_col].bg        = cur_bg;
+            term_buffer[cursor_row][cursor_col].bold      = cur_bold;
+            term_buffer[cursor_row][cursor_col].wide      = 2;  // right half marker
+        }
+        cursor_col++;
+    }
+
     if (cursor_col >= TERM_COLS) {
         // Reached last column: set pending wrap flag instead of wrapping immediately.
         cursor_col = TERM_COLS - 1;
@@ -194,6 +231,10 @@ static vt_state_t vt_state       = VT_STATE_NORMAL;
 static int        vt_params[VT_MAX_PARAMS];
 static int        vt_num_params  = 0;
 static bool       vt_param_started = false;
+
+// UTF-8 decoder state
+static int      utf8_bytes_left = 0;   // remaining continuation bytes expected
+static uint32_t utf8_codepoint  = 0;   // codepoint being assembled
 
 static void vt_reset_params(void)
 {
@@ -441,6 +482,37 @@ static void vt_process_csi_priv(char final_ch)
 }
 
 // ==============================================================
+// Unicode width helper
+// Returns true if the codepoint is a CJK full-width character
+// (occupies 2 terminal columns).
+// ==============================================================
+static bool is_wide_codepoint(uint32_t cp)
+{
+    // CJK Unified Ideographs and common full-width blocks
+    if (cp >= 0x1100 && cp <= 0x115F) return true;  // Hangul Jamo
+    if (cp >= 0x2E80 && cp <= 0x303F) return true;  // CJK Radicals / Symbols
+    if (cp >= 0x3040 && cp <= 0x33FF) return true;  // Hiragana, Katakana, CJK compat
+    if (cp >= 0x3400 && cp <= 0x4DBF) return true;  // CJK Extension A
+    if (cp >= 0x4E00 && cp <= 0x9FFF) return true;  // CJK Unified Ideographs
+    if (cp >= 0xA000 && cp <= 0xA4CF) return true;  // Yi
+    if (cp >= 0xA960 && cp <= 0xA97F) return true;  // Hangul Jamo Extended-A
+    if (cp >= 0xAC00 && cp <= 0xD7AF) return true;  // Hangul Syllables
+    if (cp >= 0xF900 && cp <= 0xFAFF) return true;  // CJK Compatibility Ideographs
+    if (cp >= 0xFE10 && cp <= 0xFE1F) return true;  // Vertical forms
+    if (cp >= 0xFE30 && cp <= 0xFE4F) return true;  // CJK Compatibility Forms
+    if (cp >= 0xFF00 && cp <= 0xFF60) return true;  // Fullwidth Latin/Symbols
+    if (cp >= 0xFFE0 && cp <= 0xFFE6) return true;  // Fullwidth Signs
+    if (cp >= 0x1B000 && cp <= 0x1B0FF) return true; // Kana Supplement
+    if (cp >= 0x1F004 && cp <= 0x1F0CF) return true; // Mahjong/Playing Cards
+    if (cp >= 0x1F300 && cp <= 0x1F9FF) return true; // Misc Symbols/Emoji
+    if (cp >= 0x20000 && cp <= 0x2A6DF) return true; // CJK Extension B
+    if (cp >= 0x2A700 && cp <= 0x2CEAF) return true; // CJK Extensions C/D/E
+    if (cp >= 0x2CEB0 && cp <= 0x2EBEF) return true; // CJK Extension F
+    if (cp >= 0x30000 && cp <= 0x3134F) return true; // CJK Extension G
+    return false;
+}
+
+// ==============================================================
 // VT100 TX callback registration
 // ==============================================================
 
@@ -460,7 +532,26 @@ void vt100_process_byte(uint8_t byte)
     switch (vt_state) {
     case VT_STATE_NORMAL:
         if (c == 0x1B) {
+            // ESC: reset UTF-8 decoder and enter ESC state
+            utf8_bytes_left = 0;
+            utf8_codepoint  = 0;
             vt_state = VT_STATE_ESC;
+        } else if (utf8_bytes_left > 0) {
+            // Continuation byte of a multi-byte UTF-8 sequence
+            if ((byte & 0xC0) == 0x80) {
+                utf8_codepoint = (utf8_codepoint << 6) | (byte & 0x3F);
+                utf8_bytes_left--;
+                if (utf8_bytes_left == 0) {
+                    // Codepoint complete: render it
+                    uint32_t cp = utf8_codepoint;
+                    bool wide = is_wide_codepoint(cp);
+                    term_put_codepoint(cp, wide);
+                }
+            } else {
+                // Invalid continuation byte: reset decoder
+                utf8_bytes_left = 0;
+                utf8_codepoint  = 0;
+            }
         } else if (c == '\n') {
             pending_wrap = false;
             if (cursor_row == scroll_bot) {
@@ -487,9 +578,22 @@ void vt100_process_byte(uint8_t byte)
         } else if (c == 0x0E || c == 0x0F) {
             // SO/SI (charset shift) - ignore
         } else if ((uint8_t)c >= 0x20 && (uint8_t)c < 0x7F) {
-            term_put_char_raw(c);
+            // ASCII printable
+            term_put_codepoint((uint32_t)(uint8_t)c, false);
+        } else if ((byte & 0xE0) == 0xC0) {
+            // 2-byte UTF-8 sequence start (U+0080..U+07FF)
+            utf8_codepoint  = byte & 0x1F;
+            utf8_bytes_left = 1;
+        } else if ((byte & 0xF0) == 0xE0) {
+            // 3-byte UTF-8 sequence start (U+0800..U+FFFF)
+            utf8_codepoint  = byte & 0x0F;
+            utf8_bytes_left = 2;
+        } else if ((byte & 0xF8) == 0xF0) {
+            // 4-byte UTF-8 sequence start (U+10000..U+10FFFF)
+            utf8_codepoint  = byte & 0x07;
+            utf8_bytes_left = 3;
         }
-        // Bytes >= 0x80 (UTF-8 multibyte) are ignored (no Japanese font yet)
+        // Other control bytes (< 0x20 not handled above) are ignored
         break;
 
     case VT_STATE_ESC:
@@ -589,8 +693,11 @@ void vt100_process_byte(uint8_t byte)
             // DECALN: fill screen with 'E' (alignment test)
             for (int r = 0; r < TERM_ROWS; r++)
                 for (int col = 0; col < TERM_COLS; col++) {
-                    term_buffer[r][col].ch = 'E'; term_buffer[r][col].fg = DEFAULT_FG;
-                    term_buffer[r][col].bg = DEFAULT_BG; term_buffer[r][col].bold = 0;
+                    term_buffer[r][col].codepoint = 'E';
+                    term_buffer[r][col].fg        = DEFAULT_FG;
+                    term_buffer[r][col].bg        = DEFAULT_BG;
+                    term_buffer[r][col].bold      = 0;
+                    term_buffer[r][col].wide      = 0;
                 }
             term_mark_all_dirty();
         }

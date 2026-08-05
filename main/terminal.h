@@ -46,10 +46,11 @@ extern const lv_color_t TERM_COLORS[16];
 #define DEFAULT_BG  0   // Black
 
 typedef struct {
-    char    ch;     // character (space = empty)
-    uint8_t fg;     // foreground color index 0-15
-    uint8_t bg;     // background color index 0-15
-    uint8_t bold;   // bold/bright flag
+    uint32_t codepoint; // Unicode codepoint (0x20 = space/empty)
+    uint8_t  fg;        // foreground color index 0-15
+    uint8_t  bg;        // background color index 0-15
+    uint8_t  bold;      // bold/bright flag
+    uint8_t  wide;      // 1 = full-width (occupies 2 columns), 2 = right half of wide char
 } TermCell;
 
 // ==============================================================
