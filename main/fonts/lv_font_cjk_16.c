@@ -4,11 +4,7 @@
  * Opts: --font /usr/share/fonts/truetype/fonts-japanese-gothic.ttf --size 16 --bpp 1 --format lvgl --lv-font-name lv_font_cjk_16 -r 0x0020-0x007E -r 0x3000-0x303F -r 0x3040-0x309F -r 0x30A0-0x30FF -r 0x4E00-0x9FFF -r 0xFF00-0xFFEF -o /home/ubuntu/tab5-serial-terminal/main/fonts/lv_font_cjk_16.c
  ******************************************************************************/
 
-#ifdef LV_LVGL_H_INCLUDE_SIMPLE
 #include "lvgl.h"
-#else
-#include "lvgl/lvgl.h"
-#endif
 
 #ifndef LV_FONT_CJK_16
 #define LV_FONT_CJK_16 1
