@@ -35,8 +35,9 @@ CONFIG_LV_USE_IMAGE=y
 # Log level
 CONFIG_LOG_DEFAULT_LEVEL_INFO=y
 
-# Partition table
-CONFIG_PARTITION_TABLE_SINGLE_APP_LARGE=y
+# Partition table (custom: factory 3MB to fit large CJK font bitmaps)
+CONFIG_PARTITION_TABLE_CUSTOM=y
+CONFIG_PARTITION_TABLE_CUSTOM_FILENAME="partitions.csv"
 
 # C++ exceptions (required by VCP driver .hpp classes)
 CONFIG_COMPILER_CXX_EXCEPTIONS=y
