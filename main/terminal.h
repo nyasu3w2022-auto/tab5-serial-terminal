@@ -27,11 +27,11 @@
 // is 1280x720 (landscape). All UI coordinates use the rotated values.
 #define LVGL_W          1280   // LVGL logical width  (after 90-degree rotation)
 #define LVGL_H          720    // LVGL logical height (after 90-degree rotation)
-#define TERM_FONT_W     8    // half-width cell: IPA Gothic half-width adv_w=128 = 8px
-#define TERM_FONT_H     16
+#define TERM_FONT_W     14   // half-width cell: IPA Gothic 28px half-width adv_w=224 = 14px
+#define TERM_FONT_H     28
 #define STATUS_BAR_H    20
-#define TERM_COLS       (LVGL_W / TERM_FONT_W)                   // 160
-#define TERM_ROWS       ((LVGL_H - STATUS_BAR_H) / TERM_FONT_H)  // 43
+#define TERM_COLS       (LVGL_W / TERM_FONT_W)                   // 91
+#define TERM_ROWS       ((LVGL_H - STATUS_BAR_H) / TERM_FONT_H)  // 25
 
 // ==============================================================
 // Terminal Cell and Color Definitions
