@@ -6,11 +6,12 @@ M5Stack TAB5 (ESP32-P4) 向けの VT100 互換スタンドアロンシリアル�
 
 - **USB ホスト CDC-ACM 対応** — VCP チップ（CH34x / CP210x / FTDI）および標準 CDC-ACM デバイス（Raspberry Pi USB ガジェット等）に対応
 - **VT100 ターミナルエミュレーション** — カーソル移動・スクロール領域・画面消去・SGR カラー（8色 + 輝度、256色、Truecolor 近似）
+- **UTF-8 日本語表示** — IPAゴシックフォントを内蔵し、UTF-8 マルチバイト文字（ひらがな、カタカナ、漢字等）の表示に対応
+- **フォントサイズ切り替え** — 設定画面から「Small (16px, 160×43)」と「Large (28px, 91×25)」を切り替え可能
 - **pending wrap（遅延折り返し）** — VT100 仕様に準拠した行末処理。余分なスクロールを防止
 - **DSR / DA 応答** — `ESC[6n`（カーソル位置報告要求）および `ESC[c`（デバイス属性要求）に応答。bash/readline がブロックしない
 - **USB RX 16 KB リングバッファ** — 大量出力時のデータ取りこぼしを防止
-- **ボーレート切り替え** — Ctrl+B で 9600 / 19200 / 38400 / 57600 / 115200 / 230400 / 460800 / 921600 bps を順番に切り替え
-- **ウィンドウサイズ通知** — 接続時に `ESC[8;<rows>;<cols>t` を送信し、リモートシェルの `stty size` を自動設定
+- **GUI 設定画面** — `Ctrl+Alt+S` で設定画面を開き、ボーレート、ログレベル、フォントサイズを変更可能（NVSに自動保存）
 - **差分描画** — 変更行のみ再描画する行単位ダーティフラグで高速表示
 
 ## ハードウェア構成
@@ -24,12 +25,13 @@ M5Stack TAB5 (ESP32-P4) 向けの VT100 互換スタンドアロンシリアル�
 
 ## ターミナル仕様
 
-| 項目 | 値 |
-|:---|:---|
-| 表示列数 | 80 列 |
-| 表示行数 | 43 行（ステータスバー除く） |
-| フォント | lv_font_unscii_16（16×16 px 等幅） |
-| カラー | 16色（ANSI 8色 + 輝度ビット）、256色近似、Truecolor 近似 |
+| 項目 | Small フォント | Large フォント（デフォルト） |
+|:---|:---|:---|
+| 表示列数 | 160 列 | 91 列 |
+| 表示行数 | 43 行 | 25 行 |
+| フォントサイズ | 16 px | 28 px |
+| フォント種別 | IPAゴシック (lv_font_cjk_16) | IPAゴシック (lv_font_cjk_28) |
+| カラー | \multicolumn{2}{l|}{16色（ANSI 8色 + 輝度ビット）、256色近似、Truecolor 近似} |
 
 ## キーバインド
 
@@ -39,7 +41,7 @@ M5Stack TAB5 (ESP32-P4) 向けの VT100 互換スタンドアロンシリアル�
 |:---|:---|
 | Ctrl+C | 画面クリア |
 | Ctrl+L | 画面強制再描画 |
-| Ctrl+B | ボーレートを順番に切り替え（VCP 接続時のみ有効） |
+| Ctrl+Alt+S | 設定画面を開く / 閉じる |
 
 ### リモートへの送信（USB 経由でそのまま転送）
 
@@ -117,6 +119,8 @@ idf.py build
 idf.py -p /dev/ttyACM0 flash monitor
 ```
 
+**注意:** CJKフォントデータ（約750KB）を格納するため、カスタムパーティションテーブル（factory 3MB）を使用しています。初めてフラッシュする際は、NVS領域も含めて初期化するため、必ずフルフラッシュ（または `idf.py erase-flash` 後にフラッシュ）を行ってください。
+
 ### 依存コンポーネント
 
 | コンポーネント | バージョン |
@@ -127,6 +131,31 @@ idf.py -p /dev/ttyACM0 flash monitor
 | `espressif/usb_host_ch34x_vcp` | ^2.2 |
 | `espressif/usb_host_cp210x_vcp` | ^2.2 |
 | `espressif/usb_host_ftdi_vcp` | ^2.1 |
+
+## ESP-IDF ライブラリへのパッチ
+
+Raspberry Pi の `g_serial` ガジェットは USB コンフィギュレーション #2 を使用します。ESP-IDF の USB ホストライブラリはデフォルトでコンフィギュレーション #1 を選択するため、そのままでは認識されません。リポジトリに含まれる `enum.c.diff` を適用する必要があります。
+
+### パッチ対象ファイル
+
+```
+{ESP-IDF インストールディレクトリ}/components/usb/host/enum.c
+```
+
+Windows（ESP-IDF Tools Installer）の場合の典型的なパス：
+```
+C:\Espressif\frameworks\esp-idf-v5.x.x\components\usb\host\enum.c
+```
+
+### 適用方法
+
+```bash
+# ESP-IDF のソースディレクトリに移動して適用
+cd C:\Espressif\frameworks\esp-idf-v5.x.x
+patch -p0 < path/to/tab5-serial-terminal/enum.c.diff
+```
+
+**注意:** このパッチは ESP-IDF のシステムファイルを変更します。ESP-IDF をアップデートした場合は再度適用が必要です。なお、一般的な USB シリアルデバイス（CH34x、CP210x、FTDI 等）はコンフィギュレーション #1 を使用するため、このパッチの影響を受けません。
 
 ## Raspberry Pi との接続
 
@@ -154,19 +183,14 @@ export TERM=xterm-color
 
 ### ウィンドウサイズについて
 
-接続時に `ESC[8;43;80t` を自動送信しますが、`g_serial` ガジェットはこのシーケンスに応答しません。必要に応じてラズパイ側で手動設定してください。
+ターミナル側のフォントサイズに応じて、ラズパイ側でウィンドウサイズを手動設定する必要があります。
 
 ```bash
-stty rows 43 cols 80
-```
+# Large フォント (28px) の場合
+stty rows 25 cols 91
 
-## ESP-IDF ライブラリへのパッチ
-
-Raspberry Pi の `g_serial` ガジェットは USB コンフィギュレーション #2 を使用します。ESP-IDF の USB ホストライブラリのデフォルト動作では正しく認識されないため、`enum.c.diff` に記載のパッチを適用する必要があります。
-
-```bash
-# ESP-IDF のソースに適用
-patch -p0 < enum.c.diff
+# Small フォント (16px) の場合
+stty rows 43 cols 160
 ```
 
 ## アーキテクチャ
@@ -189,12 +213,15 @@ keyboard_event_cb() → key_queue への書き込み
 
 ## 既知の制限・今後の予定
 
-- **UTF-8 / 日本語表示** — 現在は ASCII のみ。マルチバイト文字は未対応
 - **UART 対応** — USB のみ。Port A (UART) 経由の接続は未実装
-- **設定画面** — ボーレート等の設定は Ctrl+B のみ。GUI 設定画面は未実装
 - **スクロールバック** — 画面外にスクロールしたデータは参照不可
 - **起動時のまれなハング** — USB ホスト初期化中に稀に停止することがある（調査中）
 
 ## ライセンス
 
+### プログラムコード
 MIT License
+
+### 組み込みフォント
+本ソフトウェアは [IPAフォント](https://moji.or.jp/ipafont/) (IPAゴシック) をビットマップデータとして組み込んで使用しています。
+IPAフォントのライセンスは `IPA_Font_License_Agreement_v1.0.txt` に従います。

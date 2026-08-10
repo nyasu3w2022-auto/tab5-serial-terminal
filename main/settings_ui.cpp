@@ -3,14 +3,14 @@
  *
  * Layout (landscape 1280x720):
  *   ┌──────────────────────────────────────────────────────────┐
- *   │  TAB5 Serial Terminal — Settings          [Ctrl+Alt+S]   │  title bar 40px
+ *   │  TAB5 Serial Terminal — Settings          [Ctrl+Alt+S]   │  title bar 48px
  *   ├──────────────────────────────────────────────────────────┤
  *   │  Baud Rate:   [115200 ▼]                                 │  row 1
  *   │  Interface:   [USB Serial ▼]                             │  row 2
  *   │  Log Level:   [INFO ▼]                                   │  row 3
+ *   │  Font Size:   [Large (91x25) ▼]                          │  row 4
  *   ├──────────────────────────────────────────────────────────┤
- *   │  (i) PortA and Log Level changes take effect immediately  │  note
- *   │  (i) Baud rate is applied when Save & Close is pressed    │
+ *   │  (i) Notes                                               │  note
  *   ├──────────────────────────────────────────────────────────┤
  *   │                    [ Save & Close ]                       │  button
  *   └──────────────────────────────────────────────────────────┘
@@ -38,10 +38,7 @@ static lv_obj_t *s_overlay       = NULL;  // root overlay panel
 static lv_obj_t *s_dd_baud       = NULL;  // baud rate dropdown
 static lv_obj_t *s_dd_iface      = NULL;  // interface dropdown
 static lv_obj_t *s_dd_log        = NULL;  // log level dropdown
-
-// Callback invoked when settings are saved (set by main.cpp)
-typedef void (*settings_saved_cb_t)(const app_settings_t *s);
-static settings_saved_cb_t s_saved_cb = NULL;
+static lv_obj_t *s_dd_font       = NULL;  // font size dropdown
 
 // Current settings snapshot (filled at open time)
 static app_settings_t s_current = {};
@@ -134,20 +131,25 @@ static void save_close_cb(lv_event_t *e)
     uint16_t log_idx = lv_dropdown_get_selected(s_dd_log);
     ns.log_level = (app_log_level_t)log_idx;
 
+    uint16_t font_idx = lv_dropdown_get_selected(s_dd_font);
+    ns.font_size = (app_font_size_t)font_idx;
+
     // Save to NVS
     settings_save(&ns);
 
-    // Apply immediately
+    ESP_LOGI(TAG, "Settings saved: baud=%"PRIu32" iface=%d log=%d font=%d",
+             ns.baud_rate, (int)ns.serial_if, (int)ns.log_level, (int)ns.font_size);
+
+    // Close the overlay BEFORE applying settings that rebuild the UI
+    // (settings_apply may call ui_rebuild_for_font_size which destroys/recreates
+    //  all LVGL objects including the overlay itself)
+    settings_ui_close();
+
+    // Apply settings (may trigger UI rebuild for font size change)
     settings_apply(&ns);
 
     // Update snapshot
     s_current = ns;
-
-    ESP_LOGI(TAG, "Settings saved: baud=%"PRIu32" iface=%d log=%d",
-             ns.baud_rate, (int)ns.serial_if, (int)ns.log_level);
-
-    // Close the overlay
-    settings_ui_close();
 }
 
 // ==============================================================
@@ -212,42 +214,45 @@ void settings_ui_open(const app_settings_t *current)
                            baud_to_index(current->baud_rate));
 
     // Row 2: Interface
-    s_dd_iface = create_row(s_overlay, 130,
+    s_dd_iface = create_row(s_overlay, 140,
                             "Interface:",
                             "USB Serial\nPortA UART (future)",
                             (int)current->serial_if);
 
     // Row 3: Log Level
-    s_dd_log = create_row(s_overlay, 190,
+    s_dd_log = create_row(s_overlay, 210,
                           "Log Level:",
                           "NONE\nERROR\nWARN\nINFO\nDEBUG\nVERBOSE",
                           (int)current->log_level);
 
+    // Row 4: Font Size
+    s_dd_font = create_row(s_overlay, 280,
+                           "Font Size:",
+                           "Small (160x43)\nLarge (91x25)",
+                           (int)current->font_size);
+
     // ---- Note ----
     lv_obj_t *note = lv_label_create(s_overlay);
     lv_label_set_text(note,
-        "  Note: Log level takes effect immediately.\n"
-        "  Baud rate and interface are applied when Save & Close is pressed.\n"
+        "  Note: All settings are applied when Save & Close is pressed.\n"
+        "  Font Size change clears the screen and rebuilds the display.\n"
         "  PortA interface is not yet implemented.");
     lv_obj_set_style_text_font(note, &lv_font_unscii_16, 0);
     lv_obj_set_style_text_color(note, lv_color_make(180, 180, 180), 0);
-    lv_obj_set_pos(note, 40, 260);
+    lv_obj_set_pos(note, 40, 360);
     lv_obj_set_width(note, LVGL_W - 80);
 
     // ---- Separator 2 ----
     lv_obj_t *sep2 = lv_obj_create(s_overlay);
     lv_obj_set_size(sep2, LVGL_W, 2);
-    lv_obj_set_pos(sep2, 0, 360);
+    lv_obj_set_pos(sep2, 0, 460);
     lv_obj_set_style_bg_color(sep2, lv_color_make(80, 80, 120), 0);
     lv_obj_set_style_bg_opa(sep2, LV_OPA_COVER, 0);
     lv_obj_set_style_border_width(sep2, 0, 0);
 
     // ---- Save & Close button ----
-    // Use lv_button_create (LVGL v9 API); lv_btn_create is v8 and may fall back
-    // to lv_obj_create which lacks LV_OBJ_FLAG_CLICKABLE by default.
     lv_obj_t *btn = lv_button_create(s_overlay);
     lv_obj_set_size(btn, 480, 72);
-    // Use absolute position instead of lv_obj_align to avoid layout timing issues
     // LVGL_W=1280, btn_w=480 -> x=(1280-480)/2=400
     // overlay_h=700, btn_h=72, margin=30 -> y=700-72-30=598
     lv_obj_set_pos(btn, (LVGL_W - 480) / 2, (LVGL_H - STATUS_BAR_H) - 72 - 30);
@@ -279,6 +284,7 @@ void settings_ui_close(void)
     s_dd_baud  = NULL;
     s_dd_iface = NULL;
     s_dd_log   = NULL;
+    s_dd_font  = NULL;
     lvgl_port_unlock();
 
     // Force full terminal redraw so the screen is restored

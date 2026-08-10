@@ -32,23 +32,35 @@ typedef enum {
     LOG_LEVEL_VERBOSE = 5,
 } app_log_level_t;
 
+/**
+ * Font size selection.
+ *   Small: 16px font → 160 cols × 43 rows (more information, smaller text)
+ *   Large: 28px font →  91 cols × 25 rows (easier to read)
+ */
+typedef enum {
+    FONT_SIZE_SMALL = 0,  /**< 16px IPA Gothic: 160×43 */
+    FONT_SIZE_LARGE = 1,  /**< 28px IPA Gothic:  91×25 */
+} app_font_size_t;
+
 // ==============================================================
 // Settings Structure
 // ==============================================================
 
 typedef struct {
-    uint32_t       baud_rate;   /**< Serial baud rate (default: 115200) */
-    serial_if_t    serial_if;   /**< Interface: USB or PortA            */
-    app_log_level_t log_level;  /**< ESP-IDF log level                  */
+    uint32_t        baud_rate;   /**< Serial baud rate (default: 115200)    */
+    serial_if_t     serial_if;   /**< Interface: USB or PortA               */
+    app_log_level_t log_level;   /**< ESP-IDF log level                     */
+    app_font_size_t font_size;   /**< Terminal font size (Small or Large)   */
 } app_settings_t;
 
 // ==============================================================
 // Default Values
 // ==============================================================
 
-#define SETTINGS_DEFAULT_BAUD      115200
-#define SETTINGS_DEFAULT_SERIAL_IF SERIAL_IF_USB
-#define SETTINGS_DEFAULT_LOG_LEVEL LOG_LEVEL_INFO
+#define SETTINGS_DEFAULT_BAUD       115200
+#define SETTINGS_DEFAULT_SERIAL_IF  SERIAL_IF_USB
+#define SETTINGS_DEFAULT_LOG_LEVEL  LOG_LEVEL_INFO
+#define SETTINGS_DEFAULT_FONT_SIZE  FONT_SIZE_LARGE
 
 // ==============================================================
 // API
@@ -68,6 +80,9 @@ bool settings_save(const app_settings_t *s);
 
 /**
  * @brief Apply settings to the running system
- *        (baud rate, log level, etc.).
+ *        (baud rate, log level, font size, etc.).
+ *
+ * Note: font_size change triggers ui_rebuild_for_font_size() which
+ * clears the screen and rebuilds LVGL objects.
  */
 void settings_apply(const app_settings_t *s);

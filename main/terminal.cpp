@@ -15,6 +15,14 @@
 static const char *TAG = "terminal";
 
 // ==============================================================
+// Runtime font geometry (default: Large 28px)
+// ==============================================================
+int g_term_font_w = 14;   // half-width cell: 28px font -> adv_w=224 = 14px
+int g_term_font_h = 28;
+int g_term_cols   = LVGL_W / 14;   // 91
+int g_term_rows   = (LVGL_H - STATUS_BAR_H) / 28;  // 25
+
+// ==============================================================
 // SGR Color Palette
 // ==============================================================
 
@@ -41,13 +49,13 @@ const lv_color_t TERM_COLORS[16] = {
 // Terminal State
 // ==============================================================
 
-TermCell term_buffer[TERM_ROWS][TERM_COLS];
+TermCell term_buffer[TERM_ROWS_MAX][TERM_COLS_MAX];
 
 int  cursor_row         = 0;
 int  cursor_col         = 0;
 bool cursor_visible     = true;
 bool cursor_blink_state = true;
-bool row_dirty[TERM_ROWS] = {};
+bool row_dirty[TERM_ROWS_MAX] = {};
 
 // Saved cursor position (ESC 7 / ESC[s)
 static int saved_row = 0;
@@ -92,6 +100,19 @@ void term_mark_dirty(int row)
 void term_mark_all_dirty(void)
 {
     for (int r = 0; r < TERM_ROWS; r++) row_dirty[r] = true;
+}
+
+void term_set_font_size(int font_w, int font_h)
+{
+    g_term_font_w = font_w;
+    g_term_font_h = font_h;
+    g_term_cols   = LVGL_W / font_w;
+    g_term_rows   = (LVGL_H - STATUS_BAR_H) / font_h;
+    // Clamp to maximum buffer dimensions
+    if (g_term_cols > TERM_COLS_MAX) g_term_cols = TERM_COLS_MAX;
+    if (g_term_rows > TERM_ROWS_MAX) g_term_rows = TERM_ROWS_MAX;
+    ESP_LOGI("terminal", "Font size set to %dx%d, cols=%d rows=%d",
+             font_w, font_h, g_term_cols, g_term_rows);
 }
 
 static void term_clear_region(int row_start, int col_start, int row_end, int col_end)

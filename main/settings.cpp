@@ -6,6 +6,7 @@
 
 #include "settings.h"
 #include "usb_serial.h"
+#include "display.h"
 
 #include <string.h>
 #include <esp_log.h>
@@ -13,11 +14,12 @@
 #include <nvs_flash.h>
 #include <nvs.h>
 
-static const char *TAG       = "settings";
-static const char *NVS_NS    = "term_cfg";
-static const char *KEY_BAUD  = "baud";
-static const char *KEY_IFACE = "iface";
-static const char *KEY_LOG   = "log_level";
+static const char *TAG        = "settings";
+static const char *NVS_NS     = "term_cfg";
+static const char *KEY_BAUD   = "baud";
+static const char *KEY_IFACE  = "iface";
+static const char *KEY_LOG    = "log_level";
+static const char *KEY_FONT   = "font_size";
 
 // ==============================================================
 // Load
@@ -29,6 +31,7 @@ void settings_load(app_settings_t *out)
     out->baud_rate  = SETTINGS_DEFAULT_BAUD;
     out->serial_if  = SETTINGS_DEFAULT_SERIAL_IF;
     out->log_level  = SETTINGS_DEFAULT_LOG_LEVEL;
+    out->font_size  = SETTINGS_DEFAULT_FONT_SIZE;
 
     nvs_handle_t h;
     esp_err_t err = nvs_open(NVS_NS, NVS_READONLY, &h);
@@ -52,10 +55,13 @@ void settings_load(app_settings_t *out)
     if (nvs_get_u8(h, KEY_LOG, &v8) == ESP_OK) {
         out->log_level = (app_log_level_t)v8;
     }
+    if (nvs_get_u8(h, KEY_FONT, &v8) == ESP_OK) {
+        out->font_size = (app_font_size_t)v8;
+    }
 
     nvs_close(h);
-    ESP_LOGI(TAG, "Settings loaded: baud=%"PRIu32" iface=%d log=%d",
-             out->baud_rate, (int)out->serial_if, (int)out->log_level);
+    ESP_LOGI(TAG, "Settings loaded: baud=%"PRIu32" iface=%d log=%d font=%d",
+             out->baud_rate, (int)out->serial_if, (int)out->log_level, (int)out->font_size);
 }
 
 // ==============================================================
@@ -72,15 +78,16 @@ bool settings_save(const app_settings_t *s)
     }
 
     bool ok = true;
-    ok &= (nvs_set_u32(h, KEY_BAUD,  s->baud_rate)          == ESP_OK);
-    ok &= (nvs_set_u8 (h, KEY_IFACE, (uint8_t)s->serial_if) == ESP_OK);
-    ok &= (nvs_set_u8 (h, KEY_LOG,   (uint8_t)s->log_level) == ESP_OK);
+    ok &= (nvs_set_u32(h, KEY_BAUD,  s->baud_rate)           == ESP_OK);
+    ok &= (nvs_set_u8 (h, KEY_IFACE, (uint8_t)s->serial_if)  == ESP_OK);
+    ok &= (nvs_set_u8 (h, KEY_LOG,   (uint8_t)s->log_level)  == ESP_OK);
+    ok &= (nvs_set_u8 (h, KEY_FONT,  (uint8_t)s->font_size)  == ESP_OK);
     ok &= (nvs_commit(h) == ESP_OK);
 
     nvs_close(h);
     if (ok) {
-        ESP_LOGI(TAG, "Settings saved: baud=%"PRIu32" iface=%d log=%d",
-                 s->baud_rate, (int)s->serial_if, (int)s->log_level);
+        ESP_LOGI(TAG, "Settings saved: baud=%"PRIu32" iface=%d log=%d font=%d",
+                 s->baud_rate, (int)s->serial_if, (int)s->log_level, (int)s->font_size);
     } else {
         ESP_LOGE(TAG, "Settings save failed (partial write)");
     }
@@ -110,6 +117,15 @@ void settings_apply(const app_settings_t *s)
     if (idx > 5) idx = 5;
     esp_log_level_set("*", lvl_map[idx]);
     ESP_LOGI(TAG, "Log level set to %d", idx);
+
+    // Apply font size: rebuild terminal UI if size has changed
+    // Small: 16px font (8px half-width)  → 160 cols × 43 rows
+    // Large: 28px font (14px half-width) →  91 cols × 25 rows
+    if (s->font_size == FONT_SIZE_SMALL) {
+        ui_rebuild_for_font_size(8, 16);
+    } else {
+        ui_rebuild_for_font_size(14, 28);
+    }
 
     // serial_if: PortA is not yet implemented; USB is always active.
     if (s->serial_if == SERIAL_IF_PORTA) {

@@ -12,7 +12,6 @@
  * Keyboard shortcuts (local, not sent to remote):
  *   Ctrl+C        — Clear terminal screen
  *   Ctrl+L        — Force full redisplay
- *   Ctrl+B        — Cycle baud rate (quick toggle)
  *   Ctrl+Alt+S    — Open / close settings screen
  *
  * SPDX-License-Identifier: MIT
@@ -139,21 +138,6 @@ static bool handle_key_event(const key_event_msg_t *msg)
             term_mark_all_dirty();
             return true;
         }
-        if (k == 'B') {
-            // Ctrl+B: cycle baud rate (quick toggle; also updates s_settings)
-            static const uint32_t baud_rates[] = {
-                9600, 19200, 38400, 57600, 115200, 230400, 460800, 921600
-            };
-            static int baud_idx = 4;  // default: 115200
-            baud_idx = (baud_idx + 1) % (int)(sizeof(baud_rates) / sizeof(baud_rates[0]));
-            s_settings.baud_rate = baud_rates[baud_idx];
-            usb_set_baud_rate(s_settings.baud_rate);
-            char buf[64];
-            snprintf(buf, sizeof(buf),
-                     "\n\033[1;33m[Baud: %"PRIu32"]\033[0m\n", usb_get_baud_rate());
-            for (const char *p = buf; *p; p++) vt100_process_byte((uint8_t)*p);
-            return true;
-        }
 
         // Ctrl+ESC → send ESC
         if (strcasecmp(msg->str, "escape") == 0 || strcasecmp(msg->str, "esc") == 0) {
@@ -217,6 +201,15 @@ extern "C" void app_main(void)
     // ---- Load settings from NVS ----
     settings_load(&s_settings);
 
+    // ---- Apply font size from settings BEFORE ui_create() ----
+    // term_set_font_size() sets g_term_cols/rows used by ui_create().
+    // (baud rate and log level are applied after USB init below)
+    if (s_settings.font_size == FONT_SIZE_SMALL) {
+        term_set_font_size(8, 16);
+    } else {
+        term_set_font_size(14, 28);
+    }
+
     // ---- Board init ----
     m5::tab5::m5tab5_component_config_t board_cfg = {};
     esp_err_t ret = s_tab5_board.begin(board_cfg);
@@ -226,9 +219,6 @@ extern "C" void app_main(void)
     }
     s_tab5_board.usb5v_enable(true);
     ESP_LOGI(TAG, "USB-A 5V power enabled");
-
-    // ---- Apply loaded settings ----
-    settings_apply(&s_settings);
 
     // ---- LCD/LVGL init ----
     ret = app_lcd_lvgl_init(s_tab5_board);
@@ -250,6 +240,23 @@ extern "C" void app_main(void)
 
     // ---- USB init (queues, ring buffer, semaphores) ----
     usb_init();
+
+    // ---- Apply remaining settings (baud rate, log level) ----
+    // font_size is already applied above; settings_apply() calls
+    // ui_rebuild_for_font_size() only if needed, but since we already
+    // set the correct size, the rebuild is a no-op in terms of geometry.
+    // To avoid a redundant UI rebuild at startup, apply only baud/log here.
+    usb_set_baud_rate(s_settings.baud_rate);
+    {
+        static const esp_log_level_t lvl_map[] = {
+            ESP_LOG_NONE, ESP_LOG_ERROR, ESP_LOG_WARN,
+            ESP_LOG_INFO, ESP_LOG_DEBUG, ESP_LOG_VERBOSE,
+        };
+        int idx = (int)s_settings.log_level;
+        if (idx < 0) idx = 0;
+        if (idx > 5) idx = 5;
+        esp_log_level_set("*", lvl_map[idx]);
+    }
 
     // ---- Start VCP task (also starts usb_lib_task internally) ----
     usb_start_vcp_task();
