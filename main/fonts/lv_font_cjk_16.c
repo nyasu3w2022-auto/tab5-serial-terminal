@@ -4,6 +4,11 @@
  * Opts: --font /usr/share/fonts/truetype/fonts-japanese-gothic.ttf --size 16 --bpp 1 --format lvgl --lv-font-name lv_font_cjk_16 -r 0x0020-0x007E -r 0x3000-0x303F -r 0x3040-0x309F -r 0x30A0-0x30FF -r 0x4E00-0x9FFF -r 0xFF00-0xFFEF -o /home/ubuntu/tab5-serial-terminal/main/fonts/lv_font_cjk_16.c
  ******************************************************************************/
 
+/*
+ * Derived from IPA Gothic and licensed under IPA Font License v1.0.
+ * See ../../IPA_Font_License_Agreement_v1.0.txt.
+ * Original font: https://moji.or.jp/ipafont/
+ */
 #include "lvgl.h"
 
 #ifndef LV_FONT_CJK_16

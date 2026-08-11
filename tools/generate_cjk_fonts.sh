@@ -52,6 +52,7 @@ for size in 16 28; do
     # ESP-IDF's LVGL component exports lvgl.h directly; it does not export
     # the lvgl/lvgl.h include path emitted by some lv_font_conv versions.
     sed -i 's|#include "lvgl/lvgl.h"|#include "lvgl.h"|' "${output}"
+    sed -i 's|^#include "lvgl.h"$|/*\\n * Derived from IPA Gothic and licensed under IPA Font License v1.0.\\n * See ../../IPA_Font_License_Agreement_v1.0.txt.\\n * Original font: https://moji.or.jp/ipafont/\\n */\\n#include "lvgl.h"|' "${output}"
 done
 
 echo "Generated ${OUTPUT_DIR}/lv_font_cjk_16.c and lv_font_cjk_28.c"
