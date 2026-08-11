@@ -31,7 +31,7 @@ M5Stack TAB5 (ESP32-P4) 向けの VT100 互換スタンドアロンシリアル�
 | 表示行数 | 43 行 | 25 行 |
 | フォントサイズ | 16 px | 28 px |
 | フォント種別 | IPAゴシック (lv_font_cjk_16) | IPAゴシック (lv_font_cjk_28) |
-| カラー | \multicolumn{2}{l|}{16色（ANSI 8色 + 輝度ビット）、256色近似、Truecolor 近似} |
+| カラー | 16色（ANSI 8色 + 輝度ビット）、256色近似、Truecolor 近似 | 16色（ANSI 8色 + 輝度ビット）、256色近似、Truecolor 近似 |
 
 ## キーバインド
 
@@ -223,5 +223,15 @@ keyboard_event_cb() → key_queue への書き込み
 MIT License
 
 ### 組み込みフォント
-本ソフトウェアは [IPAフォント](https://moji.or.jp/ipafont/) (IPAゴシック) をビットマップデータとして組み込んで使用しています。
-IPAフォントのライセンスは `IPA_Font_License_Agreement_v1.0.txt` に従います。
+本ソフトウェアは [IPAフォント](https://moji.or.jp/ipafont/) (IPAゴシック) をビットマップデータとして組み込んで使用しています。`main/fonts/lv_font_cjk_16.c` および `main/fonts/lv_font_cjk_28.c` は、IPA Font License v1.0 における派生プログラムです。ライセンスの全文は `IPA_Font_License_Agreement_v1.0.txt` に収録しています。
+
+#### フォントデータの再生成・置換
+
+IPA Font License v1.0 の条件に従い、受領者が組み込み済みの派生フォントデータをオリジナルのIPAフォントから再生成して置き換える手段を提供します。IPAゴシックのTTFファイルを[公式配布元](https://moji.or.jp/ipafont/)から取得し、`lv_font_conv` をインストールしたうえで、以下を実行してください。
+
+```bash
+npm install -g lv_font_conv
+./tools/generate_cjk_fonts.sh /path/to/fonts-japanese-gothic.ttf
+```
+
+このスクリプトは、16pxおよび28pxのLVGLフォントCソースを `main/fonts/` に再生成します。生成対象の文字範囲および生成オプションは `tools/generate_cjk_fonts.sh` に記載しています。

@@ -14,6 +14,25 @@
 #include <stdbool.h>
 
 /**
+ * @brief Callback invoked after settings are saved and applied.
+ *
+ * The caller (main.cpp) registers this callback to keep its local
+ * s_settings copy in sync with whatever was saved in the settings screen.
+ *
+ * @param saved  Pointer to the newly saved settings.
+ */
+typedef void (*settings_saved_cb_t)(const app_settings_t *saved);
+
+/**
+ * @brief Register a callback to be called after Save & Close.
+ *
+ * Must be called once at startup before the settings screen is opened.
+ *
+ * @param cb  Callback function, or NULL to clear.
+ */
+void settings_ui_set_saved_cb(settings_saved_cb_t cb);
+
+/**
  * @brief Open the settings screen.
  *
  * Creates the LVGL overlay and populates it with the current settings.

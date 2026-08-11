@@ -184,6 +184,11 @@ static void cursor_blink_cb(lv_timer_t *timer)
 
 void ui_create(void)
 {
+    // Select font based on current runtime font height
+    s_active_font = (g_term_font_h <= 16) ? &lv_font_cjk_16 : &lv_font_cjk_28;
+    ESP_LOGI(TAG, "ui_create: font_h=%d, using %s",
+             g_term_font_h, (g_term_font_h <= 16) ? "cjk_16" : "cjk_28");
+
     lvgl_port_lock(0);
 
     lv_obj_t *scr = lv_scr_act();

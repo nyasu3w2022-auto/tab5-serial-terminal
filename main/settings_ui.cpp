@@ -40,6 +40,9 @@ static lv_obj_t *s_dd_iface      = NULL;  // interface dropdown
 static lv_obj_t *s_dd_log        = NULL;  // log level dropdown
 static lv_obj_t *s_dd_font       = NULL;  // font size dropdown
 
+// Callback registered by main.cpp to synchronize its current settings copy
+static settings_saved_cb_t s_saved_cb = NULL;
+
 // Current settings snapshot (filled at open time)
 static app_settings_t s_current = {};
 
@@ -148,8 +151,17 @@ static void save_close_cb(lv_event_t *e)
     // Apply settings (may trigger UI rebuild for font size change)
     settings_apply(&ns);
 
-    // Update snapshot
+    // Update the UI snapshot and notify the application of the saved values.
+    // The notification keeps main.cpp's s_settings in sync for subsequent opens.
     s_current = ns;
+    if (s_saved_cb) {
+        s_saved_cb(&s_current);
+    }
+}
+
+void settings_ui_set_saved_cb(settings_saved_cb_t cb)
+{
+    s_saved_cb = cb;
 }
 
 // ==============================================================

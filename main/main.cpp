@@ -46,6 +46,16 @@ static m5::M5Tab5Keyboard         s_keyboard;
 // Current application settings (loaded from NVS at boot)
 static app_settings_t s_settings = {};
 
+// Called by settings_ui after Save & Close so future openings use the
+// newly saved values rather than the boot-time snapshot.
+static void on_settings_saved(const app_settings_t *saved)
+{
+    if (saved) {
+        s_settings = *saved;
+        ESP_LOGI(TAG, "Current settings synchronized after save");
+    }
+}
+
 // ==============================================================
 // Keyboard Input Dispatch
 // ==============================================================
@@ -200,6 +210,7 @@ extern "C" void app_main(void)
 
     // ---- Load settings from NVS ----
     settings_load(&s_settings);
+    settings_ui_set_saved_cb(on_settings_saved);
 
     // ---- Apply font size from settings BEFORE ui_create() ----
     // term_set_font_size() sets g_term_cols/rows used by ui_create().
