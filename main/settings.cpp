@@ -5,7 +5,7 @@
  */
 
 #include "settings.h"
-#include "usb_serial.h"
+#include "serial_transport.h"
 #include "display.h"
 #include "terminal.h"
 
@@ -101,8 +101,14 @@ bool settings_save(const app_settings_t *s)
 
 void settings_apply(const app_settings_t *s)
 {
-    // Apply baud rate to USB serial module
-    usb_set_baud_rate(s->baud_rate);
+    // Select the requested transport and apply its baud rate. Switching
+    // interfaces stops the previous transport before starting the new one.
+    esp_err_t transport_err = serial_transport_select(s->serial_if, s->baud_rate);
+    if (transport_err != ESP_OK) {
+        ESP_LOGE(TAG, "Failed to select %s transport: %s",
+                 s->serial_if == SERIAL_IF_PORTA ? "PortA" : "USB",
+                 esp_err_to_name(transport_err));
+    }
 
     // Apply log level to ESP-IDF logging system
     static const esp_log_level_t lvl_map[] = {
@@ -129,8 +135,12 @@ void settings_apply(const app_settings_t *s)
         ui_rebuild_for_font_size(wanted_font_w, wanted_font_h);
     }
 
-    // serial_if: PortA is not yet implemented; USB is always active.
-    if (s->serial_if == SERIAL_IF_PORTA) {
-        ESP_LOGW(TAG, "PortA interface not yet implemented, staying on USB");
+    // Notify a connected peer about the active terminal geometry. For USB
+    // without a device this is harmless; the connection path sends it again.
+    if (transport_err == ESP_OK) {
+        serial_transport_send_window_size();
     }
+
+    // Refresh the status bar after a baud-rate or interface change.
+    update_status_bar();
 }

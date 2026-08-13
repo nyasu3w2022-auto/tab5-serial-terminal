@@ -16,10 +16,10 @@
 // Enumerations
 // ==============================================================
 
-/** Serial interface selection (PortA UART support is future work). */
+/** Serial interface selection. */
 typedef enum {
-    SERIAL_IF_USB = 0,  /**< USB-A CDC-ACM (current implementation) */
-    SERIAL_IF_PORTA,    /**< PortA UART (not yet implemented)        */
+    SERIAL_IF_USB = 0,  /**< USB-A CDC-ACM / VCP serial device */
+    SERIAL_IF_PORTA,    /**< Port A TTL UART: GPIO53 TX, GPIO54 RX */
 } serial_if_t;
 
 /** ESP-IDF log level selection. */

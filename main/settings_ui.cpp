@@ -228,7 +228,7 @@ void settings_ui_open(const app_settings_t *current)
     // Row 2: Interface
     s_dd_iface = create_row(s_overlay, 140,
                             "Interface:",
-                            "USB Serial\nPortA UART (future)",
+                            "USB Serial\nPortA UART (GPIO53/54)",
                             (int)current->serial_if);
 
     // Row 3: Log Level
@@ -248,7 +248,7 @@ void settings_ui_open(const app_settings_t *current)
     lv_label_set_text(note,
         "  Note: All settings are applied when Save & Close is pressed.\n"
         "  Font Size change clears the screen and rebuilds the display.\n"
-        "  PortA interface is not yet implemented.");
+        "  PortA UART uses GPIO53 (TX) / GPIO54 (RX); do not use PortA I2C at the same time.");
     lv_obj_set_style_text_font(note, &lv_font_unscii_16, 0);
     lv_obj_set_style_text_color(note, lv_color_make(180, 180, 180), 0);
     lv_obj_set_pos(note, 40, 360);

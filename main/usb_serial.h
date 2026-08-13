@@ -102,10 +102,28 @@ QueueHandle_t usb_get_key_queue(void);
 void usb_init(void);
 
 /**
- * @brief Start the VCP task (which in turn starts usb_lib_task).
+ * @brief Start or re-enable the VCP task (which in turn starts usb_lib_task).
+ *
+ * This function is idempotent. The host infrastructure is created only once;
+ * after a Port A → USB switch it only re-enables USB device enumeration.
  * Must be called after usb_init().
  */
-void usb_start_vcp_task(void);
+esp_err_t usb_start_vcp_task(void);
+
+/**
+ * @brief Disable USB serial enumeration and close any active CDC/VCP device.
+ *
+ * The USB host infrastructure remains installed so a later USB selection can
+ * resume without rebuilding the host stack.
+ */
+void usb_stop_vcp_task(void);
+
+/**
+ * @brief Wait until USB host and CDC/VCP drivers have been installed.
+ *
+ * This does not wait for a physical USB serial device to be attached.
+ */
+bool usb_wait_ready(uint32_t timeout_ms);
 
 /**
  * @brief Keyboard event callback (pass to s_keyboard.enableStringMode).

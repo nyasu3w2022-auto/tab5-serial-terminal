@@ -34,7 +34,8 @@
 
 #include "terminal.h"
 #include "display.h"
-#include "usb_serial.h"
+#include "usb_serial.h"          // shared RX ring buffer, logs, keyboard queue
+#include "serial_transport.h"    // active USB / Port A UART transport
 #include "settings.h"
 #include "settings_ui.h"
 
@@ -152,14 +153,14 @@ static bool handle_key_event(const key_event_msg_t *msg)
         // Ctrl+ESC → send ESC
         if (strcasecmp(msg->str, "escape") == 0 || strcasecmp(msg->str, "esc") == 0) {
             uint8_t esc = 0x1B;
-            usb_tx(&esc, 1);
+            serial_transport_tx(&esc, 1);
             return false;
         }
 
         // Other Ctrl+key: send as control character (e.g. Ctrl+D → 0x04)
         if (k >= '@' && k <= '_') {
             uint8_t ctrl_char = (uint8_t)(k - '@');
-            usb_tx(&ctrl_char, 1);
+            serial_transport_tx(&ctrl_char, 1);
         }
         return false;
     }
@@ -167,7 +168,7 @@ static bool handle_key_event(const key_event_msg_t *msg)
     // ---- Alt-only combinations: send ESC + key (standard terminal convention) ----
     if (alt) {
         uint8_t esc = 0x1B;
-        usb_tx(&esc, 1);
+        serial_transport_tx(&esc, 1);
         // Fall through to send the key itself
     }
 
@@ -175,15 +176,15 @@ static bool handle_key_event(const key_event_msg_t *msg)
     for (int i = 0; s_special_keys[i].name != NULL; i++) {
         if (strcasecmp(msg->str, s_special_keys[i].name) == 0) {
             const char *seq = s_special_keys[i].seq;
-            usb_tx((const uint8_t *)seq, strlen(seq));
+            serial_transport_tx((const uint8_t *)seq, strlen(seq));
             return false;
         }
     }
 
-    // Normal printable characters: send to USB (remote device echoes back)
+    // Normal printable characters: send through the active transport (remote echoes back)
     for (int i = 0; msg->str[i] != '\0'; i++) {
         uint8_t c = (uint8_t)msg->str[i];
-        usb_tx(&c, 1);
+        serial_transport_tx(&c, 1);
     }
     return false;
 }
@@ -245,38 +246,33 @@ extern "C" void app_main(void)
         "\033[2J\033[H"
         "\033[1;32mM5Stack TAB5 Serial Terminal\033[0m\r\n"
         "\033[32m============================\033[0m\r\n"
-        "Initializing USB host...\r\n";
+        "Initializing serial interface...\r\n";
     for (const char *p = welcome; *p; p++) vt100_process_byte((uint8_t)*p);
     term_refresh_display();
 
-    // ---- USB init (queues, ring buffer, semaphores) ----
+    // ---- Shared serial infrastructure (queues, RX ring buffer, logs) ----
     usb_init();
+    serial_transport_init();
+    // DSR/DA terminal responses use whichever transport is currently active.
+    vt100_set_tx_cb(serial_transport_tx);
 
-    // ---- Apply remaining settings (baud rate, log level) ----
-    // font_size is already applied above; settings_apply() calls
-    // ui_rebuild_for_font_size() only if needed, but since we already
-    // set the correct size, the rebuild is a no-op in terms of geometry.
-    // To avoid a redundant UI rebuild at startup, apply only baud/log here.
-    usb_set_baud_rate(s_settings.baud_rate);
-    {
-        static const esp_log_level_t lvl_map[] = {
-            ESP_LOG_NONE, ESP_LOG_ERROR, ESP_LOG_WARN,
-            ESP_LOG_INFO, ESP_LOG_DEBUG, ESP_LOG_VERBOSE,
-        };
-        int idx = (int)s_settings.log_level;
-        if (idx < 0) idx = 0;
-        if (idx > 5) idx = 5;
-        esp_log_level_set("*", lvl_map[idx]);
+    // ---- Apply serial interface, baud rate and log-level settings ----
+    settings_apply(&s_settings);
+
+    // USB needs host/CDC driver initialization before it can enumerate a device.
+    // Port A UART is ready immediately after its driver is configured.
+    if (!serial_transport_wait_ready(10000)) {
+        ESP_LOGW(TAG, "%s transport did not become ready within timeout",
+                 serial_transport_get_name());
+        const char *warn = "[Serial] Transport initialization timed out.\r\n";
+        for (const char *p = warn; *p; p++) vt100_process_byte((uint8_t)*p);
     }
+    ESP_LOGI(TAG, "%s transport initialized, starting main loop",
+             serial_transport_get_name());
 
-    // ---- Start VCP task (also starts usb_lib_task internally) ----
-    usb_start_vcp_task();
-
-    // Wait for USB host to be ready (vcp_task notifies us)
-    ulTaskNotifyTake(pdTRUE, pdMS_TO_TICKS(10000));
-    ESP_LOGI(TAG, "USB ready, starting main loop");
-
-    const char *ready_msg = "Connect a USB-serial device to the USB-A port.\r\n\r\n";
+    const char *ready_msg = (serial_transport_get_interface() == SERIAL_IF_PORTA)
+        ? "Port A UART ready (TX=GPIO53, RX=GPIO54).\r\n\r\n"
+        : "Connect a USB-serial device to the USB-A port.\r\n\r\n";
     for (const char *p = ready_msg; *p; p++) vt100_process_byte((uint8_t)*p);
     term_refresh_display();
 

@@ -6,7 +6,7 @@
 
 #include "display.h"
 #include "terminal.h"
-#include "usb_serial.h"
+#include "serial_transport.h"
 
 #include <inttypes.h>
 #include <esp_log.h>
@@ -165,9 +165,10 @@ void update_status_bar(void)
 {
     char buf[200];
     snprintf(buf, sizeof(buf),
-             " USB:%s  Baud:%"PRIu32"  ^C=Clear  ^Alt+S=Settings",
-             usb_is_connected() ? "Connected" : "Waiting...",
-             usb_get_baud_rate());
+             " %s:%s  Baud:%"PRIu32"  ^C=Clear  ^Alt+S=Settings",
+             serial_transport_get_name(),
+             serial_transport_get_status(),
+             serial_transport_get_baud_rate());
     term_update_status(buf);
 }
 

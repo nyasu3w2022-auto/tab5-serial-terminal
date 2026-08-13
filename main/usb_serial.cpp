@@ -44,8 +44,14 @@ static const char *TAG = "usb_serial";
 // USB State
 // ==============================================================
 static CdcAcmDevice *s_vcp_dev       = nullptr;
-static bool          s_usb_connected = false;
+static volatile bool s_usb_connected = false;
 static uint32_t      s_baud_rate     = 115200;
+
+// USB host infrastructure is retained after a USB → Port A switch, but
+// device enumeration/opening runs only while this transport is selected.
+static volatile bool s_usb_enabled = false;
+static volatile bool s_usb_infrastructure_ready = false;
+static bool          s_vcp_task_started = false;
 
 // ==============================================================
 // Queues / Semaphores / Event Groups
@@ -57,6 +63,7 @@ static RingbufHandle_t   s_usb_rx_ringbuf   = NULL;
 static QueueHandle_t     s_screen_log_queue = NULL;
 static QueueHandle_t     s_key_queue        = NULL;
 static SemaphoreHandle_t s_dev_present_sem  = NULL;
+static SemaphoreHandle_t s_usb_ready_sem    = NULL;
 
 // VID/PID of the most recently detected USB device (set by enum_filter_cb)
 static volatile uint16_t s_dev_vid = 0;
@@ -66,8 +73,7 @@ static volatile uint16_t s_dev_pid = 0;
 #define USB_DEV_DISCONNECTED_BIT  BIT0
 static EventGroupHandle_t s_usb_event_group = NULL;
 
-// Handle of the vcp_task, used by usb_lib_task to notify readiness
-static TaskHandle_t s_vcp_task_handle = NULL;
+// The VCP task waits for usb_lib_task's host-install notification internally.
 
 // ==============================================================
 // Public Accessors
@@ -300,22 +306,30 @@ static void vcp_task(void *arg)
     VCP::register_driver<CH34x>();
     ESP_LOGI(TAG, "VCP drivers registered");
 
-    // Notify main task that USB is ready
-    if (s_vcp_task_handle) {
-        xTaskNotifyGive(s_vcp_task_handle);
+    // Notify callers that the USB host and CDC/VCP drivers are ready.
+    s_usb_infrastructure_ready = true;
+    if (s_usb_ready_sem) {
+        xSemaphoreGive(s_usb_ready_sem);
     }
 
     // ---- Connection loop ----
     while (1) {
+        // Keep the installed USB host dormant while Port A is selected.
+        if (!s_usb_enabled) {
+            vTaskDelay(pdMS_TO_TICKS(100));
+            continue;
+        }
+
         screen_log("[USB] Waiting for device...\r\n");
         ESP_LOGI(TAG, "Waiting for USB device...");
 
         BaseType_t sem_taken = xSemaphoreTake(s_dev_present_sem, pdMS_TO_TICKS(3000));
-        if (sem_taken != pdTRUE) {
+        if (sem_taken != pdTRUE || !s_usb_enabled) {
             continue;
         }
 
         vTaskDelay(pdMS_TO_TICKS(200));
+        if (!s_usb_enabled) continue;
 
         // Drain extra semaphore counts
         while (xSemaphoreTake(s_dev_present_sem, 0) == pdTRUE) {}
@@ -379,8 +393,16 @@ static void vcp_task(void *arg)
         }
 
         if (dev == nullptr) {
-            screen_log("[USB] Open failed, retrying...\r\n");
-            vTaskDelay(pdMS_TO_TICKS(500));
+            if (s_usb_enabled) {
+                screen_log("[USB] Open failed, retrying...\r\n");
+                vTaskDelay(pdMS_TO_TICKS(500));
+            }
+            continue;
+        }
+
+        // Selection may have changed while the CDC/VCP open call was running.
+        if (!s_usb_enabled) {
+            delete dev;
             continue;
         }
 
@@ -419,17 +441,25 @@ static void vcp_task(void *arg)
             }
         }
 
-        xEventGroupWaitBits(s_usb_event_group,
-                            USB_DEV_DISCONNECTED_BIT,
-                            pdTRUE, pdFALSE, portMAX_DELAY);
+        // Wake on disconnect or on a USB → Port A transport switch.
+        while (s_usb_enabled) {
+            EventBits_t bits = xEventGroupWaitBits(s_usb_event_group,
+                                                    USB_DEV_DISCONNECTED_BIT,
+                                                    pdTRUE, pdFALSE,
+                                                    pdMS_TO_TICKS(250));
+            if (bits & USB_DEV_DISCONNECTED_BIT) break;
+        }
 
         s_vcp_dev       = nullptr;
         s_usb_connected = false;
         delete dev;
-        screen_log("[USB] Disconnected.\r\n");
-        ESP_LOGI(TAG, "USB device closed");
-
-        vTaskDelay(pdMS_TO_TICKS(500));
+        if (s_usb_enabled) {
+            screen_log("[USB] Disconnected.\r\n");
+            ESP_LOGI(TAG, "USB device closed");
+            vTaskDelay(pdMS_TO_TICKS(500));
+        } else {
+            ESP_LOGI(TAG, "USB device closed after transport switch");
+        }
     }
 }
 
@@ -442,18 +472,59 @@ void usb_init(void)
     s_key_queue        = xQueueCreate(32, sizeof(key_event_msg_t));
     s_usb_rx_ringbuf   = xRingbufferCreate(USB_RX_RINGBUF_SIZE, RINGBUF_TYPE_BYTEBUF);
     if (s_usb_rx_ringbuf == NULL) {
-        ESP_LOGE(TAG, "Failed to create USB RX ring buffer (OOM?), rebooting");
+        ESP_LOGE(TAG, "Failed to create shared RX ring buffer (OOM?), rebooting");
         vTaskDelay(pdMS_TO_TICKS(2000));
         esp_restart();
     }
     s_screen_log_queue = xQueueCreate(32, sizeof(screen_log_msg_t));
     s_usb_event_group  = xEventGroupCreate();
     s_dev_present_sem  = xSemaphoreCreateCounting(8, 0);
+    s_usb_ready_sem    = xSemaphoreCreateBinary();
 }
 
-void usb_start_vcp_task(void)
+esp_err_t usb_start_vcp_task(void)
 {
-    // vcp_task will notify s_vcp_task_handle when USB is ready
-    s_vcp_task_handle = xTaskGetCurrentTaskHandle();
-    xTaskCreate(vcp_task, "vcp_task", 8192, NULL, USB_VCP_PRIORITY, NULL);
+    s_usb_enabled = true;
+
+    if (s_vcp_task_started) {
+        // If a USB serial device remained plugged in while Port A was selected,
+        // there may be no new attach event when USB is re-enabled. Kick the
+        // connection loop once so it retries an open against any present device.
+        if (s_dev_present_sem) {
+            xSemaphoreGive(s_dev_present_sem);
+        }
+        ESP_LOGI(TAG, "USB transport re-enabled");
+        return ESP_OK;
+    }
+
+    s_vcp_task_started = true;
+    BaseType_t ok = xTaskCreate(vcp_task, "vcp_task", 8192, NULL,
+                                USB_VCP_PRIORITY, NULL);
+    if (ok != pdPASS) {
+        s_vcp_task_started = false;
+        s_usb_enabled = false;
+        ESP_LOGE(TAG, "Failed to create VCP task");
+        return ESP_ERR_NO_MEM;
+    }
+    return ESP_OK;
+}
+
+void usb_stop_vcp_task(void)
+{
+    if (!s_vcp_task_started) return;
+
+    s_usb_enabled = false;
+    // Wake any wait for a device disconnect so the current device is closed.
+    if (s_usb_event_group) {
+        xEventGroupSetBits(s_usb_event_group, USB_DEV_DISCONNECTED_BIT);
+    }
+    ESP_LOGI(TAG, "USB transport disabled");
+}
+
+bool usb_wait_ready(uint32_t timeout_ms)
+{
+    if (s_usb_infrastructure_ready) return true;
+    if (s_usb_ready_sem == NULL) return false;
+
+    return xSemaphoreTake(s_usb_ready_sem, pdMS_TO_TICKS(timeout_ms)) == pdTRUE;
 }
