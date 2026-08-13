@@ -57,6 +57,18 @@ static void on_settings_saved(const app_settings_t *saved)
     }
 }
 
+// vt100_tx_cb_t intentionally has a void return type. The transport layer
+// returns esp_err_t to let direct keyboard sends observe failures, whereas
+// VT100 control responses (DSR/DA) have no caller to receive that status.
+static void vt100_transport_tx_cb(const uint8_t *data, size_t len)
+{
+    esp_err_t err = serial_transport_tx(data, len);
+    if (err != ESP_OK) {
+        ESP_LOGD(TAG, "VT100 response TX via %s failed: %s",
+                 serial_transport_get_name(), esp_err_to_name(err));
+    }
+}
+
 // ==============================================================
 // Keyboard Input Dispatch
 // ==============================================================
@@ -254,7 +266,7 @@ extern "C" void app_main(void)
     usb_init();
     serial_transport_init();
     // DSR/DA terminal responses use whichever transport is currently active.
-    vt100_set_tx_cb(serial_transport_tx);
+    vt100_set_tx_cb(vt100_transport_tx_cb);
 
     // ---- Apply serial interface, baud rate and log-level settings ----
     settings_apply(&s_settings);
