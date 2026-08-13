@@ -78,9 +78,20 @@ esp_err_t porta_uart_start(uint32_t baud, RingbufHandle_t shared_rx_ringbuf)
     cfg.flow_ctrl = UART_HW_FLOWCTRL_DISABLE;
     cfg.rx_flow_ctrl_thresh = 0;
 
-    esp_err_t err = uart_param_config(PORTA_UART_NUM, &cfg);
+    // ESP-IDF recommends installing the driver before applying parameters
+    // and GPIO routing. Clean up the installed driver on later failures.
+    esp_err_t err = uart_driver_install(PORTA_UART_NUM,
+                                        PORTA_UART_RX_BUF_SIZE, PORTA_UART_TX_BUF_SIZE,
+                                        0, NULL, 0);
+    if (err != ESP_OK) {
+        ESP_LOGE(TAG, "uart_driver_install failed: %s", esp_err_to_name(err));
+        return err;
+    }
+
+    err = uart_param_config(PORTA_UART_NUM, &cfg);
     if (err != ESP_OK) {
         ESP_LOGE(TAG, "uart_param_config failed: %s", esp_err_to_name(err));
+        uart_driver_delete(PORTA_UART_NUM);
         return err;
     }
 
@@ -89,14 +100,7 @@ esp_err_t porta_uart_start(uint32_t baud, RingbufHandle_t shared_rx_ringbuf)
                        UART_PIN_NO_CHANGE, UART_PIN_NO_CHANGE);
     if (err != ESP_OK) {
         ESP_LOGE(TAG, "uart_set_pin failed: %s", esp_err_to_name(err));
-        return err;
-    }
-
-    err = uart_driver_install(PORTA_UART_NUM,
-                              PORTA_UART_RX_BUF_SIZE, PORTA_UART_TX_BUF_SIZE,
-                              0, NULL, 0);
-    if (err != ESP_OK) {
-        ESP_LOGE(TAG, "uart_driver_install failed: %s", esp_err_to_name(err));
+        uart_driver_delete(PORTA_UART_NUM);
         return err;
     }
 
