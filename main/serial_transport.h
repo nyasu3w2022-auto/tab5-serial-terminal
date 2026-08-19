@@ -4,7 +4,8 @@
  *
  * This module selects exactly one terminal transport at a time:
  *   - USB Host CDC-ACM / VCP
- *   - M5Stack Tab5 Port A TTL UART (GPIO53 TX, GPIO54 RX)
+ *   - M5Stack Tab5 Port A TTL UART (GPIO53 TX, GPIO54 RX; UART1)
+ *   - M5Stack Tab5 M-Bus TTL UART (GPIO6 TX, GPIO7 RX; UART2)
  *
  * Both transports feed received bytes into the existing shared RX ring buffer
  * and expose the same TX/baud/status API to the terminal application.
@@ -27,7 +28,8 @@ void serial_transport_init(void);
  *
  * If another interface is active, it is stopped before the requested
  * interface is started. USB selection starts the USB host lazily; Port A
- * selection configures UART1 for GPIO53 (TX) and GPIO54 (RX).
+ * selection configures UART1 for GPIO53 (TX) and GPIO54 (RX); M-Bus
+ * selection configures UART2 for GPIO6 (TX) and GPIO7 (RX).
  */
 esp_err_t serial_transport_select(serial_if_t iface, uint32_t baud);
 
@@ -46,13 +48,13 @@ serial_if_t serial_transport_get_interface(void);
 /**
  * @brief Return true when the selected transport is usable.
  *
- * For USB this means a serial device is connected. For Port A it means the
- * UART driver is configured and ready; physical cable presence is not
- * detectable by a plain TTL UART.
+ * For USB this means a serial device is connected. For Port A and M-Bus it
+ * means the selected UART driver is configured and ready; physical cable
+ * presence is not detectable by a plain TTL UART.
  */
 bool serial_transport_is_ready(void);
 
-/** Human-readable interface label: "USB" or "PortA". */
+/** Human-readable interface label: "USB", "PortA", or "MBUS". */
 const char *serial_transport_get_name(void);
 
 /** Human-readable status label for the status bar. */

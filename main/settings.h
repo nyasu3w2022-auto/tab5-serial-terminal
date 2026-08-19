@@ -20,6 +20,7 @@
 typedef enum {
     SERIAL_IF_USB = 0,  /**< USB-A CDC-ACM / VCP serial device */
     SERIAL_IF_PORTA,    /**< Port A TTL UART: GPIO53 TX, GPIO54 RX */
+    SERIAL_IF_MBUS,     /**< M-Bus TTL UART: GPIO6 TX, GPIO7 RX (UART2) */
 } serial_if_t;
 
 /** ESP-IDF log level selection. */
@@ -48,7 +49,7 @@ typedef enum {
 
 typedef struct {
     uint32_t        baud_rate;   /**< Serial baud rate (default: 115200)    */
-    serial_if_t     serial_if;   /**< Interface: USB or PortA               */
+    serial_if_t     serial_if;   /**< Interface: USB, PortA, or M-Bus UART  */
     app_log_level_t log_level;   /**< ESP-IDF log level                     */
     app_font_size_t font_size;   /**< Terminal font size (Small or Large)   */
 } app_settings_t;

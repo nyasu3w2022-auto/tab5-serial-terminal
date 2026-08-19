@@ -1,5 +1,5 @@
 /*
- * serial_transport.cpp — Active USB / Port A UART transport selection.
+ * serial_transport.cpp — Active USB / Port A / M-Bus UART transport selection.
  *
  * SPDX-License-Identifier: MIT
  */
@@ -7,6 +7,7 @@
 #include "serial_transport.h"
 #include "usb_serial.h"
 #include "porta_uart.h"
+#include "mbus_uart.h"
 #include "terminal.h"
 
 #include <stdio.h>
@@ -28,7 +29,18 @@ void serial_transport_init(void)
 
 static bool valid_interface(serial_if_t iface)
 {
-    return iface == SERIAL_IF_USB || iface == SERIAL_IF_PORTA;
+    return iface == SERIAL_IF_USB || iface == SERIAL_IF_PORTA ||
+           iface == SERIAL_IF_MBUS;
+}
+
+static const char *interface_name(serial_if_t iface)
+{
+    switch (iface) {
+    case SERIAL_IF_PORTA: return "PortA";
+    case SERIAL_IF_MBUS:  return "MBUS";
+    case SERIAL_IF_USB:
+    default:              return "USB";
+    }
 }
 
 esp_err_t serial_transport_select(serial_if_t iface, uint32_t baud)
@@ -49,17 +61,23 @@ esp_err_t serial_transport_select(serial_if_t iface, uint32_t baud)
     }
 
     esp_err_t err = ESP_OK;
-    if (iface == SERIAL_IF_PORTA) {
+    switch (iface) {
+    case SERIAL_IF_PORTA:
         err = porta_uart_start(baud, usb_get_rx_ringbuf());
-    } else {
+        break;
+    case SERIAL_IF_MBUS:
+        err = mbus_uart_start(baud, usb_get_rx_ringbuf());
+        break;
+    case SERIAL_IF_USB:
+    default:
         usb_set_baud_rate(baud);
         err = usb_start_vcp_task();
+        break;
     }
 
     if (err != ESP_OK) {
-        ESP_LOGE(TAG, "Failed to start %s: %s",
-                 iface == SERIAL_IF_PORTA ? "PortA UART" : "USB",
-                 esp_err_to_name(err));
+        ESP_LOGE(TAG, "Failed to start %s transport: %s",
+                 interface_name(iface), esp_err_to_name(err));
         return err;
     }
 
@@ -74,38 +92,57 @@ void serial_transport_stop(void)
 {
     if (!s_started) return;
 
-    if (s_active_if == SERIAL_IF_PORTA) {
+    switch (s_active_if) {
+    case SERIAL_IF_PORTA:
         porta_uart_stop();
-    } else {
+        break;
+    case SERIAL_IF_MBUS:
+        mbus_uart_stop();
+        break;
+    case SERIAL_IF_USB:
+    default:
         // usb_start_vcp_task() owns the host task for the process lifetime.
         // Disabling only closes/pauses the USB serial connection loop.
         usb_stop_vcp_task();
+        break;
     }
     s_started = false;
 }
 
 void serial_transport_set_baud_rate(uint32_t baud)
 {
-    if (s_active_if == SERIAL_IF_PORTA) {
+    switch (s_active_if) {
+    case SERIAL_IF_PORTA:
         porta_uart_set_baud_rate(baud);
-    } else {
+        break;
+    case SERIAL_IF_MBUS:
+        mbus_uart_set_baud_rate(baud);
+        break;
+    case SERIAL_IF_USB:
+    default:
         usb_set_baud_rate(baud);
+        break;
     }
 }
 
 uint32_t serial_transport_get_baud_rate(void)
 {
-    return s_active_if == SERIAL_IF_PORTA
-           ? porta_uart_get_baud_rate()
-           : usb_get_baud_rate();
+    switch (s_active_if) {
+    case SERIAL_IF_PORTA: return porta_uart_get_baud_rate();
+    case SERIAL_IF_MBUS:  return mbus_uart_get_baud_rate();
+    case SERIAL_IF_USB:
+    default:              return usb_get_baud_rate();
+    }
 }
 
 esp_err_t serial_transport_tx(const uint8_t *data, size_t len)
 {
-    if (s_active_if == SERIAL_IF_PORTA) {
-        return porta_uart_tx(data, len);
+    switch (s_active_if) {
+    case SERIAL_IF_PORTA: return porta_uart_tx(data, len);
+    case SERIAL_IF_MBUS:  return mbus_uart_tx(data, len);
+    case SERIAL_IF_USB:
+    default:              return usb_tx(data, len);
     }
-    return usb_tx(data, len);
 }
 
 serial_if_t serial_transport_get_interface(void)
@@ -115,30 +152,40 @@ serial_if_t serial_transport_get_interface(void)
 
 bool serial_transport_is_ready(void)
 {
-    return s_active_if == SERIAL_IF_PORTA
-           ? porta_uart_is_ready()
-           : usb_is_connected();
+    switch (s_active_if) {
+    case SERIAL_IF_PORTA: return porta_uart_is_ready();
+    case SERIAL_IF_MBUS:  return mbus_uart_is_ready();
+    case SERIAL_IF_USB:
+    default:              return usb_is_connected();
+    }
 }
 
 const char *serial_transport_get_name(void)
 {
-    return s_active_if == SERIAL_IF_PORTA ? "PortA" : "USB";
+    return interface_name(s_active_if);
 }
 
 const char *serial_transport_get_status(void)
 {
-    if (s_active_if == SERIAL_IF_PORTA) {
+    switch (s_active_if) {
+    case SERIAL_IF_PORTA:
         return porta_uart_is_ready() ? "Ready" : "Error";
+    case SERIAL_IF_MBUS:
+        return mbus_uart_is_ready() ? "Ready" : "Error";
+    case SERIAL_IF_USB:
+    default:
+        return usb_is_connected() ? "Connected" : "Waiting...";
     }
-    return usb_is_connected() ? "Connected" : "Waiting...";
 }
 
 bool serial_transport_wait_ready(uint32_t timeout_ms)
 {
-    if (s_active_if == SERIAL_IF_PORTA) {
-        return porta_uart_is_ready();
+    switch (s_active_if) {
+    case SERIAL_IF_PORTA: return porta_uart_is_ready();
+    case SERIAL_IF_MBUS:  return mbus_uart_is_ready();
+    case SERIAL_IF_USB:
+    default:              return usb_wait_ready(timeout_ms);
     }
-    return usb_wait_ready(timeout_ms);
 }
 
 void serial_transport_send_window_size(void)

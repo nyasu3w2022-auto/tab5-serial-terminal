@@ -1,6 +1,6 @@
 # M5Stack TAB5 Serial Terminal
 
-M5Stack TAB5 (ESP32-P4) 向けの VT100 互換スタンドアロンシリアルターミナルです。USB ホスト機能を利用して USB シリアルデバイスと双方向通信を行います。
+M5Stack TAB5 (ESP32-P4) 向けの VT100 互換スタンドアロンシリアルターミナルです。USBホスト、Port A TTL UART、MBUS TTL UARTを選択して、シリアル機器と双方向通信を行えます。
 
 ## 特徴
 
@@ -10,8 +10,8 @@ M5Stack TAB5 (ESP32-P4) 向けの VT100 互換スタンドアロンシリアル�
 - **フォントサイズ切り替え** — 設定画面から「Small (16px, 160×43)」と「Large (28px, 91×25)」を切り替え可能
 - **pending wrap（遅延折り返し）** — VT100 仕様に準拠した行末処理。余分なスクロールを防止
 - **DSR / DA 応答** — `ESC[6n`（カーソル位置報告要求）および `ESC[c`（デバイス属性要求）に応答。bash/readline がブロックしない
-- **USB RX 16 KB リングバッファ** — 大量出力時のデータ取りこぼしを防止
-- **GUI 設定画面** — `Ctrl+Alt+S` で設定画面を開き、ボーレート、接続インターフェース（USB / Port A UART）、ログレベル、フォントサイズを変更可能（NVSに自動保存）
+- **共有 RX 16 KB リングバッファ** — USB・Port A・MBUS UARTの大量出力時にデータ取りこぼしを防止
+- **GUI 設定画面** — `Ctrl+Alt+S` で設定画面を開き、ボーレート、接続インターフェース（USB / Port A UART / MBUS UART2）、ログレベル、フォントサイズを変更可能（NVSに自動保存）
 - **差分描画** — 変更行のみ再描画する行単位ダーティフラグで高速表示
 
 ## ハードウェア構成
@@ -22,6 +22,7 @@ M5Stack TAB5 (ESP32-P4) 向けの VT100 互換スタンドアロンシリアル�
 | ディスプレイ | 5インチ IPS TFT 1280×720 (MIPI-DSI) |
 | キーボード | TAB5 Keyboard (I2C 0x6D, SDA=GPIO0, SCL=GPIO1, INT=GPIO50) |
 | USB ホスト | USB Type-A ポート (USB 2.0 High-Speed) |
+| TTL UART | Port A（GPIO53/54, UART1）またはMBUS（GPIO6/7, UART2）を設定画面から選択 |
 
 ## ターミナル仕様
 
@@ -43,7 +44,7 @@ M5Stack TAB5 (ESP32-P4) 向けの VT100 互換スタンドアロンシリアル�
 | Ctrl+L | 画面強制再描画 |
 | Ctrl+Alt+S | 設定画面を開く / 閉じる |
 
-### リモートへの送信（USB 経由でそのまま転送）
+### リモートへの送信（選択中の接続方式へそのまま転送）
 
 | キー | 送信シーケンス |
 |:---|:---|
@@ -174,6 +175,20 @@ Port A（HY2.0-4P）をTTL UARTとして使用できます。配線は次のと�
 
 設定画面を `Ctrl+Alt+S` で開き、**Interface** から **PortA UART (GPIO53/54)** を選択して Save & Close を押すと切り替わります。UARTは物理的なケーブル接続を検出できないため、ステータスバーでは `PortA:Ready` と表示されます。これはドライバが送受信可能な状態を示し、接続先機器の存在を保証するものではありません。
 
+## MBUS UART2 接続
+
+背面の30ピンMBUSでは、UART2をGPIO6/GPIO7へ割り当ててTTL UARTとして使用できます。Port A（UART1）とは異なるUARTコントローラを使用するため、ピン・ドライバ上の競合を避けています。[1] [2]
+
+| MBUSピン | Tab5側 | UART信号 | 接続先 |
+|:---:|:---|:---|:---|
+| 16 | GPIO6 (`PC_TX`) | TX | 接続先RX |
+| 15 | GPIO7 (`PC_RX`) | RX | 接続先TX |
+| GND | GND | GND | 接続先GND |
+
+> **注意:** MBUS UART2も**3.3V TTL UART**です。RS-232を直接接続してはいけません。また、MBUS対応モジュールを装着する場合は、ピン15/16を別用途で使用していないことを確認してください。
+
+設定画面を `Ctrl+Alt+S` で開き、**Interface** から **MBUS UART2 (GPIO6/7)** を選択して Save & Close を押します。ドライバが初期化されるとステータスバーに `MBUS:Ready` と表示されます。TTL UARTでは物理的なケーブル接続を検出できません。
+
 ## Raspberry Pi との接続
 
 Raspberry Pi を USB シリアルガジェット（`g_serial`）として使用する場合、以下の設定が必要です。
@@ -215,23 +230,27 @@ stty rows 43 cols 160
 ```
 main_task (メインループ)
   ├── screen_log_queue  ← 内部メッセージ表示
-  ├── usb_rx_ringbuf    ← USB RX データ（16 KB リングバッファ）
+  ├── shared_rx_ringbuf ← USB / Port A / MBUS RXデータ（16 KBリングバッファ）
   │     └── vt100_process_byte() → term_buffer → term_refresh_display()
   └── key_queue         ← キーボード入力
-        └── USB TX (s_vcp_dev->tx_blocking)
+        └── 選択中のUSB / Port A / MBUS UARTへTX
 
 vcp_task
   ├── usb_lib_task      ← USB ホストライブラリ常駐タスク
   └── cdc_acm_host      ← CDC-ACM ドライバ
-        └── usb_rx_cb() → usb_rx_ringbuf への書き込み
+        └── usb_rx_cb() → shared_rx_ringbufへの書き込み
 
-keyboard_event_cb() → key_queue への書き込み
+porta_uart_rx_task / mbus_uart_rx_task
+  └── uart_read_bytes() → shared_rx_ringbufへの書き込み
+
+keyboard_event_cb() → key_queueへの書き込み
 ```
 
 ## 既知の制限・今後の予定
 
 - **スクロールバック** — 画面外にスクロールしたデータは参照不可
 - **Port A共有制約** — Port AをUARTとして使う間は、同じGPIO53/54を使うI2C拡張機器を併用不可
+- **MBUS共有制約** — MBUS UART2を使う間は、MBUSピン15/16（GPIO7/GPIO6）を使用する拡張モジュールを併用不可
 - **起動時のまれなハング** — USB ホスト初期化中に稀に停止することがある（調査中）
 
 ## ライセンス
@@ -256,4 +275,4 @@ npm install -g lv_font_conv
 ## References
 
 [1]: https://docs.m5stack.com/en/core/Tab5 "M5Stack Tab5 — 公式ハードウェア資料"
-[2]: https://docs.espressif.com/projects/esp-idf/en/v5.5.4/esp32/api-reference/peripherals/uart.html "ESP-IDF UART Driver"
+[2]: https://docs.espressif.com/projects/esp-idf/en/v5.5.4/esp32p4/api-reference/peripherals/uart.html "ESP-IDF v5.5.4 ESP32-P4 UART Driver"

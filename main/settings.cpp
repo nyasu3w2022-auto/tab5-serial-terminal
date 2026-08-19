@@ -51,7 +51,10 @@ void settings_load(app_settings_t *out)
     }
     uint8_t v8 = 0;
     if (nvs_get_u8(h, KEY_IFACE, &v8) == ESP_OK) {
-        out->serial_if = (serial_if_t)v8;
+        // Preserve old USB/Port A settings and accept the new MBUS value.
+        // Invalid persisted values are safely reset to the USB default.
+        out->serial_if = (v8 <= (uint8_t)SERIAL_IF_MBUS)
+                         ? (serial_if_t)v8 : SETTINGS_DEFAULT_SERIAL_IF;
     }
     if (nvs_get_u8(h, KEY_LOG, &v8) == ESP_OK) {
         out->log_level = (app_log_level_t)v8;
@@ -106,8 +109,7 @@ void settings_apply(const app_settings_t *s)
     esp_err_t transport_err = serial_transport_select(s->serial_if, s->baud_rate);
     if (transport_err != ESP_OK) {
         ESP_LOGE(TAG, "Failed to select %s transport: %s",
-                 s->serial_if == SERIAL_IF_PORTA ? "PortA" : "USB",
-                 esp_err_to_name(transport_err));
+                 serial_transport_get_name(), esp_err_to_name(transport_err));
     }
 
     // Apply log level to ESP-IDF logging system

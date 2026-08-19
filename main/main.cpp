@@ -35,7 +35,7 @@
 #include "terminal.h"
 #include "display.h"
 #include "usb_serial.h"          // shared RX ring buffer, logs, keyboard queue
-#include "serial_transport.h"    // active USB / Port A UART transport
+#include "serial_transport.h"    // active USB / Port A / MBUS UART transport
 #include "settings.h"
 #include "settings_ui.h"
 
@@ -282,9 +282,19 @@ extern "C" void app_main(void)
     ESP_LOGI(TAG, "%s transport initialized, starting main loop",
              serial_transport_get_name());
 
-    const char *ready_msg = (serial_transport_get_interface() == SERIAL_IF_PORTA)
-        ? "Port A UART ready (TX=GPIO53, RX=GPIO54).\r\n\r\n"
-        : "Connect a USB-serial device to the USB-A port.\r\n\r\n";
+    const char *ready_msg = NULL;
+    switch (serial_transport_get_interface()) {
+    case SERIAL_IF_PORTA:
+        ready_msg = "Port A UART ready (TX=GPIO53, RX=GPIO54).\r\n\r\n";
+        break;
+    case SERIAL_IF_MBUS:
+        ready_msg = "MBUS UART2 ready (TX=GPIO6, RX=GPIO7; pins 16/15).\r\n\r\n";
+        break;
+    case SERIAL_IF_USB:
+    default:
+        ready_msg = "Connect a USB-serial device to the USB-A port.\r\n\r\n";
+        break;
+    }
     for (const char *p = ready_msg; *p; p++) vt100_process_byte((uint8_t)*p);
     term_refresh_display();
 
