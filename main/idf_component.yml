@@ -2,8 +2,10 @@
 dependencies:
   idf:
     version: '>=5.3.0'
-  m5_tab5_component:
-    path: ../components/m5_tab5_component
+  # m5_tab5_component is discovered automatically from the project's
+  # top-level components/ directory. Do not add a local `path:` dependency
+  # here: Windows and nested component-manifest resolution can interpret it
+  # relative to the wrong directory.
   espressif/esp_lvgl_port: ^2.7.0
   # USB Host CDC-ACM driver + VCP service + VCP drivers for common USB-serial chips
   espressif/usb_host_cdc_acm: "^2.3"
