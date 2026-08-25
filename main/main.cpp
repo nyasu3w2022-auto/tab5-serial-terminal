@@ -110,6 +110,36 @@ static const struct {
 };
 
 /**
+ * @brief Render a locally echoed special key after successful transmission.
+ *
+ * Home, End, Up, Down, Page and function keys intentionally have no local
+ * rendering: their intended effect depends on the remote application's
+ * current line or screen state. Left/Right and editing keys are safe to
+ * reflect in the local terminal buffer.
+ */
+static bool local_echo_special_key(const char *name)
+{
+    if (s_settings.local_echo != LOCAL_ECHO_ON) return false;
+
+    if (strcasecmp(name, "enter") == 0) {
+        term_local_echo_enter();
+    } else if (strcasecmp(name, "tab") == 0) {
+        term_local_echo_tab();
+    } else if (strcasecmp(name, "backspace") == 0) {
+        term_local_echo_backspace();
+    } else if (strcasecmp(name, "delete") == 0 || strcasecmp(name, "del") == 0) {
+        term_local_echo_delete();
+    } else if (strcasecmp(name, "left") == 0) {
+        term_local_echo_cursor_left();
+    } else if (strcasecmp(name, "right") == 0) {
+        term_local_echo_cursor_right();
+    } else {
+        return false;
+    }
+    return true;
+}
+
+/**
  * @brief Handle one keyboard event from the key queue.
  *
  * modifier bits (str_modifier from TAB5 keyboard):
@@ -188,15 +218,20 @@ static bool handle_key_event(const key_event_msg_t *msg)
     for (int i = 0; s_special_keys[i].name != NULL; i++) {
         if (strcasecmp(msg->str, s_special_keys[i].name) == 0) {
             const char *seq = s_special_keys[i].seq;
-            serial_transport_tx((const uint8_t *)seq, strlen(seq));
-            return false;
+            esp_err_t err = serial_transport_tx((const uint8_t *)seq, strlen(seq));
+            return (err == ESP_OK) && !alt && local_echo_special_key(msg->str);
         }
     }
 
-    // Normal printable characters: send through the active transport (remote echoes back)
-    for (int i = 0; msg->str[i] != '\0'; i++) {
-        uint8_t c = (uint8_t)msg->str[i];
-        serial_transport_tx(&c, 1);
+    // Normal printable characters are always sent to the selected transport.
+    // With Local Echo enabled, they are additionally rendered here only after
+    // successful TX; no configuration sequence is sent to the serial peer.
+    size_t text_len = strlen(msg->str);
+    if (text_len == 0) return false;
+    esp_err_t err = serial_transport_tx((const uint8_t *)msg->str, text_len);
+    if (err == ESP_OK && !alt && s_settings.local_echo == LOCAL_ECHO_ON) {
+        term_local_echo_text((const uint8_t *)msg->str, text_len);
+        return true;
     }
     return false;
 }

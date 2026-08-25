@@ -534,6 +534,128 @@ static bool is_wide_codepoint(uint32_t cp)
 }
 
 // ==============================================================
+// Local keyboard echo
+// ==============================================================
+
+// Local echo must not share the RX parser's UTF-8 state: a keyboard event
+// may occur between bytes of a remote escape or UTF-8 sequence.
+static int      s_local_utf8_bytes_left = 0;
+static uint32_t s_local_utf8_codepoint  = 0;
+
+void term_local_echo_text(const uint8_t *data, size_t len)
+{
+    if (data == NULL) return;
+
+    for (size_t i = 0; i < len; i++) {
+        uint8_t byte = data[i];
+        if (s_local_utf8_bytes_left > 0) {
+            if ((byte & 0xC0) == 0x80) {
+                s_local_utf8_codepoint = (s_local_utf8_codepoint << 6) | (byte & 0x3F);
+                s_local_utf8_bytes_left--;
+                if (s_local_utf8_bytes_left == 0) {
+                    term_put_codepoint(s_local_utf8_codepoint,
+                                       is_wide_codepoint(s_local_utf8_codepoint));
+                }
+                continue;
+            }
+            s_local_utf8_bytes_left = 0;
+            s_local_utf8_codepoint = 0;
+        }
+
+        if (byte >= 0x20 && byte < 0x7F) {
+            term_put_codepoint((uint32_t)byte, false);
+        } else if ((byte & 0xE0) == 0xC0) {
+            s_local_utf8_codepoint = byte & 0x1F;
+            s_local_utf8_bytes_left = 1;
+        } else if ((byte & 0xF0) == 0xE0) {
+            s_local_utf8_codepoint = byte & 0x0F;
+            s_local_utf8_bytes_left = 2;
+        } else if ((byte & 0xF8) == 0xF0) {
+            s_local_utf8_codepoint = byte & 0x07;
+            s_local_utf8_bytes_left = 3;
+        }
+    }
+}
+
+void term_local_echo_enter(void)
+{
+    // Local echo uses CR+LF semantics, matching the terminal input path.
+    pending_wrap = false;
+    cursor_col = 0;
+    if (cursor_row == scroll_bot) {
+        term_scroll_up(1);
+    } else if (cursor_row < TERM_ROWS - 1) {
+        cursor_row++;
+    }
+    term_mark_dirty(cursor_row);
+}
+
+void term_local_echo_tab(void)
+{
+    int next_tab = (cursor_col + 8) & ~7;
+    if (next_tab >= TERM_COLS) next_tab = TERM_COLS - 1;
+    while (cursor_col < next_tab) {
+        term_put_codepoint(0x20, false);
+        if (pending_wrap) break;
+    }
+}
+
+void term_local_echo_backspace(void)
+{
+    if (cursor_row < 0 || cursor_row >= TERM_ROWS || cursor_col <= 0) return;
+
+    // At the right edge deferred wrapping leaves the cursor on the last cell,
+    // which is itself the character that must be erased. Then delete at the
+    // new cursor so text to its right shifts left, like a line editor.
+    int col = pending_wrap ? cursor_col : cursor_col - 1;
+    pending_wrap = false;
+    if (term_buffer[cursor_row][col].wide == 2 && col > 0) col--;
+    cursor_col = col;
+    term_local_echo_delete();
+}
+
+void term_local_echo_delete(void)
+{
+    if (cursor_row < 0 || cursor_row >= TERM_ROWS || cursor_col < 0 ||
+        cursor_col >= TERM_COLS) return;
+
+    int col = cursor_col;
+    if (term_buffer[cursor_row][col].wide == 2 && col > 0) col--;
+    int count = (term_buffer[cursor_row][col].wide == 1 && col + 1 < TERM_COLS) ? 2 : 1;
+
+    for (int c = col; c < TERM_COLS - count; c++) {
+        term_buffer[cursor_row][c] = term_buffer[cursor_row][c + count];
+    }
+    for (int c = TERM_COLS - count; c < TERM_COLS; c++) {
+        term_cell_clear(&term_buffer[cursor_row][c]);
+    }
+    cursor_col = col;
+    pending_wrap = false;
+    term_mark_dirty(cursor_row);
+}
+
+void term_local_echo_cursor_left(void)
+{
+    if (cursor_col <= 0) return;
+    pending_wrap = false;
+    cursor_col--;
+    if (term_buffer[cursor_row][cursor_col].wide == 2 && cursor_col > 0) {
+        cursor_col--;
+    }
+    term_mark_dirty(cursor_row);
+}
+
+void term_local_echo_cursor_right(void)
+{
+    if (cursor_col >= TERM_COLS - 1) return;
+    int step = (term_buffer[cursor_row][cursor_col].wide == 1) ? 2 : 1;
+    cursor_col += step;
+    if (cursor_col >= TERM_COLS) cursor_col = TERM_COLS - 1;
+    pending_wrap = false;
+    term_mark_dirty(cursor_row);
+}
+
+// ==============================================================
 // VT100 TX callback registration
 // ==============================================================
 

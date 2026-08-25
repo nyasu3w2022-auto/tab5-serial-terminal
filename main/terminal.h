@@ -17,6 +17,7 @@
 
 #include <stdint.h>
 #include <stdbool.h>
+#include <stddef.h>
 #include "lvgl.h"
 
 // ==============================================================
@@ -101,6 +102,21 @@ void term_mark_all_dirty(void);
  * @param font_h  Cell height in pixels            (e.g. 16 or 28)
  */
 void term_set_font_size(int font_w, int font_h);
+
+/**
+ * @brief Render locally transmitted keyboard input without feeding the RX
+ *        VT100 parser or transmitting any extra data to the serial peer.
+ *
+ * These APIs keep a separate UTF-8 decode state, so local echo cannot corrupt
+ * an incomplete escape sequence currently being received from the peer.
+ */
+void term_local_echo_text(const uint8_t *data, size_t len);
+void term_local_echo_enter(void);
+void term_local_echo_tab(void);
+void term_local_echo_backspace(void);
+void term_local_echo_delete(void);
+void term_local_echo_cursor_left(void);
+void term_local_echo_cursor_right(void);
 
 // ==============================================================
 // VT100 Parser API

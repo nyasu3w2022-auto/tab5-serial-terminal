@@ -43,6 +43,15 @@ typedef enum {
     FONT_SIZE_LARGE = 1,  /**< 28px IPA Gothic:  91×25 */
 } app_font_size_t;
 
+/**
+ * Local keyboard echo on the TAB5 display. This setting never sends a
+ * configuration command to the connected serial device.
+ */
+typedef enum {
+    LOCAL_ECHO_OFF = 0,  /**< Display only text received from the peer */
+    LOCAL_ECHO_ON  = 1,  /**< Also render locally transmitted key input */
+} local_echo_t;
+
 // ==============================================================
 // Settings Structure
 // ==============================================================
@@ -52,6 +61,7 @@ typedef struct {
     serial_if_t     serial_if;   /**< Interface: USB, PortA, or M-Bus UART  */
     app_log_level_t log_level;   /**< ESP-IDF log level                     */
     app_font_size_t font_size;   /**< Terminal font size (Small or Large)   */
+    local_echo_t    local_echo;  /**< Local TAB5 keyboard echo setting       */
 } app_settings_t;
 
 // ==============================================================
@@ -62,6 +72,7 @@ typedef struct {
 #define SETTINGS_DEFAULT_SERIAL_IF  SERIAL_IF_USB
 #define SETTINGS_DEFAULT_LOG_LEVEL  LOG_LEVEL_INFO
 #define SETTINGS_DEFAULT_FONT_SIZE  FONT_SIZE_LARGE
+#define SETTINGS_DEFAULT_LOCAL_ECHO LOCAL_ECHO_OFF
 
 // ==============================================================
 // API

@@ -21,6 +21,7 @@ static const char *KEY_BAUD   = "baud";
 static const char *KEY_IFACE  = "iface";
 static const char *KEY_LOG    = "log_level";
 static const char *KEY_FONT   = "font_size";
+static const char *KEY_LOCAL_ECHO = "local_echo";
 
 // ==============================================================
 // Load
@@ -33,6 +34,7 @@ void settings_load(app_settings_t *out)
     out->serial_if  = SETTINGS_DEFAULT_SERIAL_IF;
     out->log_level  = SETTINGS_DEFAULT_LOG_LEVEL;
     out->font_size  = SETTINGS_DEFAULT_FONT_SIZE;
+    out->local_echo = SETTINGS_DEFAULT_LOCAL_ECHO;
 
     nvs_handle_t h;
     esp_err_t err = nvs_open(NVS_NS, NVS_READONLY, &h);
@@ -62,10 +64,15 @@ void settings_load(app_settings_t *out)
     if (nvs_get_u8(h, KEY_FONT, &v8) == ESP_OK) {
         out->font_size = (app_font_size_t)v8;
     }
+    if (nvs_get_u8(h, KEY_LOCAL_ECHO, &v8) == ESP_OK) {
+        out->local_echo = (v8 == (uint8_t)LOCAL_ECHO_ON)
+                          ? LOCAL_ECHO_ON : LOCAL_ECHO_OFF;
+    }
 
     nvs_close(h);
-    ESP_LOGI(TAG, "Settings loaded: baud=%"PRIu32" iface=%d log=%d font=%d",
-             out->baud_rate, (int)out->serial_if, (int)out->log_level, (int)out->font_size);
+    ESP_LOGI(TAG, "Settings loaded: baud=%"PRIu32" iface=%d log=%d font=%d local_echo=%d",
+             out->baud_rate, (int)out->serial_if, (int)out->log_level,
+             (int)out->font_size, (int)out->local_echo);
 }
 
 // ==============================================================
@@ -86,12 +93,14 @@ bool settings_save(const app_settings_t *s)
     ok &= (nvs_set_u8 (h, KEY_IFACE, (uint8_t)s->serial_if)  == ESP_OK);
     ok &= (nvs_set_u8 (h, KEY_LOG,   (uint8_t)s->log_level)  == ESP_OK);
     ok &= (nvs_set_u8 (h, KEY_FONT,  (uint8_t)s->font_size)  == ESP_OK);
+    ok &= (nvs_set_u8 (h, KEY_LOCAL_ECHO, (uint8_t)s->local_echo) == ESP_OK);
     ok &= (nvs_commit(h) == ESP_OK);
 
     nvs_close(h);
     if (ok) {
-        ESP_LOGI(TAG, "Settings saved: baud=%"PRIu32" iface=%d log=%d font=%d",
-                 s->baud_rate, (int)s->serial_if, (int)s->log_level, (int)s->font_size);
+        ESP_LOGI(TAG, "Settings saved: baud=%"PRIu32" iface=%d log=%d font=%d local_echo=%d",
+                 s->baud_rate, (int)s->serial_if, (int)s->log_level,
+                 (int)s->font_size, (int)s->local_echo);
     } else {
         ESP_LOGE(TAG, "Settings save failed (partial write)");
     }
