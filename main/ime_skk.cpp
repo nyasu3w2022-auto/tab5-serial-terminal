@@ -514,13 +514,10 @@ ime_result_t ime_skk_t::input_text(const char *text, size_t len)
             }
         }
 
-        // In direct kana state, completed kana is immediately transmitted,
-        // which is the defining SKK behaviour.  Conversion readings remain
-        // local until Space/Enter chooses a candidate or confirms kana.
-        if (!s_conversion_active && !s_kana.empty()) {
-            result.commit += direct_commit_text();
-            s_kana.clear();
-        }
+        // Keep direct kana local until an explicit delimiter (Enter/Space) or
+        // a subsequent uppercase conversion start.  This avoids sending each
+        // kana as its final romaji syllable completes and keeps TAB5's local
+        // input behaviour coherent with the conversion overlay.
         update_state();
         result.changed = true;
     }
@@ -617,5 +614,6 @@ ime_result_t ime_skk_t::input_key(ime_key_t key)
     case ime_key_t::RIGHT:
         break;
     }
+    update_state();
     return result;
 }

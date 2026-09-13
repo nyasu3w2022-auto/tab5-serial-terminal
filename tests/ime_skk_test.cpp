@@ -31,17 +31,37 @@ int main()
     ime_result_t idle_space = ime.input_text(" ", 1);
     assert(!idle_space.consumed && !idle_space.changed);
 
-    // Direct lowercase romaji commits kana immediately, as in SKK.
+    // Direct lowercase romaji remains local until an explicit delimiter.
+    // This prevents completed vowels from being sent one kana at a time.
     ime_result_t greeting = type(ime, "konnichiha");
-    assert(greeting.commit == "こんにちは");
+    assert(greeting.commit.empty());
+    assert(ime.state() == ime_state_t::COMPOSING);
+    assert(ime.preedit_text() == "こんにちは");
+    assert(ime.input_key(ime_key_t::ENTER).commit == "こんにちは\r");
     assert(ime.state() == ime_state_t::IDLE);
+
+    // Lowercase direct text before an uppercase initial is committed as a
+    // block, then the uppercase key begins the next SKK conversion reading.
+    std::string phrase_commit;
+    const char *phrase_input = "atamaKara";
+    for (size_t i = 0; phrase_input[i] != '\0'; ++i) {
+        phrase_commit += ime.input_text(&phrase_input[i], 1).commit;
+        if (i < 5) assert(phrase_commit.empty());
+    }
+    assert(phrase_commit == "あたま");
+    assert(ime.is_conversion_active());
+    assert(!ime.is_okuri_active());
+    assert(ime.preedit_text() == "▽から");
+    ime.input_key(ime_key_t::ESCAPE);
 
     // q toggles direct Hiragana/Katakana mode without contacting the peer.
     ime_result_t kata_on = type(ime, "q");
     assert(kata_on.commit.empty());
     assert(ime.kana_mode() == ime_kana_mode_t::KATAKANA);
     ime_result_t kata = type(ime, "katakana");
-    assert(kata.commit == "カタカナ");
+    assert(kata.commit.empty());
+    assert(ime.preedit_text() == "カタカナ");
+    assert(ime.input_key(ime_key_t::ENTER).commit == "カタカナ\r");
     type(ime, "q");
     assert(ime.kana_mode() == ime_kana_mode_t::HIRAGANA);
 
@@ -92,14 +112,17 @@ int main()
     ime.input_key(ime_key_t::ESCAPE);
     assert(ime.state() == ime_state_t::IDLE);
 
-    // Romaji edge cases in direct mode.
-    assert(type(ime, "ssha").commit == "っしゃ");
-    assert(type(ime, "nna").commit == "んな");
+    // Romaji edge cases in direct mode remain pending until Enter.
+    assert(type(ime, "ssha").commit.empty());
+    assert(ime.input_key(ime_key_t::ENTER).commit == "っしゃ\r");
+    assert(type(ime, "nna").commit.empty());
+    assert(ime.input_key(ime_key_t::ENTER).commit == "んな\r");
     ime_result_t trailing_n = type(ime, "nn");
     assert(trailing_n.commit.empty());
     ime_result_t trailing_n_commit = ime.input_key(ime_key_t::ENTER);
     assert(trailing_n_commit.commit == "ん\r");
-    assert(type(ime, "n'").commit == "ん");
+    assert(type(ime, "n'").commit.empty());
+    assert(ime.input_key(ime_key_t::ENTER).commit == "ん\r");
 
     // Exercise the actual bundled dictionary and its SKK okurigana key.
     ime.set_dictionary_path("assets/SKK-JISYO.S.txt");
