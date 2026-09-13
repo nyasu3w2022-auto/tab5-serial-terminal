@@ -130,6 +130,7 @@ private:
     void erase_last_preedit();
     bool search_dictionary();
     bool search_dictionary_key(const std::string &key);
+    bool search_dictionary_okuri_family(const std::string &reading);
     std::string direct_commit_text() const;
     std::string current_candidate_commit() const;
 };

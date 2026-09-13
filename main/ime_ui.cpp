@@ -108,9 +108,9 @@ void ime_ui_update(bool japanese_mode, const ime_skk_t &ime)
     } else if (ime.is_conversion_active()) {
         state_text = " SKK HENKAN: Space=Convert  Enter=Kana  Esc=Cancel";
     } else if (ime.kana_mode() == ime_kana_mode_t::KATAKANA) {
-        state_text = " SKK KATA: q=Hiragana";
+        state_text = " SKK KATA: q=Hiragana Commit";
     } else {
-        state_text = " SKK HIRA: q=Katakana";
+        state_text = " SKK HIRA: q=Katakana Commit";
     }
     lv_label_set_text(s_status_label, state_text);
     lv_obj_set_style_text_font(s_preedit_label, active_font(), 0);

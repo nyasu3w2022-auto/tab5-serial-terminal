@@ -390,10 +390,61 @@ bool ime_skk_t::search_dictionary()
     std::string key = s_kana;
     if (s_okuri_active && s_okuri_initial != '\0') key.push_back(s_okuri_initial);
     if (search_dictionary_key(key)) return true;
+
+    // Some inflected forms start their okurigana with a sokuon (っ), while
+    // SKK-JISYO registers the verb using another inflection's initial letter:
+    // はしr /走/ must also serve HashiTta -> 走った, and いu /言/ must
+    // serve ITta -> 言った.  Search the reading's okuri-key family only for
+    // this special っ case, before falling back to the no-okuri reading.
+    if (s_okuri_active && s_okuri_kana.rfind("っ", 0) == 0 &&
+        search_dictionary_okuri_family(s_kana)) return true;
     if (s_okuri_active && search_dictionary_key(s_kana)) return true;
 
     update_state();
     return false;
+}
+
+bool ime_skk_t::search_dictionary_okuri_family(const std::string &reading)
+{
+    FILE *fp = fopen(s_dictionary_path.c_str(), "rb");
+    if (fp == nullptr) return false;
+
+    char line[MAX_DICT_LINE_BYTES + 1] = {};
+    while (fgets(line, sizeof(line), fp) != nullptr && s_candidate_count < MAX_CANDIDATES) {
+        size_t line_len = strlen(line);
+        if (line_len == MAX_DICT_LINE_BYTES && line[line_len - 1] != '\n') {
+            int ch = 0;
+            while ((ch = fgetc(fp)) != '\n' && ch != EOF) {}
+            continue;
+        }
+        if (line[0] == ';' || line[0] == '\r' || line[0] == '\n') continue;
+
+        char *separator = strchr(line, ' ');
+        if (separator == nullptr) continue;
+        size_t key_len = (size_t)(separator - line);
+        if (key_len != reading.size() + 1 ||
+            memcmp(line, reading.data(), reading.size()) != 0 ||
+            !std::isalpha((unsigned char)line[key_len - 1])) continue;
+
+        char *p = strchr(separator, '/');
+        if (p == nullptr) continue;
+        p++;
+        while (*p != '\0' && *p != '\r' && *p != '\n' && s_candidate_count < MAX_CANDIDATES) {
+            char *end = strchr(p, '/');
+            if (end == nullptr) break;
+            char *annotation = strchr(p, ';');
+            char *candidate_end = (annotation != nullptr && annotation < end) ? annotation : end;
+            if (candidate_end > p) {
+                s_candidates[s_candidate_count].assign(p, (size_t)(candidate_end - p));
+                s_candidate_count++;
+            }
+            p = end + 1;
+        }
+    }
+    fclose(fp);
+
+    update_state();
+    return s_candidate_count > 0;
 }
 
 bool ime_skk_t::search_dictionary_key(const std::string &key)

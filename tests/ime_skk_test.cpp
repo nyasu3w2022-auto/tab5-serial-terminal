@@ -22,6 +22,8 @@ int main()
     fputs("みr /見/診/\n", dict);
     fputs("かk /書/描/\n", dict);
     fputs("あたま /頭/\n", dict);
+    fputs("はしr /走/\n", dict);
+    fputs("いu /言/云/\n", dict);
     fputs("わん /腕/碗/湾/椀/\n", dict);
     fclose(dict);
 
@@ -161,6 +163,25 @@ int main()
     assert(ime.input_key(ime_key_t::ENTER).commit == "書く");
     assert(ime.state() == ime_state_t::IDLE);
 
+    // Sokuon-leading okurigana must match the same reading's registered
+    // okuri-family.  HashiTta uses はしr /走/ and commits 走った.
+    type(ime, "HashiTta");
+    assert(ime.is_okuri_active());
+    assert(ime.preedit_text() == "はし / った");
+    ime.input_key(ime_key_t::SPACE);
+    assert(ime.candidate_at(0) == "走");
+    assert(ime.input_key(ime_key_t::ENTER).commit == "走った");
+    assert(ime.state() == ime_state_t::IDLE);
+
+    // ITta likewise finds いu /言/ by its reading's okuri-family.
+    type(ime, "ITta");
+    assert(ime.is_okuri_active());
+    assert(ime.preedit_text() == "い / った");
+    ime.input_key(ime_key_t::SPACE);
+    assert(ime.candidate_at(0) == "言");
+    assert(ime.input_key(ime_key_t::ENTER).commit == "言った");
+    assert(ime.state() == ime_state_t::IDLE);
+
     // Cancel leaves the original SKK reading available for another conversion.
     type(ime, "MiRu");
     ime.input_key(ime_key_t::SPACE);
@@ -209,6 +230,18 @@ int main()
     assert(ime.candidate_count() >= 1);
     assert(ime.candidate_at(0) == "見");
     assert(ime.input_key(ime_key_t::ENTER).commit == "見る");
+
+    type(ime, "HashiTta");
+    ime.input_key(ime_key_t::SPACE);
+    assert(ime.candidate_count() >= 1);
+    assert(ime.candidate_at(0) == "走");
+    assert(ime.input_key(ime_key_t::ENTER).commit == "走った");
+
+    type(ime, "ITta");
+    ime.input_key(ime_key_t::SPACE);
+    assert(ime.candidate_count() >= 1);
+    assert(ime.candidate_at(0) == "言");
+    assert(ime.input_key(ime_key_t::ENTER).commit == "言った");
 
     std::remove(dict_path);
     puts("ime_skk tests passed");
