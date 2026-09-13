@@ -602,12 +602,17 @@ ime_result_t ime_skk_t::input_key(ime_key_t key)
         return result;
     }
 
-    // A direct-mode partial romaji sequence is the only non-idle direct state.
+    // A direct-mode composition becomes a conversion reading on Space.  The
+    // reading remains local regardless of whether the dictionary has a match;
+    // Enter can still explicitly commit it as kana if no candidate is wanted.
     switch (key) {
     case ime_key_t::SPACE:
         flush_romaji(true);
-        result.commit = direct_commit_text() + " ";
-        clear_composition();
+        s_conversion_active = true;
+        s_okuri_active = false;
+        s_okuri_initial = '\0';
+        s_okuri_kana.clear();
+        search_dictionary();
         result.changed = true;
         break;
     case ime_key_t::ENTER:

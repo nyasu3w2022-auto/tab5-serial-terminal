@@ -41,6 +41,20 @@ int main()
     assert(ime.input_key(ime_key_t::ENTER).commit == "こんにちは\r");
     assert(ime.state() == ime_state_t::IDLE);
 
+    // Space starts candidate selection even when the reading was entered in
+    // lowercase.  It must not transmit the raw hiragana plus a space.
+    ime_result_t atama_direct = type(ime, "atama");
+    assert(atama_direct.commit.empty());
+    assert(!ime.is_conversion_active());
+    ime_result_t atama_search = ime.input_key(ime_key_t::SPACE);
+    assert(atama_search.consumed && atama_search.changed);
+    assert(atama_search.commit.empty());
+    assert(ime.state() == ime_state_t::CANDIDATE);
+    assert(ime.candidate_count() == 1);
+    assert(ime.candidate_at(0) == "頭");
+    assert(ime.input_key(ime_key_t::ENTER).commit == "頭");
+    assert(ime.state() == ime_state_t::IDLE);
+
     // Lowercase direct text before an uppercase initial is committed as a
     // block, then the uppercase key begins the next SKK conversion reading.
     std::string phrase_commit;
