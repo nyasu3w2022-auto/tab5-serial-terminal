@@ -473,12 +473,22 @@ ime_result_t ime_skk_t::input_text(const char *text, size_t len)
             continue;
         }
 
-        // In direct kana state, q toggles Hiragana/Katakana.  It is reserved
-        // only when no incomplete romaji remains, so qa/qi/... stay usable
-        // inside an actual composition or conversion reading.
-        if (byte == 'q' && !s_conversion_active && s_kana.empty() && s_romaji.empty()) {
-            s_kana_mode = (s_kana_mode == ime_kana_mode_t::HIRAGANA)
-                        ? ime_kana_mode_t::KATAKANA : ime_kana_mode_t::HIRAGANA;
+        // SKK q behaviour in direct kana state:
+        // - With no preedit, toggle the persistent Hiragana/Katakana mode.
+        // - With completed kana, convert the current preedit to the opposite
+        //   script, commit it locally, and keep the current input mode.
+        // This makes JP-HIRA "suittiq" commit "スイッチ" and JP-KATA
+        // "suittiq" commit "すいっち" without a trailing CR.
+        if (byte == 'q' && !s_conversion_active && s_romaji.empty()) {
+            if (s_kana.empty()) {
+                s_kana_mode = (s_kana_mode == ime_kana_mode_t::HIRAGANA)
+                            ? ime_kana_mode_t::KATAKANA : ime_kana_mode_t::HIRAGANA;
+            } else {
+                result.commit = (s_kana_mode == ime_kana_mode_t::HIRAGANA)
+                              ? hiragana_to_katakana(s_kana) : s_kana;
+                clear_composition();
+            }
+            update_state();
             result.consumed = true;
             result.changed = true;
             continue;

@@ -92,10 +92,29 @@ int main()
     assert(chunked_ime.input_key(ime_key_t::ENTER).commit == "頭から");
     assert(chunked_ime.state() == ime_state_t::IDLE);
 
-    // q toggles direct Hiragana/Katakana mode without contacting the peer.
+    // In direct kana state, q with no preedit still toggles the input mode.
+    // With a preedit it commits the opposite script, as in SKK.
+    assert(ime.kana_mode() == ime_kana_mode_t::HIRAGANA);
+    ime_result_t hira_q = type(ime, "suittiq");
+    assert(hira_q.commit == "スイッチ");
+    assert(ime.state() == ime_state_t::IDLE);
+    assert(ime.kana_mode() == ime_kana_mode_t::HIRAGANA);
+
     ime_result_t kata_on = type(ime, "q");
     assert(kata_on.commit.empty());
     assert(ime.kana_mode() == ime_kana_mode_t::KATAKANA);
+
+    // Verify the same operation when each physical key is delivered as a
+    // distinct keyboard string event.
+    std::string kata_q_commit;
+    const char *kata_q_input = "suittiq";
+    for (size_t i = 0; kata_q_input[i] != '\0'; ++i) {
+        kata_q_commit += ime.input_text(&kata_q_input[i], 1).commit;
+    }
+    assert(kata_q_commit == "すいっち");
+    assert(ime.state() == ime_state_t::IDLE);
+    assert(ime.kana_mode() == ime_kana_mode_t::KATAKANA);
+
     ime_result_t kata = type(ime, "katakana");
     assert(kata.commit.empty());
     assert(ime.preedit_text() == "カタカナ");
