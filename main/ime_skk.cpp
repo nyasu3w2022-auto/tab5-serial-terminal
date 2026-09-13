@@ -383,9 +383,21 @@ bool ime_skk_t::search_dictionary()
     clear_candidates();
     if (s_dictionary_path.empty() || s_kana.empty()) return false;
 
+    // Prefer the true SKK okurigana key (for example, みr).  When a user
+    // starts an uppercase segment after already composing direct kana, that
+    // key may not exist; in that case search the whole reading (あたまから)
+    // instead of leaving the composition impossible to convert.
     std::string key = s_kana;
     if (s_okuri_active && s_okuri_initial != '\0') key.push_back(s_okuri_initial);
+    if (search_dictionary_key(key)) return true;
+    if (s_okuri_active && search_dictionary_key(s_kana)) return true;
 
+    update_state();
+    return false;
+}
+
+bool ime_skk_t::search_dictionary_key(const std::string &key)
+{
     FILE *fp = fopen(s_dictionary_path.c_str(), "rb");
     if (fp == nullptr) return false;
 
@@ -482,13 +494,15 @@ ime_result_t ime_skk_t::input_text(const char *text, size_t len)
             char lower = (char)std::tolower(byte);
 
             if (uppercase && !s_conversion_active) {
-                // First uppercase begins a local SKK conversion.  Preserve
-                // preceding direct kana in s_kana: it is part of the same
-                // local conversion/preedit sequence and must not be sent.
+                // First uppercase begins a local SKK conversion.  If direct
+                // kana already precedes it, interpret this uppercase as the
+                // beginning of its okurigana (atamaKara / miRu); otherwise it
+                // starts a regular conversion reading (Kanji / MiRu).
                 flush_romaji(true);
+                const bool has_preceding_kana = !s_kana.empty();
                 s_conversion_active = true;
-                s_okuri_active = false;
-                s_okuri_initial = '\0';
+                s_okuri_active = has_preceding_kana;
+                s_okuri_initial = has_preceding_kana ? lower : '\0';
                 s_okuri_kana.clear();
                 s_romaji.clear();
             } else if (uppercase && s_conversion_active && !s_okuri_active) {

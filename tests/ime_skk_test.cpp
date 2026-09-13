@@ -21,6 +21,7 @@ int main()
     fputs("かんじ /漢字/幹事/\n", dict);
     fputs("みr /見/診/\n", dict);
     fputs("かk /書/描/\n", dict);
+    fputs("あたま /頭/\n", dict);
     fputs("わん /腕/碗/湾/椀/\n", dict);
     fclose(dict);
 
@@ -49,9 +50,33 @@ int main()
         assert(phrase_commit.empty());
     }
     assert(ime.is_conversion_active());
-    assert(!ime.is_okuri_active());
-    assert(ime.preedit_text() == "あたまから");
-    assert(ime.input_key(ime_key_t::ENTER).commit == "あたまから");
+    assert(ime.is_okuri_active());
+    assert(ime.preedit_text() == "あたま / から");
+    // あたまk is absent, so lookup falls back to あたま and appends から.
+    ime.input_key(ime_key_t::SPACE);
+    assert(ime.candidate_count() == 1);
+    assert(ime.candidate_at(0) == "頭");
+    assert(ime.input_key(ime_key_t::ENTER).commit == "頭から");
+    assert(ime.state() == ime_state_t::IDLE);
+
+    // The same reading must have identical state when the keyboard groups
+    // adjacent characters into multiple string events.
+    ime_skk_t chunked_ime;
+    chunked_ime.set_dictionary_path(dict_path);
+    const char *chunks[] = {"ata", "maK", "ara"};
+    std::string chunked_commit;
+    for (const char *chunk : chunks) {
+        ime_result_t r = chunked_ime.input_text(chunk, strlen(chunk));
+        chunked_commit += r.commit;
+    }
+    assert(chunked_commit.empty());
+    assert(chunked_ime.is_conversion_active());
+    assert(chunked_ime.is_okuri_active());
+    assert(chunked_ime.preedit_text() == "あたま / から");
+    chunked_ime.input_key(ime_key_t::SPACE);
+    assert(chunked_ime.candidate_at(0) == "頭");
+    assert(chunked_ime.input_key(ime_key_t::ENTER).commit == "頭から");
+    assert(chunked_ime.state() == ime_state_t::IDLE);
 
     // q toggles direct Hiragana/Katakana mode without contacting the peer.
     ime_result_t kata_on = type(ime, "q");
@@ -94,12 +119,14 @@ int main()
     assert(ime.okuri_text() == "る");
     ime_result_t okuri_commit = ime.input_key(ime_key_t::ENTER);
     assert(okuri_commit.commit == "見る");
+    assert(ime.state() == ime_state_t::IDLE);
 
     // Another okurigana form: KaKu -> 書く.
     type(ime, "KaKu");
     ime.input_key(ime_key_t::SPACE);
     assert(ime.candidate_at(0) == "書");
     assert(ime.input_key(ime_key_t::ENTER).commit == "書く");
+    assert(ime.state() == ime_state_t::IDLE);
 
     // Cancel leaves the original SKK reading available for another conversion.
     type(ime, "MiRu");
@@ -120,8 +147,13 @@ int main()
         assert(mi_ru_commit.empty());
     }
     assert(ime.is_conversion_active());
-    assert(ime.preedit_text() == "みる");
-    assert(ime.input_key(ime_key_t::ENTER).commit == "みる");
+    assert(ime.is_okuri_active());
+    assert(ime.preedit_text() == "み / る");
+    ime.input_key(ime_key_t::SPACE);
+    assert(ime.candidate_count() >= 1);
+    assert(ime.candidate_at(0) == "見");
+    assert(ime.input_key(ime_key_t::ENTER).commit == "見る");
+    assert(ime.state() == ime_state_t::IDLE);
 
     // Romaji edge cases in direct mode remain pending until Enter.
     assert(type(ime, "ssha").commit.empty());

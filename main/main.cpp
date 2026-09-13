@@ -238,10 +238,10 @@ static bool ime_handle_special_key(const char *name)
     ime_result_t result = s_ime.input_key(key);
     if (!result.consumed) return false;
     if (!result.commit.empty()) transmit_ime_commit(result.commit);
-    if (result.changed) {
-        ime_ui_update(true, s_ime);
-        refresh_ime_input_indicator();
-    }
+    // Synchronize even when a result only commits text.  ime_ui_update()
+    // hides the overlay for IDLE, preventing a stale preedit after Enter.
+    ime_ui_update(true, s_ime);
+    refresh_ime_input_indicator();
     return true;
 }
 
@@ -350,10 +350,10 @@ static bool handle_key_event(const key_event_msg_t *msg)
         ime_result_t ime_result = s_ime.input_text(msg->str, text_len);
         if (ime_result.consumed) {
             if (!ime_result.commit.empty()) transmit_ime_commit(ime_result.commit);
-            if (ime_result.changed) {
-                ime_ui_update(true, s_ime);
-                refresh_ime_input_indicator();
-            }
+            // Keep the overlay lifecycle strictly tied to the IME state for
+            // every consumed input, including candidate/direct confirmation.
+            ime_ui_update(true, s_ime);
+            refresh_ime_input_indicator();
             return ime_result.changed || !ime_result.commit.empty();
         }
     }

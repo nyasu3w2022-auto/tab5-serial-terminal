@@ -129,6 +129,7 @@ private:
     void process_romaji();
     void erase_last_preedit();
     bool search_dictionary();
+    bool search_dictionary_key(const std::string &key);
     std::string direct_commit_text() const;
     std::string current_candidate_commit() const;
 };
