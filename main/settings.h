@@ -52,6 +52,13 @@ typedef enum {
     LOCAL_ECHO_ON  = 1,  /**< Also render locally transmitted key input */
 } local_echo_t;
 
+/** Default local keyboard input mode. Japanese mode performs TAB5-side
+ *  romaji/SKK conversion and sends only committed UTF-8 text to the peer. */
+typedef enum {
+    INPUT_MODE_DIRECT   = 0,  /**< Send keyboard input directly to the peer */
+    INPUT_MODE_JAPANESE = 1,  /**< Use TAB5 local Japanese input at startup */
+} app_input_mode_t;
+
 // ==============================================================
 // Settings Structure
 // ==============================================================
@@ -62,6 +69,7 @@ typedef struct {
     app_log_level_t log_level;   /**< ESP-IDF log level                     */
     app_font_size_t font_size;   /**< Terminal font size (Small or Large)   */
     local_echo_t    local_echo;  /**< Local TAB5 keyboard echo setting       */
+    app_input_mode_t input_mode; /**< Default local keyboard input mode       */
 } app_settings_t;
 
 // ==============================================================
@@ -73,6 +81,7 @@ typedef struct {
 #define SETTINGS_DEFAULT_LOG_LEVEL  LOG_LEVEL_INFO
 #define SETTINGS_DEFAULT_FONT_SIZE  FONT_SIZE_LARGE
 #define SETTINGS_DEFAULT_LOCAL_ECHO LOCAL_ECHO_OFF
+#define SETTINGS_DEFAULT_INPUT_MODE INPUT_MODE_DIRECT
 
 // ==============================================================
 // API

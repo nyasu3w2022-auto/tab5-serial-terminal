@@ -24,6 +24,7 @@
 #include <esp_log.h>
 #include <esp_err.h>
 #include <nvs_flash.h>
+#include <esp_spiffs.h>
 #include <freertos/FreeRTOS.h>
 #include <freertos/task.h>
 #include <freertos/ringbuf.h>
@@ -38,6 +39,8 @@
 #include "serial_transport.h"    // active USB / Port A / MBUS UART transport
 #include "settings.h"
 #include "settings_ui.h"
+#include "ime_skk.h"
+#include "ime_ui.h"
 
 static const char *TAG = "main";
 
@@ -47,12 +50,63 @@ static m5::M5Tab5Keyboard         s_keyboard;
 // Current application settings (loaded from NVS at boot)
 static app_settings_t s_settings = {};
 
+// Local Japanese input state.  Conversion occurs on TAB5 and only committed
+// UTF-8 text is forwarded through serial_transport_tx().
+static ime_skk_t s_ime;
+static bool s_japanese_input_active = false;
+static constexpr const char *SKK_DICT_PATH = "/skk/SKK-JISYO.S.txt";
+
+static void set_japanese_input_active(bool active)
+{
+    if (s_japanese_input_active != active) {
+        s_ime.reset();
+        ime_ui_hide();
+    }
+    s_japanese_input_active = active;
+    display_set_japanese_input_active(active);
+    update_status_bar();
+}
+
+static void init_ime_dictionary_storage(void)
+{
+    esp_vfs_spiffs_conf_t conf = {};
+    conf.base_path = "/skk";
+    conf.partition_label = "storage";
+    conf.max_files = 2;
+    conf.format_if_mount_failed = false;
+
+    esp_err_t err = esp_vfs_spiffs_register(&conf);
+    if (err != ESP_OK) {
+        ESP_LOGW(TAG, "SKK SPIFFS mount unavailable: %s", esp_err_to_name(err));
+        s_ime.set_dictionary_path(NULL);
+        return;
+    }
+
+    s_ime.set_dictionary_path(SKK_DICT_PATH);
+    size_t total = 0;
+    size_t used = 0;
+    if (esp_spiffs_info(conf.partition_label, &total, &used) == ESP_OK) {
+        ESP_LOGI(TAG, "SKK SPIFFS mounted: used=%u/%u bytes",
+                 (unsigned)used, (unsigned)total);
+    }
+    if (s_ime.dictionary_available()) {
+        ESP_LOGI(TAG, "SKK dictionary ready: %s", SKK_DICT_PATH);
+    } else {
+        ESP_LOGW(TAG, "SKK dictionary not found: %s (hiragana input remains available)",
+                 SKK_DICT_PATH);
+    }
+}
+
 // Called by settings_ui after Save & Close so future openings use the
 // newly saved values rather than the boot-time snapshot.
 static void on_settings_saved(const app_settings_t *saved)
 {
     if (saved) {
         s_settings = *saved;
+        set_japanese_input_active(s_settings.input_mode == INPUT_MODE_JAPANESE);
+        if (s_japanese_input_active && s_ime.state() != ime_state_t::IDLE) {
+            ime_ui_update(true, s_ime);
+        }
         ESP_LOGI(TAG, "Current settings synchronized after save");
     }
 }
@@ -139,6 +193,48 @@ static bool local_echo_special_key(const char *name)
     return true;
 }
 
+static bool transmit_ime_commit(const std::string &text)
+{
+    if (text.empty()) return false;
+
+    esp_err_t err = serial_transport_tx((const uint8_t *)text.data(), text.size());
+    if (err != ESP_OK) {
+        ESP_LOGW(TAG, "Japanese IME commit TX failed via %s: %s",
+                 serial_transport_get_name(), esp_err_to_name(err));
+        return false;
+    }
+    if (s_settings.local_echo == LOCAL_ECHO_ON) {
+        term_local_echo_text((const uint8_t *)text.data(), text.size());
+    }
+    return true;
+}
+
+static bool ime_handle_special_key(const char *name)
+{
+    if (!s_japanese_input_active) return false;
+
+    ime_key_t key;
+    if (strcasecmp(name, "enter") == 0) {
+        key = ime_key_t::ENTER;
+    } else if (strcasecmp(name, "backspace") == 0) {
+        key = ime_key_t::BACKSPACE;
+    } else if (strcasecmp(name, "left") == 0) {
+        key = ime_key_t::LEFT;
+    } else if (strcasecmp(name, "right") == 0) {
+        key = ime_key_t::RIGHT;
+    } else if (strcasecmp(name, "escape") == 0 || strcasecmp(name, "esc") == 0) {
+        key = ime_key_t::ESCAPE;
+    } else {
+        return false;
+    }
+
+    ime_result_t result = s_ime.input_key(key);
+    if (!result.consumed) return false;
+    if (!result.commit.empty()) transmit_ime_commit(result.commit);
+    if (result.changed) ime_ui_update(true, s_ime);
+    return true;
+}
+
 /**
  * @brief Handle one keyboard event from the key queue.
  *
@@ -161,9 +257,21 @@ static bool handle_key_event(const key_event_msg_t *msg)
             // Ctrl+Alt+S: toggle settings screen
             if (settings_ui_is_open()) {
                 settings_ui_close();
+                if (s_japanese_input_active && s_ime.state() != ime_state_t::IDLE) {
+                    ime_ui_update(true, s_ime);
+                }
             } else {
+                // The settings overlay must be the foremost full-screen UI.
+                ime_ui_hide();
                 settings_ui_open(&s_settings);
             }
+            return true;
+        }
+        if (k == 'J') {
+            // Ctrl+Alt+J: temporary local input-mode toggle.  The setting
+            // dropdown controls the mode used after the next reboot.
+            set_japanese_input_active(!s_japanese_input_active);
+            ESP_LOGI(TAG, "Japanese input %s", s_japanese_input_active ? "enabled" : "disabled");
             return true;
         }
         // Other Ctrl+Alt combinations: silently ignore (don't send to remote)
@@ -217,16 +325,29 @@ static bool handle_key_event(const key_event_msg_t *msg)
     // Special key names → VT100 sequences
     for (int i = 0; s_special_keys[i].name != NULL; i++) {
         if (strcasecmp(msg->str, s_special_keys[i].name) == 0) {
+            if (!alt && ime_handle_special_key(msg->str)) return true;
             const char *seq = s_special_keys[i].seq;
             esp_err_t err = serial_transport_tx((const uint8_t *)seq, strlen(seq));
             return (err == ESP_OK) && !alt && local_echo_special_key(msg->str);
         }
     }
 
+    // Japanese input consumes preedit keys locally and forwards only the
+    // committed UTF-8 result.  Alt-modified input keeps terminal ESC-prefix
+    // semantics and is never routed through the local IME.
+    size_t text_len = strlen(msg->str);
+    if (s_japanese_input_active && !alt && text_len > 0) {
+        ime_result_t ime_result = s_ime.input_text(msg->str, text_len);
+        if (ime_result.consumed) {
+            if (!ime_result.commit.empty()) transmit_ime_commit(ime_result.commit);
+            if (ime_result.changed) ime_ui_update(true, s_ime);
+            return ime_result.changed || !ime_result.commit.empty();
+        }
+    }
+
     // Normal printable characters are always sent to the selected transport.
     // With Local Echo enabled, they are additionally rendered here only after
     // successful TX; no configuration sequence is sent to the serial peer.
-    size_t text_len = strlen(msg->str);
     if (text_len == 0) return false;
     esp_err_t err = serial_transport_tx((const uint8_t *)msg->str, text_len);
     if (err == ESP_OK && !alt && s_settings.local_echo == LOCAL_ECHO_ON) {
@@ -299,12 +420,14 @@ extern "C" void app_main(void)
 
     // ---- Shared serial infrastructure (queues, RX ring buffer, logs) ----
     usb_init();
+    init_ime_dictionary_storage();
     serial_transport_init();
     // DSR/DA terminal responses use whichever transport is currently active.
     vt100_set_tx_cb(vt100_transport_tx_cb);
 
     // ---- Apply serial interface, baud rate and log-level settings ----
     settings_apply(&s_settings);
+    set_japanese_input_active(s_settings.input_mode == INPUT_MODE_JAPANESE);
 
     // USB needs host/CDC driver initialization before it can enumerate a device.
     // Port A UART is ready immediately after its driver is configured.

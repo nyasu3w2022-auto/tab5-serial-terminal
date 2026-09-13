@@ -11,8 +11,9 @@ M5Stack TAB5 (ESP32-P4) 向けの VT100 互換スタンドアロンシリアル�
 - **pending wrap（遅延折り返し）** — VT100 仕様に準拠した行末処理。余分なスクロールを防止
 - **DSR / DA 応答** — `ESC[6n`（カーソル位置報告要求）および `ESC[c`（デバイス属性要求）に応答。bash/readline がブロックしない
 - **共有 RX 16 KB リングバッファ** — USB・Port A・MBUS UARTの大量出力時にデータ取りこぼしを防止
-- **GUI 設定画面** — `Ctrl+Alt+S` で設定画面を開き、ボーレート、接続インターフェース（USB / Port A UART / MBUS UART2）、ログレベル、フォントサイズ、ローカルEcho Backを変更可能（NVSに自動保存）
+- **GUI 設定画面** — `Ctrl+Alt+S` で設定画面を開き、ボーレート、接続インターフェース（USB / Port A UART / MBUS UART2）、ログレベル、フォントサイズ、ローカルEcho Back、既定の入力モードを変更可能（NVSに自動保存）
 - **ローカル Echo Back** — 接続先に設定コマンドを送らず、Tab5自身が送信済みキー入力を表示するON/OFF設定
+- **ローカルかな漢字変換** — TAB5上でローマ字をひらがなへ変換し、内蔵SKK-JISYO.S辞書から候補を選択。確定したUTF-8だけをシリアル接続へ送信
 - **差分描画** — 変更行のみ再描画する行単位ダーティフラグで高速表示
 
 ## ハードウェア構成
@@ -44,6 +45,7 @@ M5Stack TAB5 (ESP32-P4) 向けの VT100 互換スタンドアロンシリアル�
 | Ctrl+C | 画面クリア |
 | Ctrl+L | 画面強制再描画 |
 | Ctrl+Alt+S | 設定画面を開く / 閉じる |
+| Ctrl+Alt+J | TAB5ローカルの入力モードを Direct / Japanese (SKK) の間で一時的に切り替える |
 
 ### ローカル Echo Back
 
@@ -55,6 +57,23 @@ M5Stack TAB5 (ESP32-P4) 向けの VT100 互換スタンドアロンシリアル�
 | ON | キー入力の送信成功後、通常文字列、Enter、Tab、Backspace、Delete/Del、左/右カーソルをTab5上でローカル描画します。送信内容自体は選択中の接続先へ従来どおり転送されます。 |
 
 > **注意:** 接続先も同じ入力をエコーする状態でONにすると、入力文字が二重に表示されます。接続先が入力を表示しない機器やアプリケーションで使用してください。上/下、Home/End、Page、Insert、ファンクション、Escape、Alt/Ctrl修飾キーは、接続先側の状態に依存するためローカルには描画しません。
+
+### ローカルかな漢字変換（Japanese / SKK）
+
+設定画面の **Input Mode** で起動時の入力モードを選べます。既定値は **Direct** で、従来のシリアル端末入力を変更しません。`Ctrl+Alt+J` は実行中だけの Direct / Japanese (SKK) 切替であり、接続先へは送信されません。Japaneseモードでは変換途中のローマ字・ひらがな・候補をTAB5画面のオーバーレイに表示し、**確定結果だけ**をUTF-8で送信します。
+
+| 入力状態 | キー | TAB5上の動作 | 接続先への送信 |
+|:---|:---|:---|:---|
+| 日本語入力中 | 通常の英字 | ローマ字をひらがなの未確定文字列へ変換 | 送信しない |
+| 日本語入力中 | Space | `SKK-JISYO.S` を検索して候補を表示 | 送信しない |
+| 候補表示中 | Space / Right / Left | 次候補 / 次候補 / 前候補を選択 | 送信しない |
+| 日本語入力中・候補表示中 | Enter | ひらがなまたは選択中の候補を確定 | 確定したUTF-8だけを送信 |
+| 日本語入力中・候補表示中 | Esc | 未確定入力を取り消す | 送信しない |
+| 未確定入力なし | Space / Enter / Esc / 編集キー | 従来の端末動作 | 従来どおり送信 |
+
+> **注意:** 最初のEnterは日本語文字列を確定するだけでCRは送信しません。リモートシェルでコマンドを実行するには、文字列を確定したあとにもう一度Enterを押してください。接続先側もUTF-8を解釈できる必要があります。Local Echo BackをONにした場合は、確定後のUTF-8文字列だけがローカル表示されます。
+
+辞書はビルド時に `assets/SKK-JISYO.S.txt` からSPIFFSの `storage` パーティションへ組み込まれ、実行時には `/skk/SKK-JISYO.S.txt` として利用されます。辞書が読み込めない場合でもひらがな入力・確定は利用できますが、漢字候補は表示されません。変換方式の詳細は [`docs/japanese_ime_design.md`](docs/japanese_ime_design.md) を参照してください。
 
 ### リモートへの送信（選択中の接続方式へそのまま転送）
 
@@ -132,7 +151,7 @@ idf.py build
 idf.py -p /dev/ttyACM0 flash monitor
 ```
 
-**注意:** CJKフォントデータ（約750KB）を格納するため、カスタムパーティションテーブル（factory 3MB）を使用しています。初めてフラッシュする際は、NVS領域も含めて初期化するため、必ずフルフラッシュ（または `idf.py erase-flash` 後にフラッシュ）を行ってください。
+**注意:** CJKフォントデータを格納するため、カスタムパーティションテーブル（factory 3MB）を使用しています。`assets/`のUTF-8 SKK辞書はビルド時にSPIFFS `storage` パーティションへ自動的に組み込まれます。辞書の更新を確実に反映する場合、または初めてフラッシュする場合は、NVSとSPIFFSを初期化するため、必ずフルフラッシュ（または `idf.py erase-flash` 後にフラッシュ）を行ってください。
 
 ### 依存コンポーネント
 
@@ -245,8 +264,10 @@ main_task (メインループ)
   ├── shared_rx_ringbuf ← USB / Port A / MBUS RXデータ（16 KBリングバッファ）
   │     └── vt100_process_byte() → term_buffer → term_refresh_display()
   └── key_queue         ← キーボード入力
-        ├── 選択中のUSB / Port A / MBUS UARTへTX
-        └── Echo Back=ONかつTX成功時のみ → ローカル端末バッファへ描画
+        ├── Directモード → 選択中のUSB / Port A / MBUS UARTへTX
+        └── Japanese (SKK)モード → ime_skk（未確定表示・候補選択）
+              └── 確定UTF-8のみ → 選択中のUSB / Port A / MBUS UARTへTX
+                    └── Echo Back=ONかつTX成功時のみ → ローカル端末バッファへ描画
 
 vcp_task
   ├── usb_lib_task      ← USB ホストライブラリ常駐タスク
@@ -285,7 +306,12 @@ npm install -g lv_font_conv
 
 このスクリプトは、16pxおよび28pxのLVGLフォントCソースを `main/fonts/` に再生成します。生成対象の文字範囲および生成オプションは `tools/generate_cjk_fonts.sh` に記載しています。
 
+### かな漢字変換辞書
+
+`assets/SKK-JISYO.S.txt` はSKK Development Teamの `SKK-JISYO.S` をUTF-8/LFへ変換してSPIFFSに組み込む辞書データです。`SKK-JISYO.{SML}` には **GNU General Public License version 2以降**が適用されます。[3] 辞書データのライセンス本文は `assets/GPL-2.0.txt`、出典・変換手順は `assets/README.md` に収録しています。アプリ本体のMITライセンスおよびIPAフォントライセンスとは別に、この辞書データのライセンスを保持してください。
+
 ## References
 
 [1]: https://docs.m5stack.com/en/core/Tab5 "M5Stack Tab5 — 公式ハードウェア資料"
 [2]: https://docs.espressif.com/projects/esp-idf/en/v5.5.4/esp32p4/api-reference/peripherals/uart.html "ESP-IDF v5.5.4 ESP32-P4 UART Driver"
+[3]: https://github.com/skk-dev/dict/blob/master/committers.md "SKK dictionary licenses and editorial policy"

@@ -58,3 +58,6 @@ void term_refresh_display(void);
  * @brief Update the status bar text with current USB/baud state.
  */
 void update_status_bar(void);
+
+/** Set the local keyboard input mode indicator shown in the status bar. */
+void display_set_japanese_input_active(bool active);

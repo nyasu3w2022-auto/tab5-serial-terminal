@@ -7,6 +7,7 @@
 #include "display.h"
 #include "terminal.h"
 #include "serial_transport.h"
+#include "ime_ui.h"
 
 #include <inttypes.h>
 #include <esp_log.h>
@@ -27,6 +28,7 @@ static const char *TAG = "display";
 static lv_obj_t   *term_canvas  = NULL;
 static lv_obj_t   *status_label = NULL;
 static lv_timer_t *cursor_timer = NULL;
+static bool s_japanese_input_active = false;
 // Sized for the maximum row count (Small font: 43 rows)
 static lv_obj_t   *row_canvases[TERM_ROWS_MAX]    = {};
 static uint8_t    *row_canvas_bufs[TERM_ROWS_MAX] = {};
@@ -165,11 +167,17 @@ void update_status_bar(void)
 {
     char buf[200];
     snprintf(buf, sizeof(buf),
-             " %s:%s  Baud:%"PRIu32"  ^C=Clear  ^Alt+S=Settings",
+             " %s:%s  Baud:%"PRIu32"  Input:%s  ^C=Clear  ^Alt+S=Settings",
              serial_transport_get_name(),
              serial_transport_get_status(),
-             serial_transport_get_baud_rate());
+             serial_transport_get_baud_rate(),
+             s_japanese_input_active ? "JP-SKK" : "Direct");
     term_update_status(buf);
+}
+
+void display_set_japanese_input_active(bool active)
+{
+    s_japanese_input_active = active;
 }
 
 static void cursor_blink_cb(lv_timer_t *timer)
@@ -279,6 +287,10 @@ void ui_rebuild_for_font_size(int font_w, int font_h)
     } else {
         s_active_font = &lv_font_cjk_28;
     }
+
+    // Remove any preedit/candidate overlay before its LVGL parent objects are
+    // destroyed and recreated for the new terminal font geometry.
+    ime_ui_hide();
 
     // Update terminal geometry variables
     term_set_font_size(font_w, font_h);
