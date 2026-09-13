@@ -46,13 +46,12 @@ int main()
     const char *phrase_input = "atamaKara";
     for (size_t i = 0; phrase_input[i] != '\0'; ++i) {
         phrase_commit += ime.input_text(&phrase_input[i], 1).commit;
-        if (i < 5) assert(phrase_commit.empty());
+        assert(phrase_commit.empty());
     }
-    assert(phrase_commit == "あたま");
     assert(ime.is_conversion_active());
     assert(!ime.is_okuri_active());
-    assert(ime.preedit_text() == "▽から");
-    ime.input_key(ime_key_t::ESCAPE);
+    assert(ime.preedit_text() == "あたまから");
+    assert(ime.input_key(ime_key_t::ENTER).commit == "あたまから");
 
     // q toggles direct Hiragana/Katakana mode without contacting the peer.
     ime_result_t kata_on = type(ime, "q");
@@ -70,7 +69,7 @@ int main()
     assert(conversion_start.commit.empty());
     assert(ime.is_conversion_active());
     assert(!ime.is_okuri_active());
-    assert(ime.preedit_text() == "▽かんじ");
+    assert(ime.preedit_text() == "かんじ");
     ime_result_t search = ime.input_key(ime_key_t::SPACE);
     assert(search.consumed && search.changed && search.commit.empty());
     assert(ime.state() == ime_state_t::CANDIDATE);
@@ -87,7 +86,7 @@ int main()
     type(ime, "MiRu");
     assert(ime.is_conversion_active());
     assert(ime.is_okuri_active());
-    assert(ime.preedit_text() == "▽み・る");
+    assert(ime.preedit_text() == "み / る");
     ime_result_t okuri_search = ime.input_key(ime_key_t::SPACE);
     assert(okuri_search.consumed && okuri_search.changed);
     assert(ime.candidate_count() == 2);
@@ -108,9 +107,21 @@ int main()
     ime_result_t cancel = ime.input_key(ime_key_t::ESCAPE);
     assert(cancel.consumed && cancel.changed);
     assert(ime.state() == ime_state_t::COMPOSING);
-    assert(ime.preedit_text() == "▽み・る");
+    assert(ime.preedit_text() == "み / る");
     ime.input_key(ime_key_t::ESCAPE);
     assert(ime.state() == ime_state_t::IDLE);
+
+    // A lowercase reading followed by an uppercase input remains entirely
+    // local; neither the initial reading nor the following kana is sent.
+    std::string mi_ru_commit;
+    const char *mi_ru = "miRu";
+    for (size_t i = 0; mi_ru[i] != '\0'; ++i) {
+        mi_ru_commit += ime.input_text(&mi_ru[i], 1).commit;
+        assert(mi_ru_commit.empty());
+    }
+    assert(ime.is_conversion_active());
+    assert(ime.preedit_text() == "みる");
+    assert(ime.input_key(ime_key_t::ENTER).commit == "みる");
 
     // Romaji edge cases in direct mode remain pending until Enter.
     assert(type(ime, "ssha").commit.empty());

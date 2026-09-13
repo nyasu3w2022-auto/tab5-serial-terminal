@@ -206,10 +206,12 @@ bool ime_skk_t::is_okuri_active() const
 std::string ime_skk_t::preedit_text() const
 {
     if (s_conversion_active) {
-        std::string text = "▽";
-        text += s_kana;
+        // Conversion state is identified by the overlay status line.  Keep
+        // this text ASCII-marker-free because the terminal CJK font does not
+        // provide every SKK-specific symbol on every configured font size.
+        std::string text = s_kana;
         if (s_okuri_active) {
-            text += "・";
+            text += " / ";
             text += s_okuri_kana;
         }
         text += s_romaji;
@@ -480,11 +482,10 @@ ime_result_t ime_skk_t::input_text(const char *text, size_t len)
             char lower = (char)std::tolower(byte);
 
             if (uppercase && !s_conversion_active) {
-                // First uppercase begins SKK conversion.  Commit any direct
-                // kana that was completed before this keystroke.
+                // First uppercase begins a local SKK conversion.  Preserve
+                // preceding direct kana in s_kana: it is part of the same
+                // local conversion/preedit sequence and must not be sent.
                 flush_romaji(true);
-                result.commit += direct_commit_text();
-                s_kana.clear();
                 s_conversion_active = true;
                 s_okuri_active = false;
                 s_okuri_initial = '\0';
@@ -514,10 +515,9 @@ ime_result_t ime_skk_t::input_text(const char *text, size_t len)
             }
         }
 
-        // Keep direct kana local until an explicit delimiter (Enter/Space) or
-        // a subsequent uppercase conversion start.  This avoids sending each
-        // kana as its final romaji syllable completes and keeps TAB5's local
-        // input behaviour coherent with the conversion overlay.
+        // Keep direct kana local until an explicit delimiter.  A subsequent
+        // uppercase starts local conversion and retains preceding kana in the
+        // same overlay; it does not transmit the pending text.
         update_state();
         result.changed = true;
     }
