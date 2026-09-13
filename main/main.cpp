@@ -56,6 +56,14 @@ static ime_skk_t s_ime;
 static bool s_japanese_input_active = false;
 static constexpr const char *SKK_DICT_PATH = "/skk/SKK-JISYO.S.txt";
 
+static void refresh_ime_input_indicator(void)
+{
+    display_set_japanese_input_mode(
+        s_japanese_input_active,
+        s_japanese_input_active && s_ime.kana_mode() == ime_kana_mode_t::KATAKANA);
+    update_status_bar();
+}
+
 static void set_japanese_input_active(bool active)
 {
     if (s_japanese_input_active != active) {
@@ -63,8 +71,7 @@ static void set_japanese_input_active(bool active)
         ime_ui_hide();
     }
     s_japanese_input_active = active;
-    display_set_japanese_input_active(active);
-    update_status_bar();
+    refresh_ime_input_indicator();
 }
 
 static void init_ime_dictionary_storage(void)
@@ -231,7 +238,10 @@ static bool ime_handle_special_key(const char *name)
     ime_result_t result = s_ime.input_key(key);
     if (!result.consumed) return false;
     if (!result.commit.empty()) transmit_ime_commit(result.commit);
-    if (result.changed) ime_ui_update(true, s_ime);
+    if (result.changed) {
+        ime_ui_update(true, s_ime);
+        refresh_ime_input_indicator();
+    }
     return true;
 }
 
@@ -340,7 +350,10 @@ static bool handle_key_event(const key_event_msg_t *msg)
         ime_result_t ime_result = s_ime.input_text(msg->str, text_len);
         if (ime_result.consumed) {
             if (!ime_result.commit.empty()) transmit_ime_commit(ime_result.commit);
-            if (ime_result.changed) ime_ui_update(true, s_ime);
+            if (ime_result.changed) {
+                ime_ui_update(true, s_ime);
+                refresh_ime_input_indicator();
+            }
             return ime_result.changed || !ime_result.commit.empty();
         }
     }

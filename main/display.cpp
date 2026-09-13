@@ -29,6 +29,7 @@ static lv_obj_t   *term_canvas  = NULL;
 static lv_obj_t   *status_label = NULL;
 static lv_timer_t *cursor_timer = NULL;
 static bool s_japanese_input_active = false;
+static bool s_katakana_input_active = false;
 // Sized for the maximum row count (Small font: 43 rows)
 static lv_obj_t   *row_canvases[TERM_ROWS_MAX]    = {};
 static uint8_t    *row_canvas_bufs[TERM_ROWS_MAX] = {};
@@ -171,13 +172,15 @@ void update_status_bar(void)
              serial_transport_get_name(),
              serial_transport_get_status(),
              serial_transport_get_baud_rate(),
-             s_japanese_input_active ? "JP-SKK" : "Direct");
+             !s_japanese_input_active ? "Direct" :
+             (s_katakana_input_active ? "JP-KATA" : "JP-HIRA"));
     term_update_status(buf);
 }
 
-void display_set_japanese_input_active(bool active)
+void display_set_japanese_input_mode(bool japanese_active, bool katakana_active)
 {
-    s_japanese_input_active = active;
+    s_japanese_input_active = japanese_active;
+    s_katakana_input_active = japanese_active && katakana_active;
 }
 
 static void cursor_blink_cb(lv_timer_t *timer)

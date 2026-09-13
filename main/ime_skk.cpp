@@ -6,7 +6,6 @@
 
 #include "ime_skk.h"
 
-#include <algorithm>
 #include <cctype>
 #include <cstdint>
 #include <cstdio>
@@ -19,8 +18,8 @@ struct romaji_entry_t {
     const char *kana;
 };
 
-// Longest alternatives must be considered first.  This table deliberately
-// covers common Hepburn/Kunrei input and common small-kana spellings.
+// Longest alternatives are considered first.  The result table is hiragana;
+// direct katakana input is generated from this UTF-8 output afterwards.
 static const romaji_entry_t ROMAJI_TABLE[] = {
     {"kya", "きゃ"}, {"kyu", "きゅ"}, {"kyo", "きょ"},
     {"gya", "ぎゃ"}, {"gyu", "ぎゅ"}, {"gyo", "ぎょ"},
@@ -50,8 +49,8 @@ static const romaji_entry_t ROMAJI_TABLE[] = {
     {"xwa", "ゎ"}, {"lwa", "ゎ"},
     {"xa",  "ぁ"}, {"xi",  "ぃ"}, {"xu",  "ぅ"}, {"xe",  "ぇ"}, {"xo", "ぉ"},
     {"la",  "ぁ"}, {"li",  "ぃ"}, {"lu",  "ぅ"}, {"le",  "ぇ"}, {"lo", "ぉ"},
-    {"ka",  "か"}, {"ki",  "き"}, {"ku",  "く"}, {"ke",  "け"}, {"ko", "こ"},
-    {"ga",  "が"}, {"gi",  "ぎ"}, {"gu",  "ぐ"}, {"ge",  "げ"}, {"go", "ご"},
+    {"ka",  "か"}, {"ki",  "き"}, {"ku", "く"}, {"ke", "け"}, {"ko", "こ"},
+    {"ga",  "が"}, {"gi",  "ぎ"}, {"gu", "ぐ"}, {"ge", "げ"}, {"go", "ご"},
     {"sa",  "さ"}, {"shi", "し"}, {"si", "し"}, {"su", "す"}, {"se", "せ"}, {"so", "そ"},
     {"za",  "ざ"}, {"zi",  "じ"}, {"ji", "じ"}, {"zu", "ず"}, {"ze", "ぜ"}, {"zo", "ぞ"},
     {"ta",  "た"}, {"chi", "ち"}, {"ti", "ち"}, {"tsu", "つ"}, {"tu", "つ"}, {"te", "て"}, {"to", "と"},
@@ -113,6 +112,47 @@ static void erase_last_utf8(std::string *text)
     text->erase(pos);
 }
 
+static void append_utf8_codepoint(std::string *out, uint32_t cp)
+{
+    if (out == nullptr) return;
+    if (cp <= 0x7F) {
+        out->push_back((char)cp);
+    } else if (cp <= 0x7FF) {
+        out->push_back((char)(0xC0 | (cp >> 6)));
+        out->push_back((char)(0x80 | (cp & 0x3F)));
+    } else {
+        out->push_back((char)(0xE0 | (cp >> 12)));
+        out->push_back((char)(0x80 | ((cp >> 6) & 0x3F)));
+        out->push_back((char)(0x80 | (cp & 0x3F)));
+    }
+}
+
+static std::string hiragana_to_katakana(const std::string &text)
+{
+    std::string out;
+    out.reserve(text.size());
+    for (size_t i = 0; i < text.size();) {
+        unsigned char c = (unsigned char)text[i];
+        if (i + 2 < text.size() && c == 0xE3 &&
+            (((unsigned char)text[i + 1] & 0xC0) == 0x80) &&
+            (((unsigned char)text[i + 2] & 0xC0) == 0x80)) {
+            uint32_t cp = ((uint32_t)(c & 0x0F) << 12) |
+                          ((uint32_t)((unsigned char)text[i + 1] & 0x3F) << 6) |
+                          ((uint32_t)((unsigned char)text[i + 2] & 0x3F));
+            if (cp >= 0x3041 && cp <= 0x3096) {
+                append_utf8_codepoint(&out, cp + 0x60);
+            } else {
+                out.append(text, i, 3);
+            }
+            i += 3;
+        } else {
+            out.push_back((char)c);
+            i++;
+        }
+    }
+    return out;
+}
+
 static const std::string EMPTY_STRING;
 
 }  // namespace
@@ -124,8 +164,7 @@ ime_skk_t::ime_skk_t()
 
 void ime_skk_t::reset()
 {
-    s_kana.clear();
-    s_romaji.clear();
+    clear_composition();
     clear_candidates();
     s_state = ime_state_t::IDLE;
 }
@@ -149,9 +188,37 @@ ime_state_t ime_skk_t::state() const
     return s_state;
 }
 
+ime_kana_mode_t ime_skk_t::kana_mode() const
+{
+    return s_kana_mode;
+}
+
+bool ime_skk_t::is_conversion_active() const
+{
+    return s_conversion_active;
+}
+
+bool ime_skk_t::is_okuri_active() const
+{
+    return s_okuri_active;
+}
+
 std::string ime_skk_t::preedit_text() const
 {
-    return s_kana + s_romaji;
+    if (s_conversion_active) {
+        std::string text = "▽";
+        text += s_kana;
+        if (s_okuri_active) {
+            text += "・";
+            text += s_okuri_kana;
+        }
+        text += s_romaji;
+        return text;
+    }
+
+    std::string text = s_kana;
+    text += s_romaji;
+    return (s_kana_mode == ime_kana_mode_t::KATAKANA) ? hiragana_to_katakana(text) : text;
 }
 
 size_t ime_skk_t::candidate_count() const
@@ -169,6 +236,11 @@ const std::string &ime_skk_t::candidate_at(size_t index) const
     return (index < s_candidate_count) ? s_candidates[index] : EMPTY_STRING;
 }
 
+const std::string &ime_skk_t::okuri_text() const
+{
+    return s_okuri_kana;
+}
+
 void ime_skk_t::clear_candidates()
 {
     for (auto &candidate : s_candidates) candidate.clear();
@@ -176,11 +248,21 @@ void ime_skk_t::clear_candidates()
     s_candidate_index = 0;
 }
 
+void ime_skk_t::clear_composition()
+{
+    s_kana.clear();
+    s_okuri_kana.clear();
+    s_romaji.clear();
+    s_okuri_initial = '\0';
+    s_conversion_active = false;
+    s_okuri_active = false;
+}
+
 void ime_skk_t::update_state()
 {
     if (s_candidate_count > 0) {
         s_state = ime_state_t::CANDIDATE;
-    } else if (!s_kana.empty() || !s_romaji.empty()) {
+    } else if (s_conversion_active || !s_kana.empty() || !s_okuri_kana.empty() || !s_romaji.empty()) {
         s_state = ime_state_t::COMPOSING;
     } else {
         s_state = ime_state_t::IDLE;
@@ -190,24 +272,22 @@ void ime_skk_t::update_state()
 void ime_skk_t::append_hiragana(const char *utf8)
 {
     if (utf8 == nullptr) return;
+    std::string *target = s_okuri_active ? &s_okuri_kana : &s_kana;
     size_t len = strlen(utf8);
-    if (s_kana.size() + len <= MAX_READING_BYTES) {
-        s_kana.append(utf8, len);
-    }
+    size_t used = s_kana.size() + s_okuri_kana.size();
+    if (used + len <= MAX_READING_BYTES) target->append(utf8, len);
 }
 
 void ime_skk_t::flush_romaji(bool literal_fallback)
 {
     process_romaji();
     if (literal_fallback && !s_romaji.empty()) {
-        // A trailing n/nn is a completed ん when the user asks to convert or
-        // commit.  Preserve all other unsupported fragments literally.
         while (!s_romaji.empty()) {
             if (s_romaji[0] == 'n') {
                 append_hiragana("ん");
                 s_romaji.erase(0, s_romaji.size() >= 2 && s_romaji[1] == 'n' ? 2 : 1);
             } else {
-                if (s_kana.size() < MAX_READING_BYTES) s_kana.push_back(s_romaji[0]);
+                append_hiragana(std::string(1, s_romaji[0]).c_str());
                 s_romaji.erase(0, 1);
             }
         }
@@ -218,7 +298,6 @@ void ime_skk_t::flush_romaji(bool literal_fallback)
 void ime_skk_t::process_romaji()
 {
     while (!s_romaji.empty()) {
-        // A doubled consonant becomes a small tsu, except for nn which is ん.
         if (s_romaji.size() >= 2 && s_romaji[0] == s_romaji[1] &&
             is_consonant(s_romaji[0]) && s_romaji[0] != 'n') {
             append_hiragana("っ");
@@ -226,14 +305,12 @@ void ime_skk_t::process_romaji()
             continue;
         }
 
-        // "tcha" is conventionally entered as っちゃ.
         if (starts_with(s_romaji, "tch")) {
             append_hiragana("っ");
             s_romaji.erase(0, 1);
             continue;
         }
 
-        // n before a non-vowel/non-y consonant, or n' / nn, is ん.
         if (s_romaji[0] == 'n') {
             if (s_romaji.size() >= 2 && s_romaji[1] == '\'') {
                 append_hiragana("ん");
@@ -241,9 +318,6 @@ void ime_skk_t::process_romaji()
                 continue;
             }
             if (s_romaji.size() >= 2 && s_romaji[1] == 'n') {
-                // Keep a terminal "nn" unresolved until the next key: the
-                // following vowel may turn it into ん + な行 (e.g. nni → んに).
-                // flush_romaji() resolves it as ん when composition commits.
                 if (s_romaji.size() < 3) return;
                 append_hiragana("ん");
                 s_romaji.erase(0, strchr("aiueoy", s_romaji[2]) != nullptr ? 1 : 2);
@@ -261,7 +335,6 @@ void ime_skk_t::process_romaji()
         const romaji_entry_t *entry = find_complete_entry(s_romaji);
         if (entry != nullptr) {
             size_t entry_len = strlen(entry->roma);
-            // Keep a sequence such as "sh" until it becomes a complete entry.
             bool longer_prefix = false;
             for (const auto &candidate : ROMAJI_TABLE) {
                 size_t candidate_len = strlen(candidate.roma);
@@ -279,10 +352,8 @@ void ime_skk_t::process_romaji()
             }
         }
 
-        // An incomplete valid prefix must remain visible until the next key.
         if (is_prefix_of_romaji_entry(s_romaji) || s_romaji == "n") return;
 
-        // Preserve unsupported input literally instead of losing it.
         append_hiragana(std::string(1, s_romaji[0]).c_str());
         s_romaji.erase(0, 1);
     }
@@ -293,6 +364,12 @@ void ime_skk_t::erase_last_preedit()
     clear_candidates();
     if (!s_romaji.empty()) {
         s_romaji.pop_back();
+    } else if (s_okuri_active) {
+        erase_last_utf8(&s_okuri_kana);
+        if (s_okuri_kana.empty()) {
+            s_okuri_active = false;
+            s_okuri_initial = '\0';
+        }
     } else {
         erase_last_utf8(&s_kana);
     }
@@ -303,6 +380,9 @@ bool ime_skk_t::search_dictionary()
 {
     clear_candidates();
     if (s_dictionary_path.empty() || s_kana.empty()) return false;
+
+    std::string key = s_kana;
+    if (s_okuri_active && s_okuri_initial != '\0') key.push_back(s_okuri_initial);
 
     FILE *fp = fopen(s_dictionary_path.c_str(), "rb");
     if (fp == nullptr) return false;
@@ -319,8 +399,8 @@ bool ime_skk_t::search_dictionary()
 
         char *separator = strchr(line, ' ');
         if (separator == nullptr) continue;
-        size_t reading_len = (size_t)(separator - line);
-        if (reading_len != s_kana.size() || memcmp(line, s_kana.data(), reading_len) != 0) continue;
+        size_t key_len = (size_t)(separator - line);
+        if (key_len != key.size() || memcmp(line, key.data(), key_len) != 0) continue;
 
         char *p = strchr(separator, '/');
         if (p == nullptr) break;
@@ -336,12 +416,24 @@ bool ime_skk_t::search_dictionary()
             }
             p = end + 1;
         }
-        break;  // SKK entries are unique per exact reading in the initial dictionary.
+        break;
     }
     fclose(fp);
 
     update_state();
     return s_candidate_count > 0;
+}
+
+std::string ime_skk_t::direct_commit_text() const
+{
+    if (s_conversion_active) return EMPTY_STRING;
+    return (s_kana_mode == ime_kana_mode_t::KATAKANA) ? hiragana_to_katakana(s_kana) : s_kana;
+}
+
+std::string ime_skk_t::current_candidate_commit() const
+{
+    if (s_candidate_count == 0) return EMPTY_STRING;
+    return s_candidates[s_candidate_index] + s_okuri_kana;
 }
 
 ime_result_t ime_skk_t::input_text(const char *text, size_t len)
@@ -351,9 +443,8 @@ ime_result_t ime_skk_t::input_text(const char *text, size_t len)
 
     if (s_state == ime_state_t::CANDIDATE && s_candidate_count > 0) {
         result.consumed = true;
-        result.commit = s_candidates[s_candidate_index];
-        s_kana.clear();
-        s_romaji.clear();
+        result.commit = current_candidate_commit();
+        clear_composition();
         clear_candidates();
         s_state = ime_state_t::IDLE;
     }
@@ -363,23 +454,54 @@ ime_result_t ime_skk_t::input_text(const char *text, size_t len)
         if (byte == ' ') {
             ime_result_t space_result = input_key(ime_key_t::SPACE);
             if (space_result.consumed) result.consumed = true;
-            if (!space_result.commit.empty()) result.commit += space_result.commit;
+            result.commit += space_result.commit;
             result.changed = result.changed || space_result.changed;
             continue;
         }
-        result.consumed = true;
-        if (byte >= 0x80) {
-            flush_romaji(true);
-            if (s_kana.size() < MAX_READING_BYTES) s_kana.push_back((char)byte);
-            update_state();
+
+        // In direct kana state, q toggles Hiragana/Katakana.  It is reserved
+        // only when no incomplete romaji remains, so qa/qi/... stay usable
+        // inside an actual composition or conversion reading.
+        if (byte == 'q' && !s_conversion_active && s_kana.empty() && s_romaji.empty()) {
+            s_kana_mode = (s_kana_mode == ime_kana_mode_t::HIRAGANA)
+                        ? ime_kana_mode_t::KATAKANA : ime_kana_mode_t::HIRAGANA;
+            result.consumed = true;
             result.changed = true;
             continue;
         }
 
-        if (std::isalpha(byte) ||
-            (byte == '\'' && s_romaji.size() == 1 && s_romaji[0] == 'n')) {
+        result.consumed = true;
+        if (byte >= 0x80) {
+            flush_romaji(true);
+            append_hiragana(std::string(1, (char)byte).c_str());
+        } else if (std::isalpha(byte) ||
+                   (byte == '\'' && s_romaji.size() == 1 && s_romaji[0] == 'n')) {
+            bool uppercase = std::isupper(byte) != 0;
+            char lower = (char)std::tolower(byte);
+
+            if (uppercase && !s_conversion_active) {
+                // First uppercase begins SKK conversion.  Commit any direct
+                // kana that was completed before this keystroke.
+                flush_romaji(true);
+                result.commit += direct_commit_text();
+                s_kana.clear();
+                s_conversion_active = true;
+                s_okuri_active = false;
+                s_okuri_initial = '\0';
+                s_okuri_kana.clear();
+                s_romaji.clear();
+            } else if (uppercase && s_conversion_active && !s_okuri_active) {
+                // The next uppercase starts the okurigana segment.  Its
+                // lowercase initial is appended to the SKK dictionary key.
+                flush_romaji(true);
+                s_okuri_active = true;
+                s_okuri_initial = lower;
+                s_okuri_kana.clear();
+                s_romaji.clear();
+            }
+
             if (s_romaji.size() < MAX_READING_BYTES) {
-                s_romaji.push_back((char)std::tolower(byte));
+                s_romaji.push_back(lower);
                 process_romaji();
             }
         } else {
@@ -390,6 +512,14 @@ ime_result_t ime_skk_t::input_text(const char *text, size_t len)
             case '-': append_hiragana("ー"); break;
             default:  append_hiragana(std::string(1, (char)byte).c_str()); break;
             }
+        }
+
+        // In direct kana state, completed kana is immediately transmitted,
+        // which is the defining SKK behaviour.  Conversion readings remain
+        // local until Space/Enter chooses a candidate or confirms kana.
+        if (!s_conversion_active && !s_kana.empty()) {
+            result.commit += direct_commit_text();
+            s_kana.clear();
         }
         update_state();
         result.changed = true;
@@ -416,7 +546,7 @@ ime_result_t ime_skk_t::input_key(ime_key_t key)
             result.changed = true;
             return result;
         case ime_key_t::ENTER:
-            result.commit = s_candidates[s_candidate_index];
+            result.commit = current_candidate_commit();
             reset();
             result.changed = true;
             return result;
@@ -433,16 +563,46 @@ ime_result_t ime_skk_t::input_key(ime_key_t key)
         }
     }
 
+    if (s_conversion_active) {
+        switch (key) {
+        case ime_key_t::SPACE:
+            flush_romaji(true);
+            search_dictionary();
+            result.changed = true;
+            break;
+        case ime_key_t::ENTER:
+            flush_romaji(true);
+            result.commit = s_kana + s_okuri_kana;
+            reset();
+            result.changed = true;
+            break;
+        case ime_key_t::ESCAPE:
+            reset();
+            result.changed = true;
+            break;
+        case ime_key_t::BACKSPACE:
+            erase_last_preedit();
+            result.changed = true;
+            break;
+        case ime_key_t::LEFT:
+        case ime_key_t::RIGHT:
+            break;
+        }
+        return result;
+    }
+
+    // A direct-mode partial romaji sequence is the only non-idle direct state.
     switch (key) {
     case ime_key_t::SPACE:
         flush_romaji(true);
-        search_dictionary();
+        result.commit = direct_commit_text() + " ";
+        clear_composition();
         result.changed = true;
         break;
     case ime_key_t::ENTER:
         flush_romaji(true);
-        result.commit = s_kana;
-        reset();
+        result.commit = direct_commit_text() + "\r";
+        clear_composition();
         result.changed = true;
         break;
     case ime_key_t::ESCAPE:
@@ -455,8 +615,6 @@ ime_result_t ime_skk_t::input_key(ime_key_t key)
         break;
     case ime_key_t::LEFT:
     case ime_key_t::RIGHT:
-        // The first version intentionally has no intra-preedit cursor.  Keep
-        // the remote cursor unchanged while composition is pending.
         break;
     }
     return result;

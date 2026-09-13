@@ -38,13 +38,20 @@ enum class ime_state_t {
     CANDIDATE,
 };
 
+/** Direct kana output mode, following the standard SKK q toggle. */
+enum class ime_kana_mode_t {
+    HIRAGANA,
+    KATAKANA,
+};
+
 /**
- * @brief Small, bounded SKK-style Japanese input engine.
+ * @brief Small, bounded romaji SKK input engine.
  *
- * Printable ASCII is accepted as romaji and converted to UTF-8 hiragana.
- * `SPACE` searches the configured UTF-8/LF SKK dictionary, while `ENTER`
- * commits the selected candidate or the hiragana preedit text.  The class
- * never accesses LVGL, ESP-IDF or the serial transport directly.
+ * Lowercase romaji creates direct hiragana or katakana text.  An uppercase
+ * initial starts SKK conversion; a subsequent uppercase initial begins an
+ * okurigana segment (`MiRu` -> dictionary key `みr` -> `見る`).  `q` toggles
+ * direct hiragana/katakana input while there is no unfinished composition.
+ * The class never accesses LVGL, ESP-IDF or serial transport directly.
  */
 class ime_skk_t {
 public:
@@ -54,7 +61,7 @@ public:
 
     ime_skk_t();
 
-    /** Reset unfinished composition and candidate selection. */
+    /** Reset unfinished composition and candidates; retain the kana mode. */
     void reset();
 
     /** Configure the UTF-8/LF SKK dictionary path. Passing NULL disables it. */
@@ -72,7 +79,16 @@ public:
     /** Current state for the UI. */
     ime_state_t state() const;
 
-    /** Hiragana and incomplete romaji to show as preedit text. */
+    /** Current direct kana output mode. */
+    ime_kana_mode_t kana_mode() const;
+
+    /** True while an SKK conversion reading or candidate is active. */
+    bool is_conversion_active() const;
+
+    /** True while entering an SKK okurigana tail. */
+    bool is_okuri_active() const;
+
+    /** Text to show as preedit. Direct katakana is rendered in katakana. */
     std::string preedit_text() const;
 
     /** Number of currently available conversion candidates. */
@@ -81,23 +97,38 @@ public:
     /** Index of the highlighted candidate, or 0 with no candidates. */
     size_t candidate_index() const;
 
-    /** Candidate at index, or an empty string for an out-of-range index. */
+    /** Candidate stem at index, or an empty string for an out-of-range index. */
     const std::string &candidate_at(size_t index) const;
+
+    /** Okurigana tail for UI display and candidate confirmation. */
+    const std::string &okuri_text() const;
 
 private:
     std::string s_dictionary_path;
+
+    // Internal readings are always hiragana.  Katakana conversion is applied
+    // only to direct (non-SKK-conversion) display and commit output.
     std::string s_kana;
+    std::string s_okuri_kana;
     std::string s_romaji;
+    char        s_okuri_initial = '\0';
+    bool        s_conversion_active = false;
+    bool        s_okuri_active = false;
+    ime_kana_mode_t s_kana_mode = ime_kana_mode_t::HIRAGANA;
+
     std::array<std::string, MAX_CANDIDATES> s_candidates;
     size_t s_candidate_count = 0;
     size_t s_candidate_index = 0;
     ime_state_t s_state = ime_state_t::IDLE;
 
     void clear_candidates();
+    void clear_composition();
     void update_state();
     void append_hiragana(const char *utf8);
     void flush_romaji(bool literal_fallback);
     void process_romaji();
     void erase_last_preedit();
     bool search_dictionary();
+    std::string direct_commit_text() const;
+    std::string current_candidate_commit() const;
 };

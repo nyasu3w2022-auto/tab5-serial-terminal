@@ -60,4 +60,4 @@ void term_refresh_display(void);
 void update_status_bar(void);
 
 /** Set the local keyboard input mode indicator shown in the status bar. */
-void display_set_japanese_input_active(bool active);
+void display_set_japanese_input_mode(bool japanese_active, bool katakana_active);
