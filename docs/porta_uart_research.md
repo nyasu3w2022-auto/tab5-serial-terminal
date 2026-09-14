@@ -13,7 +13,7 @@ M5Stack公式のTab5ハードウェア資料では、HY2.0-4P Port Aの配線は
 | 黄 | Port A data | GPIO53 | Tab5 TX（接続先RXへ） |
 | 白 | Port A data | GPIO54 | Tab5 RX（接続先TXから） |
 
-GPIO53/54は標準ではユーザーI2Cバスとしても利用可能である。UARTとして使用する間は、同じPort A上のI2C機器を併用してはならない。
+GPIO53/54は標準ではユーザーI2Cバスとしても利用可能である。本プロジェクトでPort A UARTを選択した場合は、当該ピンをUART信号として使用する。I2C拡張機器を使う構成では、USBシリアルまたはMBUS UART2を選択する。
 
 ## 実装方針
 
