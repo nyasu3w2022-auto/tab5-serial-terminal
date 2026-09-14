@@ -23,6 +23,7 @@ static const char *KEY_LOG    = "log_level";
 static const char *KEY_FONT   = "font_size";
 static const char *KEY_LOCAL_ECHO = "local_echo";
 static const char *KEY_INPUT_MODE = "input_mode";
+static const char *KEY_PUNCTUATION = "punct";
 
 // ==============================================================
 // Load
@@ -37,6 +38,7 @@ void settings_load(app_settings_t *out)
     out->font_size  = SETTINGS_DEFAULT_FONT_SIZE;
     out->local_echo = SETTINGS_DEFAULT_LOCAL_ECHO;
     out->input_mode = SETTINGS_DEFAULT_INPUT_MODE;
+    out->punctuation_style = SETTINGS_DEFAULT_PUNCTUATION_STYLE;
 
     nvs_handle_t h;
     esp_err_t err = nvs_open(NVS_NS, NVS_READONLY, &h);
@@ -74,11 +76,17 @@ void settings_load(app_settings_t *out)
         out->input_mode = (v8 == (uint8_t)INPUT_MODE_JAPANESE)
                           ? INPUT_MODE_JAPANESE : INPUT_MODE_DIRECT;
     }
+    if (nvs_get_u8(h, KEY_PUNCTUATION, &v8) == ESP_OK) {
+        out->punctuation_style = (v8 <= (uint8_t)PUNCTUATION_FULLWIDTH)
+                                 ? (app_punctuation_style_t)v8
+                                 : SETTINGS_DEFAULT_PUNCTUATION_STYLE;
+    }
 
     nvs_close(h);
-    ESP_LOGI(TAG, "Settings loaded: baud=%"PRIu32" iface=%d log=%d font=%d local_echo=%d input_mode=%d",
+    ESP_LOGI(TAG, "Settings loaded: baud=%"PRIu32" iface=%d log=%d font=%d local_echo=%d input_mode=%d punct=%d",
              out->baud_rate, (int)out->serial_if, (int)out->log_level,
-             (int)out->font_size, (int)out->local_echo, (int)out->input_mode);
+             (int)out->font_size, (int)out->local_echo, (int)out->input_mode,
+             (int)out->punctuation_style);
 }
 
 // ==============================================================
@@ -101,13 +109,15 @@ bool settings_save(const app_settings_t *s)
     ok &= (nvs_set_u8 (h, KEY_FONT,  (uint8_t)s->font_size)  == ESP_OK);
     ok &= (nvs_set_u8 (h, KEY_LOCAL_ECHO, (uint8_t)s->local_echo) == ESP_OK);
     ok &= (nvs_set_u8 (h, KEY_INPUT_MODE, (uint8_t)s->input_mode) == ESP_OK);
+    ok &= (nvs_set_u8 (h, KEY_PUNCTUATION, (uint8_t)s->punctuation_style) == ESP_OK);
     ok &= (nvs_commit(h) == ESP_OK);
 
     nvs_close(h);
     if (ok) {
-        ESP_LOGI(TAG, "Settings saved: baud=%"PRIu32" iface=%d log=%d font=%d local_echo=%d input_mode=%d",
+        ESP_LOGI(TAG, "Settings saved: baud=%"PRIu32" iface=%d log=%d font=%d local_echo=%d input_mode=%d punct=%d",
                  s->baud_rate, (int)s->serial_if, (int)s->log_level,
-                 (int)s->font_size, (int)s->local_echo, (int)s->input_mode);
+                 (int)s->font_size, (int)s->local_echo, (int)s->input_mode,
+                 (int)s->punctuation_style);
     } else {
         ESP_LOGE(TAG, "Settings save failed (partial write)");
     }

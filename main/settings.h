@@ -59,6 +59,13 @@ typedef enum {
     INPUT_MODE_JAPANESE = 1,  /**< Use TAB5 local Japanese input at startup */
 } app_input_mode_t;
 
+/** Punctuation conversion used while TAB5 Japanese input is active. */
+typedef enum {
+    PUNCTUATION_JAPANESE = 0, /**< . , - → 。 、 ー */
+    PUNCTUATION_ASCII    = 1, /**< . , - remain ASCII */
+    PUNCTUATION_FULLWIDTH = 2, /**< . , - → ． ， － */
+} app_punctuation_style_t;
+
 // ==============================================================
 // Settings Structure
 // ==============================================================
@@ -70,6 +77,7 @@ typedef struct {
     app_font_size_t font_size;   /**< Terminal font size (Small or Large)   */
     local_echo_t    local_echo;  /**< Local TAB5 keyboard echo setting       */
     app_input_mode_t input_mode; /**< Default local keyboard input mode       */
+    app_punctuation_style_t punctuation_style; /**< Japanese input punctuation style */
 } app_settings_t;
 
 // ==============================================================
@@ -82,6 +90,7 @@ typedef struct {
 #define SETTINGS_DEFAULT_FONT_SIZE  FONT_SIZE_LARGE
 #define SETTINGS_DEFAULT_LOCAL_ECHO LOCAL_ECHO_OFF
 #define SETTINGS_DEFAULT_INPUT_MODE INPUT_MODE_DIRECT
+#define SETTINGS_DEFAULT_PUNCTUATION_STYLE PUNCTUATION_JAPANESE
 
 // ==============================================================
 // API

@@ -24,7 +24,8 @@ struct ime_result_t {
 /** Non-printable key operations understood by the IME. */
 enum class ime_key_t {
     SPACE,
-    ENTER,
+    ENTER,        /**< Commit direct kana and append terminal CR. */
+    COMMIT,       /**< Commit locally without appending a terminal CR (Ctrl+J). */
     ESCAPE,
     BACKSPACE,
     LEFT,
@@ -42,6 +43,13 @@ enum class ime_state_t {
 enum class ime_kana_mode_t {
     HIRAGANA,
     KATAKANA,
+};
+
+/** Punctuation conversion applied during Japanese input. */
+enum class ime_punctuation_style_t {
+    JAPANESE,
+    ASCII,
+    FULLWIDTH,
 };
 
 /**
@@ -64,11 +72,20 @@ public:
     /** Reset unfinished composition and candidates; retain the kana mode. */
     void reset();
 
-    /** Configure the UTF-8/LF SKK dictionary path. Passing NULL disables it. */
+    /** Configure the read-only UTF-8/LF system SKK dictionary path. Passing NULL disables it. */
     void set_dictionary_path(const char *path);
 
-    /** Returns true when the configured dictionary can be opened for reading. */
+    /** Configure the writable UTF-8/LF user dictionary path. Passing NULL disables learning. */
+    void set_user_dictionary_path(const char *path);
+
+    /** Set the punctuation conversion profile used in Japanese input mode. */
+    void set_punctuation_style(ime_punctuation_style_t style);
+
+    /** Returns true when the configured system dictionary can be opened for reading. */
     bool dictionary_available() const;
+
+    /** Returns true when a user dictionary file currently exists. */
+    bool user_dictionary_available() const;
 
     /** Process a printable ASCII/UTF-8 keyboard event in Japanese mode. */
     ime_result_t input_text(const char *text, size_t len);
@@ -88,6 +105,9 @@ public:
     /** True while entering an SKK okurigana tail. */
     bool is_okuri_active() const;
 
+    /** True in temporary ASCII entry mode, entered by l with no preedit. */
+    bool is_ascii_mode() const;
+
     /** Text to show as preedit. Direct katakana is rendered in katakana. */
     std::string preedit_text() const;
 
@@ -105,6 +125,7 @@ public:
 
 private:
     std::string s_dictionary_path;
+    std::string s_user_dictionary_path;
 
     // Internal readings are always hiragana.  Katakana conversion is applied
     // only to direct (non-SKK-conversion) display and commit output.
@@ -115,6 +136,9 @@ private:
     bool        s_conversion_active = false;
     bool        s_okuri_active = false;
     ime_kana_mode_t s_kana_mode = ime_kana_mode_t::HIRAGANA;
+    ime_punctuation_style_t s_punctuation_style = ime_punctuation_style_t::JAPANESE;
+    bool        s_ascii_mode = false;
+    bool        s_z_prefix = false;
 
     std::array<std::string, MAX_CANDIDATES> s_candidates;
     size_t s_candidate_count = 0;
@@ -129,8 +153,12 @@ private:
     void process_romaji();
     void erase_last_preedit();
     bool search_dictionary();
-    bool search_dictionary_key(const std::string &key);
-    bool search_dictionary_okuri_family(const std::string &reading);
+    bool search_dictionary_key(const std::string &path, const std::string &key);
+    bool search_dictionary_okuri_family(const std::string &path, const std::string &reading);
+    bool append_candidate(const char *candidate, size_t len);
+    bool learn_current_candidate();
+    bool update_user_dictionary(const std::string &key, const std::string &candidate);
+    std::string current_dictionary_key() const;
     std::string direct_commit_text() const;
     std::string current_candidate_commit() const;
 };

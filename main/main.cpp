@@ -55,6 +55,7 @@ static app_settings_t s_settings = {};
 static ime_skk_t s_ime;
 static bool s_japanese_input_active = false;
 static constexpr const char *SKK_DICT_PATH = "/skk/SKK-JISYO.S.txt";
+static constexpr const char *SKK_USER_DICT_PATH = "/skk/SKK-JISYO.user.txt";
 
 static void refresh_ime_input_indicator(void)
 {
@@ -62,6 +63,22 @@ static void refresh_ime_input_indicator(void)
         s_japanese_input_active,
         s_japanese_input_active && s_ime.kana_mode() == ime_kana_mode_t::KATAKANA);
     update_status_bar();
+}
+
+static void apply_ime_punctuation_style(app_punctuation_style_t style)
+{
+    switch (style) {
+    case PUNCTUATION_ASCII:
+        s_ime.set_punctuation_style(ime_punctuation_style_t::ASCII);
+        break;
+    case PUNCTUATION_FULLWIDTH:
+        s_ime.set_punctuation_style(ime_punctuation_style_t::FULLWIDTH);
+        break;
+    case PUNCTUATION_JAPANESE:
+    default:
+        s_ime.set_punctuation_style(ime_punctuation_style_t::JAPANESE);
+        break;
+    }
 }
 
 static void set_japanese_input_active(bool active)
@@ -76,28 +93,47 @@ static void set_japanese_input_active(bool active)
 
 static void init_ime_dictionary_storage(void)
 {
-    esp_vfs_spiffs_conf_t conf = {};
-    conf.base_path = "/skk";
-    conf.partition_label = "storage";
-    conf.max_files = 2;
-    conf.format_if_mount_failed = false;
+    // The bundled dictionary is immutable firmware content.  Learned user
+    // candidates live in a separate runtime-writable SPIFFS partition, so a
+    // subsequent dictionary image flash does not erase them.
+    esp_vfs_spiffs_conf_t system_conf = {};
+    system_conf.base_path = "/skk";
+    system_conf.partition_label = "skk";
+    system_conf.max_files = 1;
+    system_conf.format_if_mount_failed = false;
 
-    esp_err_t err = esp_vfs_spiffs_register(&conf);
+    esp_err_t err = esp_vfs_spiffs_register(&system_conf);
     if (err != ESP_OK) {
-        ESP_LOGW(TAG, "SKK SPIFFS mount unavailable: %s", esp_err_to_name(err));
+        ESP_LOGW(TAG, "SKK system SPIFFS mount unavailable: %s", esp_err_to_name(err));
         s_ime.set_dictionary_path(NULL);
+        s_ime.set_user_dictionary_path(NULL);
         return;
     }
 
+    esp_vfs_spiffs_conf_t user_conf = {};
+    user_conf.base_path = "/skk-user";
+    user_conf.partition_label = "userdict";
+    user_conf.max_files = 1;
+    // A newly flashed user partition is intentionally blank. Format it once
+    // on first boot, but never format the system dictionary partition.
+    user_conf.format_if_mount_failed = true;
+    esp_err_t user_err = esp_vfs_spiffs_register(&user_conf);
+
     s_ime.set_dictionary_path(SKK_DICT_PATH);
+    s_ime.set_user_dictionary_path(user_err == ESP_OK ? SKK_USER_DICT_PATH : NULL);
     size_t total = 0;
     size_t used = 0;
-    if (esp_spiffs_info(conf.partition_label, &total, &used) == ESP_OK) {
-        ESP_LOGI(TAG, "SKK SPIFFS mounted: used=%u/%u bytes",
+    if (esp_spiffs_info(system_conf.partition_label, &total, &used) == ESP_OK) {
+        ESP_LOGI(TAG, "SKK system SPIFFS mounted: used=%u/%u bytes",
                  (unsigned)used, (unsigned)total);
+    }
+    if (user_err != ESP_OK) {
+        ESP_LOGW(TAG, "SKK user dictionary disabled: %s", esp_err_to_name(user_err));
     }
     if (s_ime.dictionary_available()) {
         ESP_LOGI(TAG, "SKK dictionary ready: %s", SKK_DICT_PATH);
+        ESP_LOGI(TAG, "SKK user dictionary: %s",
+                 s_ime.user_dictionary_available() ? "loaded" : "will be created on first learned candidate");
     } else {
         ESP_LOGW(TAG, "SKK dictionary not found: %s (hiragana input remains available)",
                  SKK_DICT_PATH);
@@ -110,6 +146,7 @@ static void on_settings_saved(const app_settings_t *saved)
 {
     if (saved) {
         s_settings = *saved;
+        apply_ime_punctuation_style(s_settings.punctuation_style);
         set_japanese_input_active(s_settings.input_mode == INPUT_MODE_JAPANESE);
         if (s_japanese_input_active && s_ime.state() != ime_state_t::IDLE) {
             ime_ui_update(true, s_ime);
@@ -216,6 +253,30 @@ static bool transmit_ime_commit(const std::string &text)
     return true;
 }
 
+static void ime_cancel_before_remote_input(void)
+{
+    if (!s_japanese_input_active || s_ime.state() == ime_state_t::IDLE) return;
+
+    // A remote terminal editing command cannot operate on TAB5's local
+    // preedit.  Discard the local preedit first so the overlay and remote
+    // line cannot silently diverge.
+    s_ime.reset();
+    ime_ui_update(true, s_ime);
+    refresh_ime_input_indicator();
+}
+
+static bool ime_commit_without_terminal_cr(void)
+{
+    if (!s_japanese_input_active || s_ime.state() == ime_state_t::IDLE) return false;
+
+    ime_result_t result = s_ime.input_key(ime_key_t::COMMIT);
+    if (!result.consumed) return false;
+    if (!result.commit.empty()) transmit_ime_commit(result.commit);
+    ime_ui_update(true, s_ime);
+    refresh_ime_input_indicator();
+    return true;
+}
+
 static bool ime_handle_special_key(const char *name)
 {
     if (!s_japanese_input_active) return false;
@@ -298,27 +359,40 @@ static bool handle_key_event(const key_event_msg_t *msg)
         char k = (char)toupper((unsigned char)msg->str[0]);
 
         if (k == 'C') {
-            // Ctrl+C: clear screen locally
+            // Ctrl+C: clear screen locally. Clear a local preedit first so it
+            // cannot remain as an overlay over the newly cleared terminal.
+            ime_cancel_before_remote_input();
             term_clear_all();
             const char *m = "\033[1;32m[Screen cleared]\033[0m\n";
             for (const char *p = m; *p; p++) vt100_process_byte((uint8_t)*p);
             return true;
         }
         if (k == 'L') {
-            // Ctrl+L: force full redisplay
+            // Ctrl+L: force full redisplay. It must not leave an unrelated
+            // local preedit active after the terminal is redrawn.
+            ime_cancel_before_remote_input();
             term_mark_all_dirty();
+            return true;
+        }
+        if (k == 'J' && ime_commit_without_terminal_cr()) {
+            // Ctrl+J is the standard SKK confirmation key.  It commits the
+            // local reading/candidate but intentionally does not send LF/CR.
             return true;
         }
 
         // Ctrl+ESC → send ESC
         if (strcasecmp(msg->str, "escape") == 0 || strcasecmp(msg->str, "esc") == 0) {
+            ime_cancel_before_remote_input();
             uint8_t esc = 0x1B;
             serial_transport_tx(&esc, 1);
             return false;
         }
 
-        // Other Ctrl+key: send as control character (e.g. Ctrl+D → 0x04)
+        // Other Ctrl+key: send as control character (e.g. Ctrl+D → 0x04).
+        // Cancel any local preedit first because the remote application will
+        // act on this control byte independently of the IME.
         if (k >= '@' && k <= '_') {
+            ime_cancel_before_remote_input();
             uint8_t ctrl_char = (uint8_t)(k - '@');
             serial_transport_tx(&ctrl_char, 1);
         }
@@ -327,6 +401,7 @@ static bool handle_key_event(const key_event_msg_t *msg)
 
     // ---- Alt-only combinations: send ESC + key (standard terminal convention) ----
     if (alt) {
+        ime_cancel_before_remote_input();
         uint8_t esc = 0x1B;
         serial_transport_tx(&esc, 1);
         // Fall through to send the key itself
@@ -336,6 +411,10 @@ static bool handle_key_event(const key_event_msg_t *msg)
     for (int i = 0; s_special_keys[i].name != NULL; i++) {
         if (strcasecmp(msg->str, s_special_keys[i].name) == 0) {
             if (!alt && ime_handle_special_key(msg->str)) return true;
+            // Tab, Delete, navigation, function keys and Alt-modified keys
+            // are terminal operations.  They must not leave an unrelated
+            // local IME preedit visible after their VT100 sequence is sent.
+            ime_cancel_before_remote_input();
             const char *seq = s_special_keys[i].seq;
             esp_err_t err = serial_transport_tx((const uint8_t *)seq, strlen(seq));
             return (err == ESP_OK) && !alt && local_echo_special_key(msg->str);
@@ -392,6 +471,7 @@ extern "C" void app_main(void)
 
     // ---- Load settings from NVS ----
     settings_load(&s_settings);
+    apply_ime_punctuation_style(s_settings.punctuation_style);
     settings_ui_set_saved_cb(on_settings_saved);
 
     // ---- Apply font size from settings BEFORE ui_create() ----

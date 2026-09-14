@@ -155,6 +155,49 @@ static std::string hiragana_to_katakana(const std::string &text)
 
 static const std::string EMPTY_STRING;
 
+static const char *z_symbol(char input)
+{
+    switch (input) {
+    case '/': return "・";
+    case '-': return "〜";
+    case '.': return "…";
+    case ',': return "‥";
+    case '[': return "『";
+    case ']': return "』";
+    case '{': return "【";
+    case '}': return "】";
+    case '!': return "！";
+    case '?': return "？";
+    default:  return nullptr;
+    }
+}
+
+static const char *punctuation_text(ime_punctuation_style_t style, char input)
+{
+    if (style == ime_punctuation_style_t::ASCII) {
+        switch (input) {
+        case '.': return ".";
+        case ',': return ",";
+        case '-': return "-";
+        default: return nullptr;
+        }
+    }
+    if (style == ime_punctuation_style_t::FULLWIDTH) {
+        switch (input) {
+        case '.': return "．";
+        case ',': return "，";
+        case '-': return "－";
+        default: return nullptr;
+        }
+    }
+    switch (input) {
+    case '.': return "。";
+    case ',': return "、";
+    case '-': return "ー";
+    default: return nullptr;
+    }
+}
+
 }  // namespace
 
 ime_skk_t::ime_skk_t()
@@ -166,6 +209,8 @@ void ime_skk_t::reset()
 {
     clear_composition();
     clear_candidates();
+    s_ascii_mode = false;
+    s_z_prefix = false;
     s_state = ime_state_t::IDLE;
 }
 
@@ -174,10 +219,29 @@ void ime_skk_t::set_dictionary_path(const char *path)
     s_dictionary_path = path ? path : "";
 }
 
+void ime_skk_t::set_user_dictionary_path(const char *path)
+{
+    s_user_dictionary_path = path ? path : "";
+}
+
+void ime_skk_t::set_punctuation_style(ime_punctuation_style_t style)
+{
+    s_punctuation_style = style;
+}
+
 bool ime_skk_t::dictionary_available() const
 {
     if (s_dictionary_path.empty()) return false;
     FILE *fp = fopen(s_dictionary_path.c_str(), "rb");
+    if (fp == nullptr) return false;
+    fclose(fp);
+    return true;
+}
+
+bool ime_skk_t::user_dictionary_available() const
+{
+    if (s_user_dictionary_path.empty()) return false;
+    FILE *fp = fopen(s_user_dictionary_path.c_str(), "rb");
     if (fp == nullptr) return false;
     fclose(fp);
     return true;
@@ -203,8 +267,14 @@ bool ime_skk_t::is_okuri_active() const
     return s_okuri_active;
 }
 
+bool ime_skk_t::is_ascii_mode() const
+{
+    return s_ascii_mode;
+}
+
 std::string ime_skk_t::preedit_text() const
 {
+    if (s_ascii_mode) return "ASCII";
     if (s_conversion_active) {
         // Conversion state is identified by the overlay status line.  Keep
         // this text ASCII-marker-free because the terminal CJK font does not
@@ -258,13 +328,14 @@ void ime_skk_t::clear_composition()
     s_okuri_initial = '\0';
     s_conversion_active = false;
     s_okuri_active = false;
+    s_z_prefix = false;
 }
 
 void ime_skk_t::update_state()
 {
     if (s_candidate_count > 0) {
         s_state = ime_state_t::CANDIDATE;
-    } else if (s_conversion_active || !s_kana.empty() || !s_okuri_kana.empty() || !s_romaji.empty()) {
+    } else if (s_ascii_mode || s_conversion_active || !s_kana.empty() || !s_okuri_kana.empty() || !s_romaji.empty() || s_z_prefix) {
         s_state = ime_state_t::COMPOSING;
     } else {
         s_state = ime_state_t::IDLE;
@@ -381,32 +452,35 @@ void ime_skk_t::erase_last_preedit()
 bool ime_skk_t::search_dictionary()
 {
     clear_candidates();
-    if (s_dictionary_path.empty() || s_kana.empty()) return false;
+    if (s_kana.empty()) return false;
 
-    // Prefer the true SKK okurigana key (for example, みr).  When a user
-    // starts an uppercase segment after already composing direct kana, that
-    // key may not exist; in that case search the whole reading (あたまから)
-    // instead of leaving the composition impossible to convert.
-    std::string key = s_kana;
-    if (s_okuri_active && s_okuri_initial != '\0') key.push_back(s_okuri_initial);
-    if (search_dictionary_key(key)) return true;
+    // A user dictionary is searched first, so learned candidates take
+    // precedence. Results from the bundled dictionary are then appended to
+    // keep standard SKK fallback candidates available.
+    const std::string key = current_dictionary_key();
+    if (!s_user_dictionary_path.empty()) search_dictionary_key(s_user_dictionary_path, key);
+    if (!s_dictionary_path.empty()) search_dictionary_key(s_dictionary_path, key);
+    if (s_candidate_count > 0) return true;
 
     // Some inflected forms start their okurigana with a sokuon (っ), while
-    // SKK-JISYO registers the verb using another inflection's initial letter:
-    // はしr /走/ must also serve HashiTta -> 走った, and いu /言/ must
-    // serve ITta -> 言った.  Search the reading's okuri-key family only for
-    // this special っ case, before falling back to the no-okuri reading.
-    if (s_okuri_active && s_okuri_kana.rfind("っ", 0) == 0 &&
-        search_dictionary_okuri_family(s_kana)) return true;
-    if (s_okuri_active && search_dictionary_key(s_kana)) return true;
+    // SKK-JISYO registers the verb using another inflection's initial letter.
+    if (s_okuri_active && s_okuri_kana.rfind("っ", 0) == 0) {
+        if (!s_user_dictionary_path.empty()) search_dictionary_okuri_family(s_user_dictionary_path, s_kana);
+        if (!s_dictionary_path.empty()) search_dictionary_okuri_family(s_dictionary_path, s_kana);
+        if (s_candidate_count > 0) return true;
+    }
+    if (s_okuri_active) {
+        if (!s_user_dictionary_path.empty()) search_dictionary_key(s_user_dictionary_path, s_kana);
+        if (!s_dictionary_path.empty()) search_dictionary_key(s_dictionary_path, s_kana);
+    }
 
     update_state();
-    return false;
+    return s_candidate_count > 0;
 }
 
-bool ime_skk_t::search_dictionary_okuri_family(const std::string &reading)
+bool ime_skk_t::search_dictionary_okuri_family(const std::string &path, const std::string &reading)
 {
-    FILE *fp = fopen(s_dictionary_path.c_str(), "rb");
+    FILE *fp = fopen(path.c_str(), "rb");
     if (fp == nullptr) return false;
 
     char line[MAX_DICT_LINE_BYTES + 1] = {};
@@ -435,8 +509,7 @@ bool ime_skk_t::search_dictionary_okuri_family(const std::string &reading)
             char *annotation = strchr(p, ';');
             char *candidate_end = (annotation != nullptr && annotation < end) ? annotation : end;
             if (candidate_end > p) {
-                s_candidates[s_candidate_count].assign(p, (size_t)(candidate_end - p));
-                s_candidate_count++;
+                append_candidate(p, (size_t)(candidate_end - p));
             }
             p = end + 1;
         }
@@ -447,9 +520,9 @@ bool ime_skk_t::search_dictionary_okuri_family(const std::string &reading)
     return s_candidate_count > 0;
 }
 
-bool ime_skk_t::search_dictionary_key(const std::string &key)
+bool ime_skk_t::search_dictionary_key(const std::string &path, const std::string &key)
 {
-    FILE *fp = fopen(s_dictionary_path.c_str(), "rb");
+    FILE *fp = fopen(path.c_str(), "rb");
     if (fp == nullptr) return false;
 
     char line[MAX_DICT_LINE_BYTES + 1] = {};
@@ -476,8 +549,7 @@ bool ime_skk_t::search_dictionary_key(const std::string &key)
             char *annotation = strchr(p, ';');
             char *candidate_end = (annotation != nullptr && annotation < end) ? annotation : end;
             if (candidate_end > p) {
-                s_candidates[s_candidate_count].assign(p, (size_t)(candidate_end - p));
-                s_candidate_count++;
+                append_candidate(p, (size_t)(candidate_end - p));
             }
             p = end + 1;
         }
@@ -487,6 +559,95 @@ bool ime_skk_t::search_dictionary_key(const std::string &key)
 
     update_state();
     return s_candidate_count > 0;
+}
+
+bool ime_skk_t::append_candidate(const char *candidate, size_t len)
+{
+    if (candidate == nullptr || len == 0 || s_candidate_count >= MAX_CANDIDATES) return false;
+    for (size_t i = 0; i < s_candidate_count; ++i) {
+        if (s_candidates[i].size() == len && s_candidates[i].compare(0, len, candidate, len) == 0) {
+            return false;
+        }
+    }
+    s_candidates[s_candidate_count].assign(candidate, len);
+    s_candidate_count++;
+    return true;
+}
+
+std::string ime_skk_t::current_dictionary_key() const
+{
+    std::string key = s_kana;
+    if (s_okuri_active && s_okuri_initial != '\0') key.push_back(s_okuri_initial);
+    return key;
+}
+
+bool ime_skk_t::update_user_dictionary(const std::string &key, const std::string &candidate)
+{
+    if (s_user_dictionary_path.empty() || key.empty() || candidate.empty()) return false;
+
+    const std::string temporary_path = s_user_dictionary_path + ".tmp";
+    FILE *out = fopen(temporary_path.c_str(), "wb");
+    if (out == nullptr) return false;
+
+    FILE *in = fopen(s_user_dictionary_path.c_str(), "rb");
+    bool found_key = false;
+    bool ok = true;
+    char line[MAX_DICT_LINE_BYTES + 1] = {};
+    while (in != nullptr && fgets(line, sizeof(line), in) != nullptr) {
+        const size_t line_len = strlen(line);
+        if (line_len == MAX_DICT_LINE_BYTES && line[line_len - 1] != '\n') {
+            int ch = 0;
+            while ((ch = fgetc(in)) != '\n' && ch != EOF) {}
+            continue;
+        }
+        char *separator = strchr(line, ' ');
+        const size_t key_len = separator ? (size_t)(separator - line) : 0;
+        if (separator == nullptr || key_len != key.size() || memcmp(line, key.data(), key_len) != 0) {
+            if (fputs(line, out) < 0) ok = false;
+            continue;
+        }
+
+        found_key = true;
+        char *values = strchr(separator, '/');
+        bool already_present = false;
+        if (values != nullptr) {
+            char *p = values + 1;
+            while (*p != '\0' && *p != '\r' && *p != '\n') {
+                char *end = strchr(p, '/');
+                if (end == nullptr) break;
+                char *annotation = strchr(p, ';');
+                char *candidate_end = (annotation != nullptr && annotation < end) ? annotation : end;
+                if ((size_t)(candidate_end - p) == candidate.size() &&
+                    memcmp(p, candidate.data(), candidate.size()) == 0) {
+                    already_present = true;
+                    break;
+                }
+                p = end + 1;
+            }
+        }
+        if (already_present) {
+            if (fputs(line, out) < 0) ok = false;
+        } else if (values != nullptr) {
+            if (fprintf(out, "%s /%s%s", key.c_str(), candidate.c_str(), values) < 0) ok = false;
+        } else if (fprintf(out, "%s /%s/\n", key.c_str(), candidate.c_str()) < 0) {
+            ok = false;
+        }
+    }
+    if (in != nullptr) fclose(in);
+    if (!found_key && fprintf(out, "%s /%s/\n", key.c_str(), candidate.c_str()) < 0) ok = false;
+    if (fclose(out) != 0) ok = false;
+
+    if (!ok || std::rename(temporary_path.c_str(), s_user_dictionary_path.c_str()) != 0) {
+        remove(temporary_path.c_str());
+        return false;
+    }
+    return true;
+}
+
+bool ime_skk_t::learn_current_candidate()
+{
+    if (s_candidate_count == 0 || s_candidate_index >= s_candidate_count) return false;
+    return update_user_dictionary(current_dictionary_key(), s_candidates[s_candidate_index]);
 }
 
 std::string ime_skk_t::direct_commit_text() const
@@ -506,8 +667,13 @@ ime_result_t ime_skk_t::input_text(const char *text, size_t len)
     ime_result_t result = {};
     if (text == nullptr || len == 0) return result;
 
+    // Temporary ASCII entry is intentionally passed through untouched. The
+    // overlay remains visible until Escape or a terminal special key exits it.
+    if (s_ascii_mode) return result;
+
     if (s_state == ime_state_t::CANDIDATE && s_candidate_count > 0) {
         result.consumed = true;
+        learn_current_candidate();
         result.commit = current_candidate_commit();
         clear_composition();
         clear_candidates();
@@ -521,6 +687,41 @@ ime_result_t ime_skk_t::input_text(const char *text, size_t len)
             if (space_result.consumed) result.consumed = true;
             result.commit += space_result.commit;
             result.changed = result.changed || space_result.changed;
+            continue;
+        }
+
+        // z is a direct-kana symbol prefix. It is held for one following
+        // byte so ordinary romaji such as za continues to work unchanged.
+        if (s_z_prefix) {
+            s_z_prefix = false;
+            const char *symbol = z_symbol((char)byte);
+            if (symbol != nullptr) {
+                append_hiragana(symbol);
+                result.consumed = true;
+                result.changed = true;
+                update_state();
+                continue;
+            }
+            s_romaji.push_back('z');
+        }
+
+        // In direct Japanese input, a lone l enters a temporary ASCII mode.
+        // A second l is then sent literally; Escape returns to kana input.
+        if (byte == 'l' && !s_conversion_active && s_romaji.empty() && s_kana.empty()) {
+            s_ascii_mode = true;
+            result.consumed = true;
+            result.changed = true;
+            update_state();
+            continue;
+        }
+
+        // z is reserved as a symbol prefix only at an empty direct-kana
+        // boundary. All other uses (za, zu, ...) remain normal romaji.
+        if (byte == 'z' && !s_conversion_active && s_romaji.empty()) {
+            s_z_prefix = true;
+            result.consumed = true;
+            result.changed = true;
+            update_state();
             continue;
         }
 
@@ -582,11 +783,11 @@ ime_result_t ime_skk_t::input_text(const char *text, size_t len)
             }
         } else {
             flush_romaji(true);
-            switch (byte) {
-            case '.': append_hiragana("。"); break;
-            case ',': append_hiragana("、"); break;
-            case '-': append_hiragana("ー"); break;
-            default:  append_hiragana(std::string(1, (char)byte).c_str()); break;
+            const char *punctuation = punctuation_text(s_punctuation_style, (char)byte);
+            if (punctuation != nullptr) {
+                append_hiragana(punctuation);
+            } else {
+                append_hiragana(std::string(1, (char)byte).c_str());
             }
         }
 
@@ -604,6 +805,25 @@ ime_result_t ime_skk_t::input_key(ime_key_t key)
     ime_result_t result = {};
 
     if (s_state == ime_state_t::IDLE) return result;
+
+    if (s_ascii_mode) {
+        if (key == ime_key_t::ESCAPE) {
+            reset();
+            result.consumed = true;
+            result.changed = true;
+        }
+        return result;
+    }
+
+    // A standalone z prefix has no symbol suffix. Preserve it as literal
+    // ASCII before another IME operation rather than silently dropping it.
+    // Escape remains a true cancellation of the pending prefix.
+    if (s_z_prefix && key != ime_key_t::ESCAPE) {
+        s_z_prefix = false;
+        append_hiragana("z");
+        update_state();
+    }
+
     result.consumed = true;
 
     if (s_state == ime_state_t::CANDIDATE) {
@@ -618,6 +838,8 @@ ime_result_t ime_skk_t::input_key(ime_key_t key)
             result.changed = true;
             return result;
         case ime_key_t::ENTER:
+        case ime_key_t::COMMIT:
+            learn_current_candidate();
             result.commit = current_candidate_commit();
             reset();
             result.changed = true;
@@ -643,6 +865,7 @@ ime_result_t ime_skk_t::input_key(ime_key_t key)
             result.changed = true;
             break;
         case ime_key_t::ENTER:
+        case ime_key_t::COMMIT:
             flush_romaji(true);
             result.commit = s_kana + s_okuri_kana;
             reset();
@@ -677,8 +900,10 @@ ime_result_t ime_skk_t::input_key(ime_key_t key)
         result.changed = true;
         break;
     case ime_key_t::ENTER:
+    case ime_key_t::COMMIT:
         flush_romaji(true);
-        result.commit = direct_commit_text() + "\r";
+        result.commit = direct_commit_text();
+        if (key == ime_key_t::ENTER) result.commit += "\r";
         clear_composition();
         result.changed = true;
         break;

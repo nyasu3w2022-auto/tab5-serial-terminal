@@ -102,15 +102,17 @@ void ime_ui_update(bool japanese_mode, const ime_skk_t &ime)
     const bool candidates = ime.state() == ime_state_t::CANDIDATE;
     const char *state_text = nullptr;
     if (candidates) {
-        state_text = " SKK: Space/Left/Right=Select  Enter=Commit  Esc=Cancel";
+        state_text = " SKK: Space/Left/Right=Select  Enter/C-J=Commit  Esc=Cancel";
+    } else if (ime.is_ascii_mode()) {
+        state_text = " SKK ASCII: direct key send  Esc=Kana";
     } else if (ime.is_conversion_active() && ime.is_okuri_active()) {
-        state_text = " SKK OKURI: Space=Convert  Enter=Kana  Esc=Cancel";
+        state_text = " SKK OKURI: Space=Convert  Enter=Kana+CR  C-J=Kana  Esc=Cancel";
     } else if (ime.is_conversion_active()) {
-        state_text = " SKK HENKAN: Space=Convert  Enter=Kana  Esc=Cancel";
+        state_text = " SKK HENKAN: Space=Convert  Enter=Kana+CR  C-J=Kana  Esc=Cancel";
     } else if (ime.kana_mode() == ime_kana_mode_t::KATAKANA) {
-        state_text = " SKK KATA: q=Hiragana Commit";
+        state_text = " SKK KATA: q=Hiragana Commit  C-J=Kana";
     } else {
-        state_text = " SKK HIRA: q=Katakana Commit";
+        state_text = " SKK HIRA: q=Katakana Commit  C-J=Kana";
     }
     lv_label_set_text(s_status_label, state_text);
     lv_obj_set_style_text_font(s_preedit_label, active_font(), 0);

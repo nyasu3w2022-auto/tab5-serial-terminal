@@ -12,4 +12,4 @@
 | 上流管理 | https://github.com/skk-dev/dict |
 | ファイル | `SKK-JISYO.S.gz` |
 | 変換 | `iconv -f EUC-JP -t UTF-8`、CRを除去 |
-| 格納先 | ビルド時にSPIFFS `storage` パーティションへ配置され、実行時には `/skk/SKK-JISYO.S.txt` としてマウントされます。 |
+| 格納先 | ビルド時に読み取り専用のSPIFFS `skk` パーティションへ配置され、実行時には `/skk/SKK-JISYO.S.txt` としてマウントされます。確定候補の学習データは別の書換え可能な`userdict`パーティションに `/skk-user/SKK-JISYO.user.txt` として保存されます。 |

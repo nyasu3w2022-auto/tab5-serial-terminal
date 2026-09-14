@@ -43,6 +43,7 @@ static lv_obj_t *s_dd_log        = NULL;  // log level dropdown
 static lv_obj_t *s_dd_font       = NULL;  // font size dropdown
 static lv_obj_t *s_dd_echo       = NULL;  // local echo dropdown
 static lv_obj_t *s_dd_input_mode = NULL;  // default keyboard input mode
+static lv_obj_t *s_dd_punctuation = NULL; // Japanese input punctuation style
 
 // Callback registered by main.cpp to synchronize its current settings copy
 static settings_saved_cb_t s_saved_cb = NULL;
@@ -149,12 +150,18 @@ static void save_close_cb(lv_event_t *e)
     ns.input_mode = (input_mode_idx == (uint16_t)INPUT_MODE_JAPANESE)
                     ? INPUT_MODE_JAPANESE : INPUT_MODE_DIRECT;
 
+    uint16_t punctuation_idx = lv_dropdown_get_selected(s_dd_punctuation);
+    ns.punctuation_style = (punctuation_idx <= (uint16_t)PUNCTUATION_FULLWIDTH)
+                           ? (app_punctuation_style_t)punctuation_idx
+                           : SETTINGS_DEFAULT_PUNCTUATION_STYLE;
+
     // Save to NVS
     settings_save(&ns);
 
-    ESP_LOGI(TAG, "Settings saved: baud=%"PRIu32" iface=%d log=%d font=%d local_echo=%d input_mode=%d",
+    ESP_LOGI(TAG, "Settings saved: baud=%"PRIu32" iface=%d log=%d font=%d local_echo=%d input_mode=%d punct=%d",
              ns.baud_rate, (int)ns.serial_if, (int)ns.log_level,
-             (int)ns.font_size, (int)ns.local_echo, (int)ns.input_mode);
+             (int)ns.font_size, (int)ns.local_echo, (int)ns.input_mode,
+             (int)ns.punctuation_style);
 
     // Close the overlay BEFORE applying settings that rebuild the UI
     // (settings_apply may call ui_rebuild_for_font_size which destroys/recreates
@@ -268,23 +275,28 @@ void settings_ui_open(const app_settings_t *current)
                                  "Direct\nJapanese (SKK)",
                                  (int)current->input_mode);
 
+    // Row 7: Japanese input punctuation conversion
+    s_dd_punctuation = create_row(s_overlay, 424,
+                                  "Punctuation:",
+                                  "Japanese (JP)\nASCII\nFullwidth",
+                                  (int)current->punctuation_style);
+
     // ---- Note ----
     lv_obj_t *note = lv_label_create(s_overlay);
     lv_label_set_text(note,
         "  Note: All settings are applied when Save & Close is pressed.\n"
-        "  Font Size change clears the screen and rebuilds the display.\n"
-        "  Echo Back renders sent keys locally only; no command is sent to the serial peer.\n"
-        "  Japanese (SKK) converts on TAB5; only committed UTF-8 text is sent.\n"
+        "  Punctuation controls . , - only while Japanese (SKK) input is active.\n"
+        "  Echo Back renders sent keys locally only; Japanese (SKK) sends committed UTF-8 only.\n"
         "  PortA UART: GPIO53 (TX) / GPIO54 (RX); MBUS UART2: GPIO6 (TX) / GPIO7 (RX).");
     lv_obj_set_style_text_font(note, &lv_font_unscii_16, 0);
     lv_obj_set_style_text_color(note, lv_color_make(180, 180, 180), 0);
-    lv_obj_set_pos(note, 40, 430);
+    lv_obj_set_pos(note, 40, 490);
     lv_obj_set_width(note, LVGL_W - 80);
 
     // ---- Separator 2 ----
     lv_obj_t *sep2 = lv_obj_create(s_overlay);
     lv_obj_set_size(sep2, LVGL_W, 2);
-    lv_obj_set_pos(sep2, 0, 530);
+    lv_obj_set_pos(sep2, 0, 570);
     lv_obj_set_style_bg_color(sep2, lv_color_make(80, 80, 120), 0);
     lv_obj_set_style_bg_opa(sep2, LV_OPA_COVER, 0);
     lv_obj_set_style_border_width(sep2, 0, 0);
@@ -326,6 +338,7 @@ void settings_ui_close(void)
     s_dd_font  = NULL;
     s_dd_echo  = NULL;
     s_dd_input_mode = NULL;
+    s_dd_punctuation = NULL;
     lvgl_port_unlock();
 
     // Force full terminal redraw so the screen is restored

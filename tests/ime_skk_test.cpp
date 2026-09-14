@@ -15,6 +15,8 @@ static ime_result_t type(ime_skk_t &ime, const char *text)
 int main()
 {
     const char *dict_path = "/tmp/tab5-ime-test-skk.txt";
+    const char *user_dict_path = "/tmp/tab5-ime-test-user.txt";
+    std::remove(user_dict_path);
     FILE *dict = fopen(dict_path, "wb");
     assert(dict != nullptr);
     fputs("; UTF-8 test dictionary\n", dict);
@@ -29,7 +31,9 @@ int main()
 
     ime_skk_t ime;
     ime.set_dictionary_path(dict_path);
+    ime.set_user_dictionary_path(user_dict_path);
     assert(ime.dictionary_available());
+    assert(!ime.user_dictionary_available());
     assert(ime.state() == ime_state_t::IDLE);
     ime_result_t idle_space = ime.input_text(" ", 1);
     assert(!idle_space.consumed && !idle_space.changed);
@@ -41,6 +45,47 @@ int main()
     assert(ime.state() == ime_state_t::COMPOSING);
     assert(ime.preedit_text() == "こんにちは");
     assert(ime.input_key(ime_key_t::ENTER).commit == "こんにちは\r");
+    assert(ime.state() == ime_state_t::IDLE);
+
+    // Ctrl+J maps to COMMIT: direct kana is confirmed without a terminal CR.
+    type(ime, "arigatou");
+    ime_result_t direct_ctrl_j = ime.input_key(ime_key_t::COMMIT);
+    assert(direct_ctrl_j.consumed && direct_ctrl_j.changed);
+    assert(direct_ctrl_j.commit == "ありがとう");
+    assert(ime.state() == ime_state_t::IDLE);
+    assert(!ime.input_key(ime_key_t::COMMIT).consumed);
+
+    // Japanese, ASCII and fullwidth punctuation profiles affect . , - only.
+    type(ime, "a.su,-");
+    assert(ime.input_key(ime_key_t::COMMIT).commit == "あ。す、ー");
+    ime.set_punctuation_style(ime_punctuation_style_t::ASCII);
+    type(ime, "a.su,-");
+    assert(ime.input_key(ime_key_t::COMMIT).commit == "あ.す,-");
+    ime.set_punctuation_style(ime_punctuation_style_t::FULLWIDTH);
+    type(ime, "a.su,-");
+    assert(ime.input_key(ime_key_t::COMMIT).commit == "あ．す，－");
+    ime.set_punctuation_style(ime_punctuation_style_t::JAPANESE);
+
+    // z-prefix symbols do not interfere with normal z romaji sequences.
+    type(ime, "z/");
+    assert(ime.preedit_text() == "・");
+    assert(ime.input_key(ime_key_t::COMMIT).commit == "・");
+    type(ime, "z-");
+    assert(ime.input_key(ime_key_t::COMMIT).commit == "〜");
+    type(ime, "z.");
+    assert(ime.input_key(ime_key_t::COMMIT).commit == "…");
+    type(ime, "za");
+    assert(ime.input_key(ime_key_t::COMMIT).commit == "ざ");
+
+    // l at an empty direct-kana boundary enters temporary ASCII input. ASCII
+    // text is not consumed by the IME; Escape returns to kana input.
+    ime_result_t ascii_enter = type(ime, "l");
+    assert(ascii_enter.commit.empty());
+    assert(ime.is_ascii_mode());
+    ime_result_t ascii_text = ime.input_text("ls -l", 5);
+    assert(!ascii_text.consumed && !ascii_text.changed);
+    assert(ime.input_key(ime_key_t::ESCAPE).consumed);
+    assert(!ime.is_ascii_mode());
     assert(ime.state() == ime_state_t::IDLE);
 
     // Space starts candidate selection even when the reading was entered in
@@ -55,6 +100,13 @@ int main()
     assert(ime.candidate_count() == 1);
     assert(ime.candidate_at(0) == "頭");
     assert(ime.input_key(ime_key_t::ENTER).commit == "頭");
+    assert(ime.state() == ime_state_t::IDLE);
+
+    // Ctrl+J also confirms a selected candidate without a terminal CR.
+    type(ime, "atama");
+    ime.input_key(ime_key_t::SPACE);
+    ime_result_t candidate_ctrl_j = ime.input_key(ime_key_t::COMMIT);
+    assert(candidate_ctrl_j.commit == "頭");
     assert(ime.state() == ime_state_t::IDLE);
 
     // Lowercase direct text before an uppercase initial is committed as a
@@ -140,6 +192,25 @@ int main()
     assert(ime.candidate_index() == 1);
     ime_result_t commit = ime.input_key(ime_key_t::ENTER);
     assert(commit.commit == "幹事");
+    assert(ime.state() == ime_state_t::IDLE);
+    assert(ime.user_dictionary_available());
+
+    // A fresh engine must prefer the learned candidate without duplicating the
+    // bundled candidate list. This models a reboot after a user choice.
+    ime_skk_t learned_ime;
+    learned_ime.set_dictionary_path(dict_path);
+    learned_ime.set_user_dictionary_path(user_dict_path);
+    type(learned_ime, "Kanji");
+    learned_ime.input_key(ime_key_t::SPACE);
+    assert(learned_ime.candidate_count() == 2);
+    assert(learned_ime.candidate_at(0) == "幹事");
+    assert(learned_ime.candidate_at(1) == "漢字");
+    assert(learned_ime.input_key(ime_key_t::COMMIT).commit == "幹事");
+
+    // Ctrl+J confirms a conversion reading as kana without a terminal CR.
+    type(ime, "Kanji");
+    ime_result_t reading_ctrl_j = ime.input_key(ime_key_t::COMMIT);
+    assert(reading_ctrl_j.commit == "かんじ");
     assert(ime.state() == ime_state_t::IDLE);
 
     // Second uppercase starts okurigana: MiRu -> 見る.
@@ -244,6 +315,7 @@ int main()
     assert(ime.input_key(ime_key_t::ENTER).commit == "言った");
 
     std::remove(dict_path);
+    std::remove(user_dict_path);
     puts("ime_skk tests passed");
     return 0;
 }
