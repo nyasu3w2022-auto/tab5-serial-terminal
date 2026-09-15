@@ -100,9 +100,9 @@ static void update_ime_preview_locked()
     char candidates[512] = {};
     const char *destination = field_name(s_focus);
     if (s_focus == editor_field_t::OKURI) {
-        snprintf(preedit, sizeof(preedit), "IME -> %s: type one ASCII letter directly", destination);
+        snprintf(preedit, sizeof(preedit), "Okuri: one ASCII initial (a-z), or leave blank");
     } else if (s_ime->state() == ime_state_t::IDLE) {
-        snprintf(preedit, sizeof(preedit), "IME -> %s: type romaji here; Ctrl+J stores it", destination);
+        snprintf(preedit, sizeof(preedit), "IME -> %s: compose the value, then Ctrl+J stores it", destination);
     } else {
         snprintf(preedit, sizeof(preedit), "IME -> %s: %s", destination,
                  s_ime->preedit_text().c_str());
@@ -114,9 +114,12 @@ static void update_ime_preview_locked()
         snprintf(text, sizeof(text), "Candidates: %s   Ctrl+J stores selected candidate", candidates);
         lv_label_set_text(s_candidate_preview_label, text);
     } else if (s_focus == editor_field_t::OKURI) {
-        lv_label_set_text(s_candidate_preview_label, "Okuri is optional: leave empty for no okurigana key");
+        lv_label_set_text(s_candidate_preview_label, "Okuri is optional; it is the first letter of the inflection");
+    } else if (s_focus == editor_field_t::READING) {
+        lv_label_set_text(s_candidate_preview_label, "Reading must be hiragana (example: き)");
     } else {
-        lv_label_set_text(s_candidate_preview_label, "Space: candidate search   Esc: cancel IME preedit");
+        lv_label_set_text(s_candidate_preview_label,
+                          "Candidate is the kanji/word stem (example: 来); Space searches candidates");
     }
 
     lv_obj_set_style_text_font(s_preedit_label, active_font(), 0);
@@ -243,45 +246,50 @@ static void ensure_editor_locked()
     lv_obj_align(title_label, LV_ALIGN_LEFT_MID, 0, 0);
 
     lv_obj_t *help = lv_label_create(s_overlay);
-    lv_label_set_text(help,
-        "Tab: next field   Ctrl+J: IME commit field   Ctrl+S: Add   Ctrl+X: Delete   Esc: cancel/close");
+    lv_label_set_text(help, "Tab: field   Ctrl+J: set field   Ctrl+S: save");
     lv_obj_set_style_text_font(help, &lv_font_unscii_16, 0);
     lv_obj_set_style_text_color(help, lv_color_make(180, 205, 235), 0);
-    lv_obj_set_pos(help, 180, 70);
+    lv_obj_set_pos(help, 90, 60);
 
-    create_field(s_overlay, editor_field_t::READING, 108);
-    create_field(s_overlay, editor_field_t::OKURI, 188);
-    create_field(s_overlay, editor_field_t::CANDIDATE, 268);
+    lv_obj_t *help2 = lv_label_create(s_overlay);
+    lv_label_set_text(help2, "Ctrl+X: delete exact entry   Esc: cancel / close");
+    lv_obj_set_style_text_font(help2, &lv_font_unscii_16, 0);
+    lv_obj_set_style_text_color(help2, lv_color_make(180, 205, 235), 0);
+    lv_obj_set_pos(help2, 90, 82);
+
+    create_field(s_overlay, editor_field_t::READING, 116);
+    create_field(s_overlay, editor_field_t::OKURI, 184);
+    create_field(s_overlay, editor_field_t::CANDIDATE, 252);
 
     lv_obj_t *add_button = lv_button_create(s_overlay);
-    lv_obj_set_size(add_button, 250, 64);
-    lv_obj_set_pos(add_button, 340, 370);
+    lv_obj_set_size(add_button, 220, 54);
+    lv_obj_set_pos(add_button, 410, 330);
     lv_obj_set_style_bg_color(add_button, lv_color_make(0, 125, 60), 0);
     lv_obj_set_style_bg_color(add_button, lv_color_make(0, 175, 80), LV_STATE_PRESSED);
     lv_obj_add_event_cb(add_button, action_event_cb, LV_EVENT_CLICKED,
                         (void *)(uintptr_t)editor_action_t::ADD);
     lv_obj_t *add_label = lv_label_create(add_button);
-    lv_label_set_text(add_label, "Ctrl+S  Add / Promote");
+    lv_label_set_text(add_label, "Add / Promote");
     lv_obj_set_style_text_font(add_label, &lv_font_unscii_16, 0);
     lv_obj_set_style_text_color(add_label, lv_color_white(), 0);
     lv_obj_center(add_label);
 
     lv_obj_t *remove_button = lv_button_create(s_overlay);
-    lv_obj_set_size(remove_button, 250, 64);
-    lv_obj_set_pos(remove_button, 690, 370);
+    lv_obj_set_size(remove_button, 220, 54);
+    lv_obj_set_pos(remove_button, 650, 330);
     lv_obj_set_style_bg_color(remove_button, lv_color_make(145, 50, 50), 0);
     lv_obj_set_style_bg_color(remove_button, lv_color_make(195, 70, 70), LV_STATE_PRESSED);
     lv_obj_add_event_cb(remove_button, action_event_cb, LV_EVENT_CLICKED,
                         (void *)(uintptr_t)editor_action_t::REMOVE);
     lv_obj_t *remove_label = lv_label_create(remove_button);
-    lv_label_set_text(remove_label, "Ctrl+X  Delete Exact");
+    lv_label_set_text(remove_label, "Delete Exact");
     lv_obj_set_style_text_font(remove_label, &lv_font_unscii_16, 0);
     lv_obj_set_style_text_color(remove_label, lv_color_white(), 0);
     lv_obj_center(remove_label);
 
     s_preedit_label = lv_label_create(s_overlay);
-    lv_obj_set_size(s_preedit_label, 1100, 42);
-    lv_obj_set_pos(s_preedit_label, 90, 458);
+    lv_obj_set_size(s_preedit_label, 1100, 40);
+    lv_obj_set_pos(s_preedit_label, 90, 406);
     lv_label_set_long_mode(s_preedit_label, LV_LABEL_LONG_CLIP);
     lv_obj_set_style_text_color(s_preedit_label, lv_color_make(215, 240, 255), 0);
     lv_obj_set_style_bg_color(s_preedit_label, lv_color_make(35, 65, 105), 0);
@@ -290,14 +298,14 @@ static void ensure_editor_locked()
     lv_obj_set_style_pad_right(s_preedit_label, 6, 0);
 
     s_candidate_preview_label = lv_label_create(s_overlay);
-    lv_obj_set_size(s_candidate_preview_label, 1100, 42);
-    lv_obj_set_pos(s_candidate_preview_label, 90, 508);
+    lv_obj_set_size(s_candidate_preview_label, 1100, 38);
+    lv_obj_set_pos(s_candidate_preview_label, 90, 454);
     lv_label_set_long_mode(s_candidate_preview_label, LV_LABEL_LONG_CLIP);
     lv_obj_set_style_text_color(s_candidate_preview_label, lv_color_make(235, 235, 235), 0);
 
     s_status_label = lv_label_create(s_overlay);
-    lv_obj_set_size(s_status_label, 1100, 56);
-    lv_obj_set_pos(s_status_label, 90, 558);
+    lv_obj_set_size(s_status_label, 1100, 38);
+    lv_obj_set_pos(s_status_label, 90, 500);
     lv_label_set_long_mode(s_status_label, LV_LABEL_LONG_CLIP);
     lv_obj_set_style_text_font(s_status_label, active_font(), 0);
     lv_obj_set_style_text_color(s_status_label, lv_color_make(255, 225, 145), 0);
@@ -322,7 +330,7 @@ void dictionary_ui_open(ime_skk_t *ime)
     s_reading.clear();
     s_okuri = '\0';
     s_candidate.clear();
-    set_status("Enter reading and candidate; Ctrl+S=Add, Ctrl+X=Delete");
+    set_status("Ready: select a field, then enter its value");
     ensure_editor_locked();
     update_editor_locked();
     lvgl_port_unlock();
