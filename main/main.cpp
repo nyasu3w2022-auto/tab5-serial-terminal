@@ -13,6 +13,7 @@
  *   Ctrl+C        — Clear terminal screen
  *   Ctrl+L        — Force full redisplay
  *   Ctrl+Alt+S    — Open / close settings screen
+ *   Ctrl+Alt+D    — Open / close local SKK Dictionary Editor
  *
  * SPDX-License-Identifier: MIT
  */
@@ -41,6 +42,7 @@
 #include "settings_ui.h"
 #include "ime_skk.h"
 #include "ime_ui.h"
+#include "dictionary_ui.h"
 
 static const char *TAG = "main";
 
@@ -55,6 +57,7 @@ static app_settings_t s_settings = {};
 static ime_skk_t s_ime;
 static bool s_japanese_input_active = false;
 static constexpr const char *SKK_DICT_PATH = "/skk/SKK-JISYO.S.txt";
+static constexpr const char *SKK_SUPPLEMENT_DICT_PATH = "/skk/SKK-JISYO.TAB5.txt";
 static constexpr const char *SKK_USER_DICT_PATH = "/skk/SKK-JISYO.user.txt";
 
 static void refresh_ime_input_indicator(void)
@@ -106,6 +109,7 @@ static void init_ime_dictionary_storage(void)
     if (err != ESP_OK) {
         ESP_LOGW(TAG, "SKK system SPIFFS mount unavailable: %s", esp_err_to_name(err));
         s_ime.set_dictionary_path(NULL);
+        s_ime.set_supplement_dictionary_path(NULL);
         s_ime.set_user_dictionary_path(NULL);
         return;
     }
@@ -120,6 +124,7 @@ static void init_ime_dictionary_storage(void)
     esp_err_t user_err = esp_vfs_spiffs_register(&user_conf);
 
     s_ime.set_dictionary_path(SKK_DICT_PATH);
+    s_ime.set_supplement_dictionary_path(SKK_SUPPLEMENT_DICT_PATH);
     s_ime.set_user_dictionary_path(user_err == ESP_OK ? SKK_USER_DICT_PATH : NULL);
     size_t total = 0;
     size_t used = 0;
@@ -132,6 +137,7 @@ static void init_ime_dictionary_storage(void)
     }
     if (s_ime.dictionary_available()) {
         ESP_LOGI(TAG, "SKK dictionary ready: %s", SKK_DICT_PATH);
+        ESP_LOGI(TAG, "SKK supplementary dictionary: %s", SKK_SUPPLEMENT_DICT_PATH);
         ESP_LOGI(TAG, "SKK user dictionary: %s",
                  s_ime.user_dictionary_available() ? "loaded" : "will be created on first learned candidate");
     } else {
@@ -277,6 +283,53 @@ static bool ime_commit_without_terminal_cr(void)
     return true;
 }
 
+static bool dictionary_editor_commit_ime(void)
+{
+    if (!dictionary_ui_is_open()) return false;
+    if (s_ime.state() == ime_state_t::IDLE) {
+        // Ctrl+J is local to the editor even with no pending preedit.
+        dictionary_ui_update(s_ime);
+        return true;
+    }
+
+    const bool candidate_active = s_ime.state() == ime_state_t::CANDIDATE;
+    const std::string candidate_stem = candidate_active
+                                      ? s_ime.candidate_at(s_ime.candidate_index()) : "";
+    ime_result_t result = s_ime.input_key(ime_key_t::COMMIT);
+    if (!result.consumed) return true;
+    // A dictionary candidate is stored as its SKK stem. In particular,
+    // selecting くr /来/ must put "来" rather than the committed "来る"
+    // into a field that will later be used with another okurigana key.
+    const std::string &field_text = candidate_active ? candidate_stem : result.commit;
+    if (!field_text.empty()) dictionary_ui_accept_ime_commit(field_text);
+    dictionary_ui_update(s_ime);
+    return true;
+}
+
+static bool dictionary_editor_handle_ime_special(const char *name)
+{
+    if (!dictionary_ui_is_open() || name == nullptr) return false;
+
+    ime_key_t key;
+    if (strcasecmp(name, "backspace") == 0) {
+        key = ime_key_t::BACKSPACE;
+    } else if (strcasecmp(name, "left") == 0) {
+        key = ime_key_t::LEFT;
+    } else if (strcasecmp(name, "right") == 0) {
+        key = ime_key_t::RIGHT;
+    } else if (strcasecmp(name, "escape") == 0 || strcasecmp(name, "esc") == 0) {
+        key = ime_key_t::ESCAPE;
+    } else {
+        return false;
+    }
+
+    ime_result_t result = s_ime.input_key(key);
+    if (!result.consumed) return false;
+    if (!result.commit.empty()) dictionary_ui_accept_ime_commit(result.commit);
+    dictionary_ui_update(s_ime);
+    return true;
+}
+
 static bool ime_handle_special_key(const char *name)
 {
     if (!s_japanese_input_active) return false;
@@ -320,12 +373,21 @@ static bool handle_key_event(const key_event_msg_t *msg)
 {
     bool ctrl = (msg->modifier & 0x01) != 0;
     bool alt  = (msg->modifier & 0x04) != 0;
+    const size_t text_len = strlen(msg->str);
 
     // ---- Ctrl+Alt combinations (local shortcuts, never sent to remote) ----
     if (ctrl && alt) {
         char k = (char)toupper((unsigned char)msg->str[0]);
+        // The Dictionary Editor owns its local IME session. Only its own
+        // close shortcut and the settings shortcut are allowed through.
+        if (dictionary_ui_is_open() && k != 'D' && k != 'S') return true;
         if (k == 'S') {
-            // Ctrl+Alt+S: toggle settings screen
+            // Ctrl+Alt+S: toggle settings screen. The Dictionary Editor is a
+            // separate full-screen local UI, so close it before opening settings.
+            if (dictionary_ui_is_open()) {
+                s_ime.reset();
+                dictionary_ui_close();
+            }
             if (settings_ui_is_open()) {
                 settings_ui_close();
                 if (s_japanese_input_active && s_ime.state() != ime_state_t::IDLE) {
@@ -345,6 +407,24 @@ static bool handle_key_event(const key_event_msg_t *msg)
             ESP_LOGI(TAG, "Japanese input %s", s_japanese_input_active ? "enabled" : "disabled");
             return true;
         }
+        if (k == 'D') {
+            // Avoid discarding unsaved settings. The settings UI owns its
+            // keyboard focus until the user explicitly closes it.
+            if (settings_ui_is_open()) return true;
+            // Ctrl+Alt+D: Dictionary Editor is fully local. It can be used
+            // even when Japanese input is temporarily disabled.
+            if (dictionary_ui_is_open()) {
+                s_ime.reset();
+                dictionary_ui_close();
+            } else {
+                // The editor owns the same IME instance. A terminal preedit
+                // has no dictionary-field destination, so discard it first.
+                s_ime.reset();
+                ime_ui_hide();
+                dictionary_ui_open(&s_ime);
+            }
+            return true;
+        }
         // Other Ctrl+Alt combinations: silently ignore (don't send to remote)
         return false;
     }
@@ -352,6 +432,39 @@ static bool handle_key_event(const key_event_msg_t *msg)
     // ---- If settings screen is open, swallow all other keys ----
     if (settings_ui_is_open()) {
         return false;
+    }
+
+    // ---- Dictionary Editor owns every key while it is open ----
+    if (dictionary_ui_is_open()) {
+        if (ctrl && !alt) {
+            if ((char)toupper((unsigned char)msg->str[0]) == 'J') {
+                return dictionary_editor_commit_ime();
+            }
+            // No other Ctrl operation is meaningful in the local editor.
+            return true;
+        }
+        if (alt) return true;
+        if (dictionary_ui_handle_special_key(msg->str, s_ime)) {
+            return true;
+        }
+        if (dictionary_editor_handle_ime_special(msg->str)) {
+            return true;
+        }
+        // Any named terminal key not understood by the editor is swallowed;
+        // it must never become a literal dictionary field value or remote TX.
+        for (int i = 0; s_special_keys[i].name != NULL; ++i) {
+            if (strcasecmp(msg->str, s_special_keys[i].name) == 0) return true;
+        }
+        if (text_len > 0) {
+            if (dictionary_ui_accept_raw_text(msg->str, text_len)) return true;
+            ime_result_t result = s_ime.input_text(msg->str, text_len);
+            if (!result.commit.empty()) dictionary_ui_accept_ime_commit(result.commit);
+            // Raw text that is not consumed (temporary ASCII mode) is still
+            // swallowed: dictionary editing must never transmit to the peer.
+            dictionary_ui_update(s_ime);
+            return true;
+        }
+        return true;
     }
 
     // ---- Ctrl-only combinations ----
@@ -424,7 +537,6 @@ static bool handle_key_event(const key_event_msg_t *msg)
     // Japanese input consumes preedit keys locally and forwards only the
     // committed UTF-8 result.  Alt-modified input keeps terminal ESC-prefix
     // semantics and is never routed through the local IME.
-    size_t text_len = strlen(msg->str);
     if (s_japanese_input_active && !alt && text_len > 0) {
         ime_result_t ime_result = s_ime.input_text(msg->str, text_len);
         if (ime_result.consumed) {

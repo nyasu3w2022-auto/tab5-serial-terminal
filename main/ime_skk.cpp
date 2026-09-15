@@ -10,6 +10,7 @@
 #include <cstdint>
 #include <cstdio>
 #include <cstring>
+#include <vector>
 
 namespace {
 
@@ -222,6 +223,11 @@ void ime_skk_t::set_dictionary_path(const char *path)
 void ime_skk_t::set_user_dictionary_path(const char *path)
 {
     s_user_dictionary_path = path ? path : "";
+}
+
+void ime_skk_t::set_supplement_dictionary_path(const char *path)
+{
+    s_supplement_dictionary_path = path ? path : "";
 }
 
 void ime_skk_t::set_punctuation_style(ime_punctuation_style_t style)
@@ -459,6 +465,7 @@ bool ime_skk_t::search_dictionary()
     // keep standard SKK fallback candidates available.
     const std::string key = current_dictionary_key();
     if (!s_user_dictionary_path.empty()) search_dictionary_key(s_user_dictionary_path, key);
+    if (!s_supplement_dictionary_path.empty()) search_dictionary_key(s_supplement_dictionary_path, key);
     if (!s_dictionary_path.empty()) search_dictionary_key(s_dictionary_path, key);
     if (s_candidate_count > 0) return true;
 
@@ -466,11 +473,13 @@ bool ime_skk_t::search_dictionary()
     // SKK-JISYO registers the verb using another inflection's initial letter.
     if (s_okuri_active && s_okuri_kana.rfind("っ", 0) == 0) {
         if (!s_user_dictionary_path.empty()) search_dictionary_okuri_family(s_user_dictionary_path, s_kana);
+        if (!s_supplement_dictionary_path.empty()) search_dictionary_okuri_family(s_supplement_dictionary_path, s_kana);
         if (!s_dictionary_path.empty()) search_dictionary_okuri_family(s_dictionary_path, s_kana);
         if (s_candidate_count > 0) return true;
     }
     if (s_okuri_active) {
         if (!s_user_dictionary_path.empty()) search_dictionary_key(s_user_dictionary_path, s_kana);
+        if (!s_supplement_dictionary_path.empty()) search_dictionary_key(s_supplement_dictionary_path, s_kana);
         if (!s_dictionary_path.empty()) search_dictionary_key(s_dictionary_path, s_kana);
     }
 
@@ -581,9 +590,79 @@ std::string ime_skk_t::current_dictionary_key() const
     return key;
 }
 
+static bool is_safe_dictionary_field(const std::string &value, bool is_reading)
+{
+    if (value.empty()) return false;
+    for (unsigned char ch : value) {
+        if (ch < 0x20 || ch == '/' || ch == '\\' || ch == ';' ||
+            (is_reading && ch == ' ')) return false;
+    }
+    return true;
+}
+
+static void parse_dictionary_values(const char *values, std::vector<std::string> *out)
+{
+    if (values == nullptr || out == nullptr) return;
+    const char *p = values;
+    while (*p != '\0' && *p != '\r' && *p != '\n') {
+        if (*p != '/') break;
+        p++;
+        const char *end = strchr(p, '/');
+        if (end == nullptr) break;
+        const char *annotation = strchr(p, ';');
+        const char *candidate_end = (annotation != nullptr && annotation < end) ? annotation : end;
+        if (candidate_end > p) out->emplace_back(p, (size_t)(candidate_end - p));
+        p = end;
+    }
+}
+
+static bool write_dictionary_values(FILE *out, const std::string &key,
+                                    const std::vector<std::string> &values)
+{
+    if (out == nullptr || values.empty()) return false;
+    if (fprintf(out, "%s ", key.c_str()) < 0) return false;
+    for (const std::string &value : values) {
+        if (fprintf(out, "/%s", value.c_str()) < 0) return false;
+    }
+    return fputs("/\n", out) >= 0;
+}
+
+bool ime_skk_t::make_dictionary_key(const std::string &reading, char okuri_initial,
+                                    std::string *key)
+{
+    if (key == nullptr || !is_safe_dictionary_field(reading, true) ||
+        reading.size() > MAX_READING_BYTES) return false;
+    if (okuri_initial != '\0') {
+        const unsigned char c = (unsigned char)okuri_initial;
+        if (!std::isalpha(c) || c > 0x7f) return false;
+    }
+    *key = reading;
+    if (okuri_initial != '\0') key->push_back((char)std::tolower((unsigned char)okuri_initial));
+    return true;
+}
+
+bool ime_skk_t::register_user_candidate(const std::string &reading, char okuri_initial,
+                                        const std::string &candidate)
+{
+    std::string key;
+    if (!make_dictionary_key(reading, okuri_initial, &key) ||
+        !is_safe_dictionary_field(candidate, false)) return false;
+    return update_user_dictionary(key, candidate);
+}
+
+bool ime_skk_t::remove_user_candidate(const std::string &reading, char okuri_initial,
+                                      const std::string &candidate)
+{
+    std::string key;
+    if (!make_dictionary_key(reading, okuri_initial, &key) ||
+        !is_safe_dictionary_field(candidate, false)) return false;
+    return remove_user_dictionary_candidate(key, candidate);
+}
+
 bool ime_skk_t::update_user_dictionary(const std::string &key, const std::string &candidate)
 {
-    if (s_user_dictionary_path.empty() || key.empty() || candidate.empty()) return false;
+    if (s_user_dictionary_path.empty() || !is_safe_dictionary_field(key, true) ||
+        !is_safe_dictionary_field(candidate, false)) return false;
 
     const std::string temporary_path = s_user_dictionary_path + ".tmp";
     FILE *out = fopen(temporary_path.c_str(), "wb");
@@ -608,36 +687,73 @@ bool ime_skk_t::update_user_dictionary(const std::string &key, const std::string
         }
 
         found_key = true;
-        char *values = strchr(separator, '/');
-        bool already_present = false;
-        if (values != nullptr) {
-            char *p = values + 1;
-            while (*p != '\0' && *p != '\r' && *p != '\n') {
-                char *end = strchr(p, '/');
-                if (end == nullptr) break;
-                char *annotation = strchr(p, ';');
-                char *candidate_end = (annotation != nullptr && annotation < end) ? annotation : end;
-                if ((size_t)(candidate_end - p) == candidate.size() &&
-                    memcmp(p, candidate.data(), candidate.size()) == 0) {
-                    already_present = true;
-                    break;
-                }
-                p = end + 1;
-            }
+        std::vector<std::string> values;
+        parse_dictionary_values(strchr(separator, '/'), &values);
+        std::vector<std::string> reordered;
+        reordered.push_back(candidate);
+        for (const std::string &value : values) {
+            if (value != candidate) reordered.push_back(value);
         }
-        if (already_present) {
-            if (fputs(line, out) < 0) ok = false;
-        } else if (values != nullptr) {
-            if (fprintf(out, "%s /%s%s", key.c_str(), candidate.c_str(), values) < 0) ok = false;
-        } else if (fprintf(out, "%s /%s/\n", key.c_str(), candidate.c_str()) < 0) {
-            ok = false;
-        }
+        if (!write_dictionary_values(out, key, reordered)) ok = false;
     }
     if (in != nullptr) fclose(in);
-    if (!found_key && fprintf(out, "%s /%s/\n", key.c_str(), candidate.c_str()) < 0) ok = false;
+    if (!found_key && !write_dictionary_values(out, key, std::vector<std::string>{candidate})) ok = false;
     if (fclose(out) != 0) ok = false;
 
     if (!ok || std::rename(temporary_path.c_str(), s_user_dictionary_path.c_str()) != 0) {
+        remove(temporary_path.c_str());
+        return false;
+    }
+    return true;
+}
+
+bool ime_skk_t::remove_user_dictionary_candidate(const std::string &key,
+                                                 const std::string &candidate)
+{
+    if (s_user_dictionary_path.empty()) return false;
+
+    FILE *in = fopen(s_user_dictionary_path.c_str(), "rb");
+    if (in == nullptr) return false;
+    const std::string temporary_path = s_user_dictionary_path + ".tmp";
+    FILE *out = fopen(temporary_path.c_str(), "wb");
+    if (out == nullptr) {
+        fclose(in);
+        return false;
+    }
+
+    bool removed = false;
+    bool ok = true;
+    char line[MAX_DICT_LINE_BYTES + 1] = {};
+    while (fgets(line, sizeof(line), in) != nullptr) {
+        const size_t line_len = strlen(line);
+        if (line_len == MAX_DICT_LINE_BYTES && line[line_len - 1] != '\n') {
+            int ch = 0;
+            while ((ch = fgetc(in)) != '\n' && ch != EOF) {}
+            continue;
+        }
+        char *separator = strchr(line, ' ');
+        const size_t key_len = separator ? (size_t)(separator - line) : 0;
+        if (separator == nullptr || key_len != key.size() || memcmp(line, key.data(), key_len) != 0) {
+            if (fputs(line, out) < 0) ok = false;
+            continue;
+        }
+
+        std::vector<std::string> values;
+        parse_dictionary_values(strchr(separator, '/'), &values);
+        std::vector<std::string> retained;
+        for (const std::string &value : values) {
+            if (value == candidate) {
+                removed = true;
+            } else {
+                retained.push_back(value);
+            }
+        }
+        if (!retained.empty() && !write_dictionary_values(out, key, retained)) ok = false;
+    }
+    fclose(in);
+    if (fclose(out) != 0) ok = false;
+
+    if (!ok || !removed || std::rename(temporary_path.c_str(), s_user_dictionary_path.c_str()) != 0) {
         remove(temporary_path.c_str());
         return false;
     }

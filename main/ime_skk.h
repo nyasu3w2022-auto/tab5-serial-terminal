@@ -78,6 +78,17 @@ public:
     /** Configure the writable UTF-8/LF user dictionary path. Passing NULL disables learning. */
     void set_user_dictionary_path(const char *path);
 
+    /** Configure the read-only UTF-8/LF supplementary dictionary path. */
+    void set_supplement_dictionary_path(const char *path);
+
+    /** Add a candidate to the user dictionary and make it the first candidate for this key. */
+    bool register_user_candidate(const std::string &reading, char okuri_initial,
+                                 const std::string &candidate);
+
+    /** Remove one exact candidate from the user dictionary; empty entries are removed. */
+    bool remove_user_candidate(const std::string &reading, char okuri_initial,
+                               const std::string &candidate);
+
     /** Set the punctuation conversion profile used in Japanese input mode. */
     void set_punctuation_style(ime_punctuation_style_t style);
 
@@ -125,6 +136,7 @@ public:
 
 private:
     std::string s_dictionary_path;
+    std::string s_supplement_dictionary_path;
     std::string s_user_dictionary_path;
 
     // Internal readings are always hiragana.  Katakana conversion is applied
@@ -158,6 +170,8 @@ private:
     bool append_candidate(const char *candidate, size_t len);
     bool learn_current_candidate();
     bool update_user_dictionary(const std::string &key, const std::string &candidate);
+    bool remove_user_dictionary_candidate(const std::string &key, const std::string &candidate);
+    static bool make_dictionary_key(const std::string &reading, char okuri_initial, std::string *key);
     std::string current_dictionary_key() const;
     std::string direct_commit_text() const;
     std::string current_candidate_commit() const;

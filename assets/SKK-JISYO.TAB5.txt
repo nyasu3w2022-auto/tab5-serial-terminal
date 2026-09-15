@@ -1,0 +1,10 @@
+;; SKK-JISYO.TAB5.txt -- TAB5 Serial Terminal supplementary SKK dictionary
+;;
+;; This small dictionary is searched after the user dictionary and before
+;; SKK-JISYO.S. It contains basic standard-SKK inflection keys that are absent
+;; from the bundled small dictionary.
+;;
+;; SPDX-License-Identifier: GPL-2.0-or-later
+;; Source key verified against skk-dev/dict SKK-JISYO.L.
+
+きt /来/

@@ -15,8 +15,14 @@ static ime_result_t type(ime_skk_t &ime, const char *text)
 int main()
 {
     const char *dict_path = "/tmp/tab5-ime-test-skk.txt";
+    const char *supplement_dict_path = "/tmp/tab5-ime-test-supplement.txt";
     const char *user_dict_path = "/tmp/tab5-ime-test-user.txt";
     std::remove(user_dict_path);
+    FILE *supplement = fopen(supplement_dict_path, "wb");
+    assert(supplement != nullptr);
+    fputs("; TAB5 supplement dictionary\n", supplement);
+    fputs("きt /来/\n", supplement);
+    fclose(supplement);
     FILE *dict = fopen(dict_path, "wb");
     assert(dict != nullptr);
     fputs("; UTF-8 test dictionary\n", dict);
@@ -31,6 +37,7 @@ int main()
 
     ime_skk_t ime;
     ime.set_dictionary_path(dict_path);
+    ime.set_supplement_dictionary_path(supplement_dict_path);
     ime.set_user_dictionary_path(user_dict_path);
     assert(ime.dictionary_available());
     assert(!ime.user_dictionary_available());
@@ -207,6 +214,58 @@ int main()
     assert(learned_ime.candidate_at(1) == "漢字");
     assert(learned_ime.input_key(ime_key_t::COMMIT).commit == "幹事");
 
+    // The supplementary dictionary sits between user and system dictionaries.
+    // Its きt /来/ entry makes standard SKK input KiTa -> 来た available even
+    // though the small system test dictionary does not contain that key.
+    type(ime, "KiTa");
+    ime.input_key(ime_key_t::SPACE);
+    assert(ime.candidate_count() == 1);
+    assert(ime.candidate_at(0) == "来");
+    assert(ime.input_key(ime_key_t::COMMIT).commit == "来た");
+
+    // Manual registration inserts the candidate at the head of the user
+    // dictionary. A new engine must prioritize it over the supplement entry.
+    assert(ime.register_user_candidate("き", 't', "着"));
+    ime_skk_t manual_ime;
+    manual_ime.set_dictionary_path(dict_path);
+    manual_ime.set_supplement_dictionary_path(supplement_dict_path);
+    manual_ime.set_user_dictionary_path(user_dict_path);
+    type(manual_ime, "KiTa");
+    manual_ime.input_key(ime_key_t::SPACE);
+    assert(manual_ime.candidate_count() == 2);
+    assert(manual_ime.candidate_at(0) == "着");
+    assert(manual_ime.candidate_at(1) == "来");
+    assert(manual_ime.input_key(ime_key_t::COMMIT).commit == "着た");
+
+    // Re-registering an existing candidate promotes it without duplicate rows.
+    assert(manual_ime.register_user_candidate("き", 't', "来"));
+    ime_skk_t promoted_ime;
+    promoted_ime.set_dictionary_path(dict_path);
+    promoted_ime.set_supplement_dictionary_path(supplement_dict_path);
+    promoted_ime.set_user_dictionary_path(user_dict_path);
+    type(promoted_ime, "KiTa");
+    promoted_ime.input_key(ime_key_t::SPACE);
+    assert(promoted_ime.candidate_count() == 2);
+    assert(promoted_ime.candidate_at(0) == "来");
+    assert(promoted_ime.candidate_at(1) == "着");
+
+    // Deletion removes only the specified user candidate. The supplemental
+    // entry remains available; the final user entry removes the user line.
+    assert(promoted_ime.remove_user_candidate("き", 't', "来"));
+    assert(promoted_ime.remove_user_candidate("き", 't', "着"));
+    ime_skk_t deleted_ime;
+    deleted_ime.set_dictionary_path(dict_path);
+    deleted_ime.set_supplement_dictionary_path(supplement_dict_path);
+    deleted_ime.set_user_dictionary_path(user_dict_path);
+    type(deleted_ime, "KiTa");
+    deleted_ime.input_key(ime_key_t::SPACE);
+    assert(deleted_ime.candidate_count() == 1);
+    assert(deleted_ime.candidate_at(0) == "来");
+    assert(!deleted_ime.remove_user_candidate("き", 't', "着"));
+    assert(!deleted_ime.register_user_candidate("き/", 't', "不正"));
+    assert(!deleted_ime.register_user_candidate("き", 't', "不/正"));
+    assert(!deleted_ime.register_user_candidate("き", 't', "不;正"));
+
     // Ctrl+J confirms a conversion reading as kana without a terminal CR.
     type(ime, "Kanji");
     ime_result_t reading_ctrl_j = ime.input_key(ime_key_t::COMMIT);
@@ -292,9 +351,15 @@ int main()
     assert(type(ime, "n'").commit.empty());
     assert(ime.input_key(ime_key_t::ENTER).commit == "ん\r");
 
-    // Exercise the actual bundled dictionary and its SKK okurigana key.
+    // Exercise the actual bundled dictionary and TAB5 supplementary entries.
     ime.set_dictionary_path("assets/SKK-JISYO.S.txt");
+    ime.set_supplement_dictionary_path("assets/SKK-JISYO.TAB5.txt");
     assert(ime.dictionary_available());
+    type(ime, "KiTa");
+    ime.input_key(ime_key_t::SPACE);
+    assert(ime.candidate_count() >= 1);
+    assert(ime.candidate_at(0) == "来");
+    assert(ime.input_key(ime_key_t::ENTER).commit == "来た");
     type(ime, "MiRu");
     ime_result_t full_dict_search = ime.input_key(ime_key_t::SPACE);
     assert(full_dict_search.consumed && full_dict_search.changed);
@@ -315,6 +380,7 @@ int main()
     assert(ime.input_key(ime_key_t::ENTER).commit == "言った");
 
     std::remove(dict_path);
+    std::remove(supplement_dict_path);
     std::remove(user_dict_path);
     puts("ime_skk tests passed");
     return 0;
