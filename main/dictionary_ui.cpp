@@ -36,6 +36,8 @@ enum class editor_action_t : uint8_t {
 static lv_obj_t *s_overlay = nullptr;
 static lv_obj_t *s_field_box[(size_t)editor_field_t::COUNT] = {};
 static lv_obj_t *s_field_label[(size_t)editor_field_t::COUNT] = {};
+static lv_obj_t *s_preedit_label = nullptr;
+static lv_obj_t *s_candidate_preview_label = nullptr;
 static lv_obj_t *s_status_label = nullptr;
 static ime_skk_t *s_ime = nullptr;
 static editor_field_t s_focus = editor_field_t::READING;
@@ -74,6 +76,54 @@ static void set_status(const char *text)
     snprintf(s_status, sizeof(s_status), "%s", text ? text : "");
 }
 
+static void build_candidate_preview(const ime_skk_t &ime, char *out, size_t out_size)
+{
+    if (out == nullptr || out_size == 0) return;
+    out[0] = '\0';
+    size_t used = 0;
+    for (size_t i = 0; i < ime.candidate_count(); ++i) {
+        const std::string &candidate = ime.candidate_at(i);
+        const int written = snprintf(out + used, out_size - used, "%s%s%s",
+                                     i == ime.candidate_index() ? "[" : " ",
+                                     candidate.c_str(),
+                                     i == ime.candidate_index() ? "]" : " ");
+        if (written < 0 || (size_t)written >= out_size - used) break;
+        used += (size_t)written;
+    }
+}
+
+static void update_ime_preview_locked()
+{
+    if (s_preedit_label == nullptr || s_candidate_preview_label == nullptr || s_ime == nullptr) return;
+
+    char preedit[512] = {};
+    char candidates[512] = {};
+    const char *destination = field_name(s_focus);
+    if (s_focus == editor_field_t::OKURI) {
+        snprintf(preedit, sizeof(preedit), "IME -> %s: type one ASCII letter directly", destination);
+    } else if (s_ime->state() == ime_state_t::IDLE) {
+        snprintf(preedit, sizeof(preedit), "IME -> %s: type romaji here; Ctrl+J stores it", destination);
+    } else {
+        snprintf(preedit, sizeof(preedit), "IME -> %s: %s", destination,
+                 s_ime->preedit_text().c_str());
+    }
+
+    if (s_ime->state() == ime_state_t::CANDIDATE && s_ime->candidate_count() > 0) {
+        build_candidate_preview(*s_ime, candidates, sizeof(candidates));
+        char text[560] = {};
+        snprintf(text, sizeof(text), "Candidates: %s   Ctrl+J stores selected candidate", candidates);
+        lv_label_set_text(s_candidate_preview_label, text);
+    } else if (s_focus == editor_field_t::OKURI) {
+        lv_label_set_text(s_candidate_preview_label, "Okuri is optional: leave empty for no okurigana key");
+    } else {
+        lv_label_set_text(s_candidate_preview_label, "Space: candidate search   Esc: cancel IME preedit");
+    }
+
+    lv_obj_set_style_text_font(s_preedit_label, active_font(), 0);
+    lv_obj_set_style_text_font(s_candidate_preview_label, active_font(), 0);
+    lv_label_set_text(s_preedit_label, preedit);
+}
+
 static void update_editor_locked()
 {
     if (s_overlay == nullptr) return;
@@ -92,6 +142,7 @@ static void update_editor_locked()
             s_field_box[i],
             field == s_focus ? lv_color_make(35, 65, 105) : lv_color_make(28, 28, 45), 0);
     }
+    update_ime_preview_locked();
     lv_label_set_text(s_status_label, s_status);
     lv_obj_move_foreground(s_overlay);
 }
@@ -225,9 +276,25 @@ static void ensure_editor_locked()
     lv_obj_set_style_text_color(remove_label, lv_color_white(), 0);
     lv_obj_center(remove_label);
 
+    s_preedit_label = lv_label_create(s_overlay);
+    lv_obj_set_size(s_preedit_label, 1100, 42);
+    lv_obj_set_pos(s_preedit_label, 90, 458);
+    lv_label_set_long_mode(s_preedit_label, LV_LABEL_LONG_CLIP);
+    lv_obj_set_style_text_color(s_preedit_label, lv_color_make(215, 240, 255), 0);
+    lv_obj_set_style_bg_color(s_preedit_label, lv_color_make(35, 65, 105), 0);
+    lv_obj_set_style_bg_opa(s_preedit_label, LV_OPA_COVER, 0);
+    lv_obj_set_style_pad_left(s_preedit_label, 6, 0);
+    lv_obj_set_style_pad_right(s_preedit_label, 6, 0);
+
+    s_candidate_preview_label = lv_label_create(s_overlay);
+    lv_obj_set_size(s_candidate_preview_label, 1100, 42);
+    lv_obj_set_pos(s_candidate_preview_label, 90, 508);
+    lv_label_set_long_mode(s_candidate_preview_label, LV_LABEL_LONG_CLIP);
+    lv_obj_set_style_text_color(s_candidate_preview_label, lv_color_make(235, 235, 235), 0);
+
     s_status_label = lv_label_create(s_overlay);
     lv_obj_set_size(s_status_label, 1100, 56);
-    lv_obj_set_pos(s_status_label, 90, 470);
+    lv_obj_set_pos(s_status_label, 90, 558);
     lv_label_set_long_mode(s_status_label, LV_LABEL_LONG_CLIP);
     lv_obj_set_style_text_font(s_status_label, active_font(), 0);
     lv_obj_set_style_text_color(s_status_label, lv_color_make(255, 225, 145), 0);
@@ -266,6 +333,8 @@ void dictionary_ui_close(void)
     s_overlay = nullptr;
     memset(s_field_box, 0, sizeof(s_field_box));
     memset(s_field_label, 0, sizeof(s_field_label));
+    s_preedit_label = nullptr;
+    s_candidate_preview_label = nullptr;
     s_status_label = nullptr;
     s_ime = nullptr;
     lvgl_port_unlock();
