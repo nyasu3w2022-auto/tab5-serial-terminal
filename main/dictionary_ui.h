@@ -20,6 +20,12 @@ void dictionary_ui_close(void);
 /** Return true while the dictionary editor owns the foreground UI. */
 bool dictionary_ui_is_open(void);
 
+/** Add or promote the current Reading + Okuri + Candidate entry. */
+bool dictionary_ui_add_or_promote(void);
+
+/** Delete the exact current Reading + Okuri + Candidate entry. */
+bool dictionary_ui_delete_exact(void);
+
 /**
  * Return true when printable input should be written directly to the focused
  * field instead of being handled by the Japanese IME. This is only true for

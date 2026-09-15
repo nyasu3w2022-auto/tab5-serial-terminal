@@ -105,20 +105,20 @@ M5Stack TAB5 (ESP32-P4) 向けの VT100 互換スタンドアロンシリアル�
 
 ### ユーザー辞書の手動登録・削除
 
-**Ctrl+Alt+D**でTAB5ローカルのDictionary Editorを開きます。編集画面を開いている間、キー入力は接続先へ送信されません。Reading、Okuri、Candidateの3フィールドをTabまたはタッチで選び、Japanese (SKK)の未確定文字列・候補は`Ctrl+J`で選択中フィールドへ格納します。Candidate候補を`Ctrl+J`で格納する場合は、送り仮名を含めず候補語幹だけを保存します。
+**Ctrl+Alt+D**でTAB5ローカルのDictionary Editorを開きます。編集画面を開いている間、キー入力は接続先へ送信されません。Reading、Okuri、Candidateの3フィールドをTabまたはタッチで選び、Japanese (SKK)の未確定文字列・候補は`Ctrl+J`で選択中フィールドへ格納します。Candidate候補を`Ctrl+J`で格納する場合は、送り仮名を含めず候補語幹だけを保存します。Tab5 Keyboardには独立したF5／F8キーがないため、登録・削除には物理キーボード上のCtrlと英字キーの組合せを使用します。
 
 | 操作 | 動作 |
 |:---|:---|
 | Tab | Reading → Okuri → Candidateの順にフィールドを移動 |
 | `Ctrl+J` | 未確定かなまたは選択候補を選択中フィールドへ確定。接続先へは送信しない |
 | Okuriフィールドで`a`〜`z` | 送り仮名の先頭英字を設定。不要なら空欄 |
-| F5 | Reading + Okuri + Candidateをユーザー辞書へ登録し、同じキーの先頭候補へ昇格 |
-| F8 | 完全一致するCandidateをユーザー辞書から削除。最後の候補ならキー行も削除 |
+| Ctrl+S | Reading + Okuri + Candidateをユーザー辞書へ登録し、同じキーの先頭候補へ昇格 |
+| Ctrl+X | 完全一致するCandidateをユーザー辞書から削除。最後の候補ならキー行も削除 |
 | Backspace | IME未確定文字列があればIME編集、なければ選択フィールド末尾を削除 |
 | Esc | IME未確定文字列を取消。未確定文字列がなければEditorを閉じる |
 | `Ctrl+Alt+D` | Editorを閉じ、未保存のフィールド内容を破棄 |
 
-たとえば小辞書にない語を登録する場合、Readingに`ki`→`Ctrl+J`で「き」、Okuriに`t`、Candidateに既存の`KuRu`→Spaceで得た「来」を`Ctrl+J`で入れ、F5を押します。以後は通常の`KiTa`→Space→Enterで「来た」を変換できます。TAB5補助辞書にはこの`きt /来/`を初期収録しているため、追加登録なしでも「来た」を変換できます。
+たとえば小辞書にない語を登録する場合、Readingに`ki`→`Ctrl+J`で「き」、Okuriに`t`、Candidateに既存の`KuRu`→Spaceで得た「来」を`Ctrl+J`で入れ、**Ctrlを押したままS**を押します。以後は通常の`KiTa`→Space→Enterで「来た」を変換できます。TAB5補助辞書にはこの`きt /来/`を初期収録しているため、追加登録なしでも「来た」を変換できます。
 
 
 ### リモートへの送信（選択中の接続方式へそのまま転送）
@@ -133,8 +133,8 @@ M5Stack TAB5 (ESP32-P4) 向けの VT100 互換スタンドアロンシリアル�
 | Page Up / Page Down | `ESC[5~` / `ESC[6~` |
 | Insert | `ESC[2~` |
 | Delete / Del | `ESC[3~` |
-| F1〜F4 | `ESC O P` 〜 `ESC O S` |
-| F5〜F12 | `ESC[15~` 〜 `ESC[24~` |
+| F1〜F4 | `ESC O P` 〜 `ESC O S`。送信テーブルは実装済みだが、Tab5 Keyboardには独立したFキーがないため現行キーボードからは生成されない。 |
+| F5〜F12 | `ESC[15~` 〜 `ESC[24~`。送信テーブルは実装済みだが、Tab5 Keyboardには独立したFキーがないため現行キーボードからは生成されない。 |
 | Escape / Esc | `ESC` (0x1B) |
 | Ctrl+[A-Z] | 対応する制御文字 (0x01〜0x1A) |
 

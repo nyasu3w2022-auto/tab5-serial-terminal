@@ -42,7 +42,7 @@ static editor_field_t s_focus = editor_field_t::READING;
 static std::string s_reading;
 static char s_okuri = '\0';
 static std::string s_candidate;
-static char s_status[192] = "Enter reading and candidate; F5=Add, F8=Delete";
+static char s_status[192] = "Enter reading and candidate; Ctrl+S=Add, Ctrl+X=Delete";
 
 static const lv_font_t *active_font()
 {
@@ -190,7 +190,7 @@ static void ensure_editor_locked()
 
     lv_obj_t *help = lv_label_create(s_overlay);
     lv_label_set_text(help,
-        "Tab: next field   Ctrl+J: IME commit to selected field   F5: Add   F8: Delete   Esc: cancel/close");
+        "Tab: next field   Ctrl+J: IME commit field   Ctrl+S: Add   Ctrl+X: Delete   Esc: cancel/close");
     lv_obj_set_style_text_font(help, &lv_font_unscii_16, 0);
     lv_obj_set_style_text_color(help, lv_color_make(180, 205, 235), 0);
     lv_obj_set_pos(help, 180, 70);
@@ -207,7 +207,7 @@ static void ensure_editor_locked()
     lv_obj_add_event_cb(add_button, action_event_cb, LV_EVENT_CLICKED,
                         (void *)(uintptr_t)editor_action_t::ADD);
     lv_obj_t *add_label = lv_label_create(add_button);
-    lv_label_set_text(add_label, "F5  Add / Promote");
+    lv_label_set_text(add_label, "Ctrl+S  Add / Promote");
     lv_obj_set_style_text_font(add_label, &lv_font_unscii_16, 0);
     lv_obj_set_style_text_color(add_label, lv_color_white(), 0);
     lv_obj_center(add_label);
@@ -220,7 +220,7 @@ static void ensure_editor_locked()
     lv_obj_add_event_cb(remove_button, action_event_cb, LV_EVENT_CLICKED,
                         (void *)(uintptr_t)editor_action_t::REMOVE);
     lv_obj_t *remove_label = lv_label_create(remove_button);
-    lv_label_set_text(remove_label, "F8  Delete Exact");
+    lv_label_set_text(remove_label, "Ctrl+X  Delete Exact");
     lv_obj_set_style_text_font(remove_label, &lv_font_unscii_16, 0);
     lv_obj_set_style_text_color(remove_label, lv_color_white(), 0);
     lv_obj_center(remove_label);
@@ -252,7 +252,7 @@ void dictionary_ui_open(ime_skk_t *ime)
     s_reading.clear();
     s_okuri = '\0';
     s_candidate.clear();
-    set_status("Enter reading and candidate; F5=Add, F8=Delete");
+    set_status("Enter reading and candidate; Ctrl+S=Add, Ctrl+X=Delete");
     ensure_editor_locked();
     update_editor_locked();
     lvgl_port_unlock();
@@ -278,6 +278,24 @@ void dictionary_ui_close(void)
 bool dictionary_ui_is_open(void)
 {
     return s_overlay != nullptr;
+}
+
+bool dictionary_ui_add_or_promote(void)
+{
+    if (!is_editor_ready()) return false;
+    lvgl_port_lock(0);
+    apply_action(editor_action_t::ADD);
+    lvgl_port_unlock();
+    return true;
+}
+
+bool dictionary_ui_delete_exact(void)
+{
+    if (!is_editor_ready()) return false;
+    lvgl_port_lock(0);
+    apply_action(editor_action_t::REMOVE);
+    lvgl_port_unlock();
+    return true;
 }
 
 bool dictionary_ui_accept_raw_text(const char *text, size_t len)
@@ -322,18 +340,6 @@ bool dictionary_ui_handle_special_key(const char *name, const ime_skk_t &ime)
         lvgl_port_lock(0);
         const size_t next = ((size_t)s_focus + 1) % (size_t)editor_field_t::COUNT;
         set_focus((editor_field_t)next);
-        lvgl_port_unlock();
-        return true;
-    }
-    if (strcasecmp(name, "f5") == 0) {
-        lvgl_port_lock(0);
-        apply_action(editor_action_t::ADD);
-        lvgl_port_unlock();
-        return true;
-    }
-    if (strcasecmp(name, "f8") == 0) {
-        lvgl_port_lock(0);
-        apply_action(editor_action_t::REMOVE);
         lvgl_port_unlock();
         return true;
     }

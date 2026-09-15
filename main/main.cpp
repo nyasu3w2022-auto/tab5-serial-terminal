@@ -437,9 +437,10 @@ static bool handle_key_event(const key_event_msg_t *msg)
     // ---- Dictionary Editor owns every key while it is open ----
     if (dictionary_ui_is_open()) {
         if (ctrl && !alt) {
-            if ((char)toupper((unsigned char)msg->str[0]) == 'J') {
-                return dictionary_editor_commit_ime();
-            }
+            const char k = (char)toupper((unsigned char)msg->str[0]);
+            if (k == 'J') return dictionary_editor_commit_ime();
+            if (k == 'S') return dictionary_ui_add_or_promote();
+            if (k == 'X') return dictionary_ui_delete_exact();
             // No other Ctrl operation is meaningful in the local editor.
             return true;
         }
