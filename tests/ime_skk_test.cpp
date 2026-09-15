@@ -40,6 +40,7 @@ int main()
     ime.set_supplement_dictionary_path(supplement_dict_path);
     ime.set_user_dictionary_path(user_dict_path);
     assert(ime.dictionary_available());
+    assert(ime.user_dictionary_writable());
     assert(!ime.user_dictionary_available());
     assert(ime.state() == ime_state_t::IDLE);
     ime_result_t idle_space = ime.input_text(" ", 1);
@@ -265,6 +266,9 @@ int main()
     assert(!deleted_ime.register_user_candidate("き/", 't', "不正"));
     assert(!deleted_ime.register_user_candidate("き", 't', "不/正"));
     assert(!deleted_ime.register_user_candidate("き", 't', "不;正"));
+    ime_skk_t no_user_storage;
+    assert(!no_user_storage.user_dictionary_writable());
+    assert(!no_user_storage.register_user_candidate("き", 't', "来"));
 
     // Ctrl+J confirms a conversion reading as kana without a terminal CR.
     type(ime, "Kanji");

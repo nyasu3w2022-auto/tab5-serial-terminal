@@ -120,6 +120,8 @@ M5Stack TAB5 (ESP32-P4) 向けの VT100 互換スタンドアロンシリアル�
 
 たとえば小辞書にない語を登録する場合、Readingに`ki`→`Ctrl+J`で「き」、Okuriに`t`、Candidateに既存の`KuRu`→Spaceで得た「来」を`Ctrl+J`で入れ、**Ctrlを押したままS**を押します。以後は通常の`KiTa`→Space→Enterで「来た」を変換できます。TAB5補助辞書にはこの`きt /来/`を初期収録しているため、追加登録なしでも「来た」を変換できます。
 
+`User dictionary storage unavailable: reflash updated partition table`と表示された場合は、書換え用`userdict`パーティションを含むファームウェアがまだフラッシュされていません。`idf.py fullclean`、`idf.py build`、`idf.py flash`を順に実行してください。`Cannot add: Reading/Candidate required; Okuri must be a-z`は、ReadingまたはCandidateが空、あるいはOkuriがASCII英字1文字ではない場合に表示されます。
+
 
 ### リモートへの送信（選択中の接続方式へそのまま転送）
 

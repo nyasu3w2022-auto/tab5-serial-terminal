@@ -58,7 +58,7 @@ static ime_skk_t s_ime;
 static bool s_japanese_input_active = false;
 static constexpr const char *SKK_DICT_PATH = "/skk/SKK-JISYO.S.txt";
 static constexpr const char *SKK_SUPPLEMENT_DICT_PATH = "/skk/SKK-JISYO.TAB5.txt";
-static constexpr const char *SKK_USER_DICT_PATH = "/skk/SKK-JISYO.user.txt";
+static constexpr const char *SKK_USER_DICT_PATH = "/skk-user/SKK-JISYO.user.txt";
 
 static void refresh_ime_input_indicator(void)
 {
@@ -117,7 +117,9 @@ static void init_ime_dictionary_storage(void)
     esp_vfs_spiffs_conf_t user_conf = {};
     user_conf.base_path = "/skk-user";
     user_conf.partition_label = "userdict";
-    user_conf.max_files = 1;
+    // Updating a user entry keeps the old file open while writing a
+    // temporary replacement. Both files must be available simultaneously.
+    user_conf.max_files = 2;
     // A newly flashed user partition is intentionally blank. Format it once
     // on first boot, but never format the system dictionary partition.
     user_conf.format_if_mount_failed = true;

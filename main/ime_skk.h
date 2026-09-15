@@ -98,6 +98,9 @@ public:
     /** Returns true when a user dictionary file currently exists. */
     bool user_dictionary_available() const;
 
+    /** Returns true when a writable user-dictionary path was configured. */
+    bool user_dictionary_writable() const;
+
     /** Process a printable ASCII/UTF-8 keyboard event in Japanese mode. */
     ime_result_t input_text(const char *text, size_t len);
 

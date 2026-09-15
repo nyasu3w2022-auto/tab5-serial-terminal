@@ -253,6 +253,11 @@ bool ime_skk_t::user_dictionary_available() const
     return true;
 }
 
+bool ime_skk_t::user_dictionary_writable() const
+{
+    return !s_user_dictionary_path.empty();
+}
+
 ime_state_t ime_skk_t::state() const
 {
     return s_state;

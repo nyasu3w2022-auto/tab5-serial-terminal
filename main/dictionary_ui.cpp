@@ -169,9 +169,12 @@ static void apply_action(editor_action_t action)
     if (!is_editor_ready()) return;
 
     bool ok = false;
-    if (action == editor_action_t::ADD) {
+    if (!s_ime->user_dictionary_writable()) {
+        set_status("User dictionary storage unavailable: reflash updated partition table");
+    } else if (action == editor_action_t::ADD) {
         ok = s_ime->register_user_candidate(s_reading, s_okuri, s_candidate);
-        set_status(ok ? "Saved to user dictionary" : "Cannot add: check Reading, Okuri, Candidate");
+        set_status(ok ? "Saved to user dictionary"
+                      : "Cannot add: Reading/Candidate required; Okuri must be a-z");
     } else {
         ok = s_ime->remove_user_candidate(s_reading, s_okuri, s_candidate);
         set_status(ok ? "Removed from user dictionary" : "Candidate was not in user dictionary");
