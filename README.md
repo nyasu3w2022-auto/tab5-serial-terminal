@@ -124,7 +124,7 @@ M5Stack TAB5 (ESP32-P4) 向けの VT100 互換スタンドアロンシリアル�
 
 ### microSDによるユーザー辞書のバックアップ・移行
 
-microSDカードを**FAT32**でフォーマットしてTab5へ挿入します。Dictionary Editor内では、**Ctrl+E**または`Export SD`でSPIFFS上の学習辞書を`/TAB5-SKK/SKK-JISYO.user.txt`として書き出します。書込みは一時ファイルからのリネームで完了するため、既存のエクスポートファイルを直接上書きしません。
+microSDカードを**FAT32**でフォーマットしてTab5へ挿入します。Dictionary Editor内では、**Ctrl+E**または`Export SD`でSPIFFS上の学習辞書を`/TAB5-SKK/SKKUSER.TXT`として書き出します。この名前は、long file name機能を有効にしていないFATFSでも動作する8.3形式です。書込み時は既存ファイルを8.3形式のバックアップ名へ退避してから新しいファイルを公開するため、FATFSの既存ファイル上書き制約を回避します。
 
 PCで同ファイルをUTF-8／LFのSKK形式のまま編集した後、microSDへ戻してください。**Ctrl+I**または`Import Merge`は既存の候補順を保ったまま、ファイル側にのみある候補を追加します。**Ctrl+R**または`Import Replace`は、1回目に確認を表示し、2回目でSPIFFS上のユーザー辞書をSDカード側の有効な内容へ置き換えます。置換は既存の学習内容を失うため、通常はマージを利用してください。
 

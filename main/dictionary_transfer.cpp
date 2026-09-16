@@ -134,6 +134,14 @@ dictionary_transfer_status_t load_dictionary(const char *path, dictionary_t *dic
     return dictionary_transfer_status_t::OK;
 }
 
+std::string sidecar_path(const char *path, const char *filename)
+{
+    const std::string target(path ? path : "");
+    const size_t separator = target.find_last_of('/');
+    return separator == std::string::npos ? std::string(filename)
+                                           : target.substr(0, separator + 1) + filename;
+}
+
 dictionary_transfer_result_t write_dictionary_atomic(const char *path, const dictionary_t &dictionary)
 {
     dictionary_transfer_result_t result = {};
@@ -143,8 +151,9 @@ dictionary_transfer_result_t write_dictionary_atomic(const char *path, const dic
         return result;
     }
 
-    const std::string temporary_path = std::string(path) + ".tmp";
-    const std::string backup_path = std::string(path) + ".bak";
+    // FATFS long-file-name support is optional. Keep recovery names 8.3-compatible.
+    const std::string temporary_path = sidecar_path(path, "SKKTEMP.TMP");
+    const std::string backup_path = sidecar_path(path, "SKKBAK.BAK");
     remove(temporary_path.c_str());
 
     errno = 0;

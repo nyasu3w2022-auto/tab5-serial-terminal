@@ -11,7 +11,8 @@
 /** microSD mount point and portable user dictionary exchange path. */
 constexpr const char *SD_DICTIONARY_MOUNT_POINT = "/sd";
 constexpr const char *SD_DICTIONARY_DIRECTORY = "/sd/TAB5-SKK";
-constexpr const char *SD_DICTIONARY_FILE_PATH = "/sd/TAB5-SKK/SKK-JISYO.user.txt";
+// Use an 8.3-compatible name because FATFS long-file-name support is optional.
+constexpr const char *SD_DICTIONARY_FILE_PATH = "/sd/TAB5-SKK/SKKUSER.TXT";
 
 /** Mount Tab5's microSD card as a FAT filesystem, without formatting it. */
 esp_err_t sd_dictionary_mount();

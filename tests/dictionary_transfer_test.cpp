@@ -53,7 +53,7 @@ int main()
     const std::string exported_again_text = read_file(sd_export);
     assert(exported_again_text.find("きt /来/\n") != std::string::npos);
     assert(exported_again_text.find("かんじ") == std::string::npos);
-    assert(std::remove("/tmp/tab5-transfer-export.txt.bak") != 0);
+    assert(std::remove("/tmp/SKKBAK.BAK") != 0);
 
     // Restore the multi-entry user dictionary for merge coverage.
     write_file(user, "; user dictionary\nきt /来/着/\nかんじ /漢字/\n");
