@@ -12,7 +12,7 @@
 #include "esp_vfs_fat.h"
 #include "m5tab5_pinmap.h"
 #include "sdmmc_cmd.h"
-#include "sdmmc_host.h"
+#include "driver/sdmmc_host.h"
 
 namespace {
 
