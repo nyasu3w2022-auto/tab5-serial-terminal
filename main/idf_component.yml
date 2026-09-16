@@ -1,7 +1,9 @@
 ## IDF Component Manager Manifest File
 dependencies:
   idf:
-    version: '>=5.3.0'
+    # This application is verified with ESP-IDF v5.5.4. It uses the v5.5
+    # SDMMC Host component and its public driver/sdmmc_host.h header.
+    version: '>=5.5.4'
   # m5_tab5_component is discovered automatically from the project's
   # top-level components/ directory. Do not add a local `path:` dependency
   # here: Windows and nested component-manifest resolution can interpret it
