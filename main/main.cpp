@@ -443,6 +443,9 @@ static bool handle_key_event(const key_event_msg_t *msg)
             if (k == 'J') return dictionary_editor_commit_ime();
             if (k == 'S') return dictionary_ui_add_or_promote();
             if (k == 'X') return dictionary_ui_delete_exact();
+            if (k == 'E') return dictionary_ui_export_to_sd();
+            if (k == 'I') return dictionary_ui_import_merge_from_sd();
+            if (k == 'R') return dictionary_ui_import_replace_from_sd();
             // No other Ctrl operation is meaningful in the local editor.
             return true;
         }

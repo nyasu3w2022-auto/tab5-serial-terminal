@@ -122,6 +122,12 @@ M5Stack TAB5 (ESP32-P4) 向けの VT100 互換スタンドアロンシリアル�
 
 `User dictionary storage unavailable: reflash updated partition table`と表示された場合は、書換え用`userdict`パーティションを含むファームウェアがまだフラッシュされていません。`idf.py fullclean`、`idf.py build`、`idf.py flash`を順に実行してください。`Cannot add: Reading/Candidate required; Okuri must be a-z`は、ReadingまたはCandidateが空、あるいはOkuriがASCII英字1文字ではない場合に表示されます。
 
+### microSDによるユーザー辞書のバックアップ・移行
+
+microSDカードを**FAT32**でフォーマットしてTab5へ挿入します。Dictionary Editor内では、**Ctrl+E**または`Export SD`でSPIFFS上の学習辞書を`/TAB5-SKK/SKK-JISYO.user.txt`として書き出します。書込みは一時ファイルからのリネームで完了するため、既存のエクスポートファイルを直接上書きしません。
+
+PCで同ファイルをUTF-8／LFのSKK形式のまま編集した後、microSDへ戻してください。**Ctrl+I**または`Import Merge`は既存の候補順を保ったまま、ファイル側にのみある候補を追加します。**Ctrl+R**または`Import Replace`は、1回目に確認を表示し、2回目でSPIFFS上のユーザー辞書をSDカード側の有効な内容へ置き換えます。置換は既存の学習内容を失うため、通常はマージを利用してください。
+
 
 ### リモートへの送信（選択中の接続方式へそのまま転送）
 

@@ -10,10 +10,12 @@ idf_component_register(SRCS "main.cpp"
                             "ime_skk.cpp"
                             "ime_ui.cpp"
                             "dictionary_ui.cpp"
+                            "dictionary_transfer.cpp"
+                            "sd_dictionary.cpp"
                             "fonts/lv_font_cjk_16.c"
                             "fonts/lv_font_cjk_28.c"
                     INCLUDE_DIRS "."
-                    REQUIRES esp_timer hal soc esp_driver_uart m5_tab5_component i2c_bus m5_tab5_keyboard_component nvs_flash spiffs)
+                    REQUIRES esp_timer hal soc esp_driver_uart esp_driver_sdmmc m5_tab5_component i2c_bus m5_tab5_keyboard_component nvs_flash spiffs fatfs)
 target_compile_options(${COMPONENT_LIB} PRIVATE -Wno-error=missing-field-initializers)
 
 # Bundle the read-only UTF-8/LF system and TAB5 supplementary SKK dictionaries

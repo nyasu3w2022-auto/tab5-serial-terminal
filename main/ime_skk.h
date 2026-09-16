@@ -101,6 +101,9 @@ public:
     /** Returns true when a writable user-dictionary path was configured. */
     bool user_dictionary_writable() const;
 
+    /** Current writable user-dictionary path, empty when dictionary updates are disabled. */
+    const std::string &user_dictionary_path() const;
+
     /** Process a printable ASCII/UTF-8 keyboard event in Japanese mode. */
     ime_result_t input_text(const char *text, size_t len);
 

@@ -258,6 +258,11 @@ bool ime_skk_t::user_dictionary_writable() const
     return !s_user_dictionary_path.empty();
 }
 
+const std::string &ime_skk_t::user_dictionary_path() const
+{
+    return s_user_dictionary_path;
+}
+
 ime_state_t ime_skk_t::state() const
 {
     return s_state;

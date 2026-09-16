@@ -12,6 +12,7 @@
 #include <cstring>
 
 #include "display.h"
+#include "sd_dictionary.h"
 #include "lvgl.h"
 #include "lvgl_port.h"
 #include "terminal.h"
@@ -31,6 +32,9 @@ enum class editor_field_t : uint8_t {
 enum class editor_action_t : uint8_t {
     ADD = 0,
     REMOVE,
+    EXPORT,
+    IMPORT_MERGE,
+    IMPORT_REPLACE,
 };
 
 static lv_obj_t *s_overlay = nullptr;
@@ -44,6 +48,7 @@ static editor_field_t s_focus = editor_field_t::READING;
 static std::string s_reading;
 static char s_okuri = '\0';
 static std::string s_candidate;
+static bool s_replace_import_pending = false;
 static char s_status[192] = "Enter reading and candidate; Ctrl+S=Add, Ctrl+X=Delete";
 
 static const lv_font_t *active_font()
@@ -167,18 +172,63 @@ static void focus_event_cb(lv_event_t *event)
     set_focus((editor_field_t)raw);
 }
 
+static void set_transfer_status(const char *operation, const dictionary_transfer_result_t &result)
+{
+    if (result.status == dictionary_transfer_status_t::OK) {
+        snprintf(s_status, sizeof(s_status), "%s: %u entries", operation,
+                 (unsigned)result.resulting_entries);
+        return;
+    }
+    if (result.status == dictionary_transfer_status_t::TARGET_UNAVAILABLE) {
+        set_status("SD card unavailable: insert FAT32 card and retry");
+        return;
+    }
+    snprintf(s_status, sizeof(s_status), "%s: %s", operation,
+             dictionary_transfer_status_text(result.status));
+}
+
 static void apply_action(editor_action_t action)
 {
     if (!is_editor_ready()) return;
 
     bool ok = false;
-    if (!s_ime->user_dictionary_writable()) {
+    if (action == editor_action_t::EXPORT) {
+        s_replace_import_pending = false;
+        if (!s_ime->user_dictionary_writable()) {
+            set_status("User dictionary storage unavailable: reflash updated partition table");
+        } else {
+            set_transfer_status("Export", sd_dictionary_export_user(s_ime->user_dictionary_path().c_str()));
+        }
+    } else if (action == editor_action_t::IMPORT_MERGE) {
+        s_replace_import_pending = false;
+        if (!s_ime->user_dictionary_writable()) {
+            set_status("User dictionary storage unavailable: reflash updated partition table");
+        } else {
+            set_transfer_status("Import merge", sd_dictionary_import_user(
+                s_ime->user_dictionary_path().c_str(), dictionary_transfer_mode_t::MERGE));
+        }
+    } else if (action == editor_action_t::IMPORT_REPLACE) {
+        if (!s_replace_import_pending) {
+            s_replace_import_pending = true;
+            set_status("Replace pending: press Replace again (or Ctrl+R) to confirm");
+        } else if (!s_ime->user_dictionary_writable()) {
+            s_replace_import_pending = false;
+            set_status("User dictionary storage unavailable: reflash updated partition table");
+        } else {
+            s_replace_import_pending = false;
+            set_transfer_status("Import replace", sd_dictionary_import_user(
+                s_ime->user_dictionary_path().c_str(), dictionary_transfer_mode_t::REPLACE));
+        }
+    } else if (!s_ime->user_dictionary_writable()) {
+        s_replace_import_pending = false;
         set_status("User dictionary storage unavailable: reflash updated partition table");
     } else if (action == editor_action_t::ADD) {
+        s_replace_import_pending = false;
         ok = s_ime->register_user_candidate(s_reading, s_okuri, s_candidate);
         set_status(ok ? "Saved to user dictionary"
                       : "Cannot add: Reading/Candidate required; Okuri must be a-z");
     } else {
+        s_replace_import_pending = false;
         ok = s_ime->remove_user_candidate(s_reading, s_okuri, s_candidate);
         set_status(ok ? "Removed from user dictionary" : "Candidate was not in user dictionary");
     }
@@ -246,13 +296,13 @@ static void ensure_editor_locked()
     lv_obj_align(title_label, LV_ALIGN_LEFT_MID, 0, 0);
 
     lv_obj_t *help = lv_label_create(s_overlay);
-    lv_label_set_text(help, "Tab: field   Ctrl+J: set field   Ctrl+S: save");
+    lv_label_set_text(help, "Tab: field  Ctrl+J: set  Ctrl+S: save  Ctrl+X: delete");
     lv_obj_set_style_text_font(help, &lv_font_unscii_16, 0);
     lv_obj_set_style_text_color(help, lv_color_make(180, 205, 235), 0);
     lv_obj_set_pos(help, 90, 60);
 
     lv_obj_t *help2 = lv_label_create(s_overlay);
-    lv_label_set_text(help2, "Ctrl+X: delete exact entry   Esc: cancel / close");
+    lv_label_set_text(help2, "Ctrl+E: export SD  Ctrl+I: import merge  Ctrl+R: replace  Esc: close");
     lv_obj_set_style_text_font(help2, &lv_font_unscii_16, 0);
     lv_obj_set_style_text_color(help2, lv_color_make(180, 205, 235), 0);
     lv_obj_set_pos(help2, 90, 82);
@@ -309,6 +359,42 @@ static void ensure_editor_locked()
     lv_label_set_long_mode(s_status_label, LV_LABEL_LONG_CLIP);
     lv_obj_set_style_text_font(s_status_label, active_font(), 0);
     lv_obj_set_style_text_color(s_status_label, lv_color_make(255, 225, 145), 0);
+
+    lv_obj_t *export_button = lv_button_create(s_overlay);
+    lv_obj_set_size(export_button, 220, 46);
+    lv_obj_set_pos(export_button, 210, 550);
+    lv_obj_set_style_bg_color(export_button, lv_color_make(55, 95, 150), 0);
+    lv_obj_add_event_cb(export_button, action_event_cb, LV_EVENT_CLICKED,
+                        (void *)(uintptr_t)editor_action_t::EXPORT);
+    lv_obj_t *export_label = lv_label_create(export_button);
+    lv_label_set_text(export_label, "Export SD");
+    lv_obj_set_style_text_font(export_label, &lv_font_unscii_16, 0);
+    lv_obj_set_style_text_color(export_label, lv_color_white(), 0);
+    lv_obj_center(export_label);
+
+    lv_obj_t *merge_button = lv_button_create(s_overlay);
+    lv_obj_set_size(merge_button, 220, 46);
+    lv_obj_set_pos(merge_button, 530, 550);
+    lv_obj_set_style_bg_color(merge_button, lv_color_make(0, 110, 105), 0);
+    lv_obj_add_event_cb(merge_button, action_event_cb, LV_EVENT_CLICKED,
+                        (void *)(uintptr_t)editor_action_t::IMPORT_MERGE);
+    lv_obj_t *merge_label = lv_label_create(merge_button);
+    lv_label_set_text(merge_label, "Import Merge");
+    lv_obj_set_style_text_font(merge_label, &lv_font_unscii_16, 0);
+    lv_obj_set_style_text_color(merge_label, lv_color_white(), 0);
+    lv_obj_center(merge_label);
+
+    lv_obj_t *replace_button = lv_button_create(s_overlay);
+    lv_obj_set_size(replace_button, 220, 46);
+    lv_obj_set_pos(replace_button, 850, 550);
+    lv_obj_set_style_bg_color(replace_button, lv_color_make(145, 80, 35), 0);
+    lv_obj_add_event_cb(replace_button, action_event_cb, LV_EVENT_CLICKED,
+                        (void *)(uintptr_t)editor_action_t::IMPORT_REPLACE);
+    lv_obj_t *replace_label = lv_label_create(replace_button);
+    lv_label_set_text(replace_label, "Import Replace");
+    lv_obj_set_style_text_font(replace_label, &lv_font_unscii_16, 0);
+    lv_obj_set_style_text_color(replace_label, lv_color_white(), 0);
+    lv_obj_center(replace_label);
 }
 
 static void erase_last_utf8(std::string *value)
@@ -330,6 +416,7 @@ void dictionary_ui_open(ime_skk_t *ime)
     s_reading.clear();
     s_okuri = '\0';
     s_candidate.clear();
+    s_replace_import_pending = false;
     set_status("Ready: select a field, then enter its value");
     ensure_editor_locked();
     update_editor_locked();
@@ -348,6 +435,7 @@ void dictionary_ui_close(void)
     s_candidate_preview_label = nullptr;
     s_status_label = nullptr;
     s_ime = nullptr;
+    s_replace_import_pending = false;
     lvgl_port_unlock();
 
     term_mark_all_dirty();
@@ -374,6 +462,33 @@ bool dictionary_ui_delete_exact(void)
     if (!is_editor_ready()) return false;
     lvgl_port_lock(0);
     apply_action(editor_action_t::REMOVE);
+    lvgl_port_unlock();
+    return true;
+}
+
+bool dictionary_ui_export_to_sd(void)
+{
+    if (!is_editor_ready()) return false;
+    lvgl_port_lock(0);
+    apply_action(editor_action_t::EXPORT);
+    lvgl_port_unlock();
+    return true;
+}
+
+bool dictionary_ui_import_merge_from_sd(void)
+{
+    if (!is_editor_ready()) return false;
+    lvgl_port_lock(0);
+    apply_action(editor_action_t::IMPORT_MERGE);
+    lvgl_port_unlock();
+    return true;
+}
+
+bool dictionary_ui_import_replace_from_sd(void)
+{
+    if (!is_editor_ready()) return false;
+    lvgl_port_lock(0);
+    apply_action(editor_action_t::IMPORT_REPLACE);
     lvgl_port_unlock();
     return true;
 }

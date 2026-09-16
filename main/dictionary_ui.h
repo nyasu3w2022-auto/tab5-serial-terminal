@@ -26,6 +26,15 @@ bool dictionary_ui_add_or_promote(void);
 /** Delete the exact current Reading + Okuri + Candidate entry. */
 bool dictionary_ui_delete_exact(void);
 
+/** Export the writable user dictionary to the standard microSD exchange file. */
+bool dictionary_ui_export_to_sd(void);
+
+/** Import the standard microSD dictionary by merging its entries. */
+bool dictionary_ui_import_merge_from_sd(void);
+
+/** Request or confirm replacement import from the standard microSD dictionary. */
+bool dictionary_ui_import_replace_from_sd(void);
+
 /**
  * Return true when printable input should be written directly to the focused
  * field instead of being handled by the Japanese IME. This is only true for
