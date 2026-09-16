@@ -180,11 +180,21 @@ static void set_transfer_status(const char *operation, const dictionary_transfer
         return;
     }
     if (result.status == dictionary_transfer_status_t::TARGET_UNAVAILABLE) {
-        set_status("SD card unavailable: insert FAT32 card and retry");
+        if (result.stage == dictionary_transfer_stage_t::SD_MOUNT) {
+            snprintf(s_status, sizeof(s_status), "SD mount failed (err=0x%X)",
+                     (unsigned)result.system_errno);
+        } else {
+            set_status("User dictionary storage unavailable: reflash updated partition table");
+        }
         return;
     }
-    snprintf(s_status, sizeof(s_status), "%s: %s", operation,
-             dictionary_transfer_status_text(result.status));
+    if (result.system_errno != 0) {
+        snprintf(s_status, sizeof(s_status), "%s failed: %s (errno=%d)", operation,
+                 dictionary_transfer_stage_text(result.stage), result.system_errno);
+    } else {
+        snprintf(s_status, sizeof(s_status), "%s failed: %s", operation,
+                 dictionary_transfer_status_text(result.status));
+    }
 }
 
 static void apply_action(editor_action_t action)

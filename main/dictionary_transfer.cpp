@@ -6,16 +6,27 @@
 
 #include "dictionary_transfer.h"
 
+#include <cerrno>
 #include <cstdio>
 #include <cstring>
 #include <map>
 #include <string>
+#include <sys/stat.h>
 #include <vector>
 
 namespace {
 
 constexpr size_t MAX_DICT_LINE_BYTES = 512;
 using dictionary_t = std::map<std::string, std::vector<std::string>>;
+
+void set_failure(dictionary_transfer_result_t *result, dictionary_transfer_status_t status,
+                 dictionary_transfer_stage_t stage, int system_errno)
+{
+    if (result == nullptr) return;
+    result->status = status;
+    result->stage = stage;
+    result->system_errno = system_errno;
+}
 
 bool is_safe_field(const std::string &value, bool is_key)
 {
@@ -82,16 +93,20 @@ bool parse_dictionary_line(char *line, dictionary_t *dictionary)
 }
 
 dictionary_transfer_status_t load_dictionary(const char *path, dictionary_t *dictionary,
-                                             size_t *entry_count, bool missing_is_empty)
+                                             size_t *entry_count, bool missing_is_empty,
+                                             int *system_errno)
 {
+    if (system_errno != nullptr) *system_errno = 0;
     if (dictionary == nullptr || entry_count == nullptr || path == nullptr || path[0] == '\0') {
         return dictionary_transfer_status_t::TARGET_UNAVAILABLE;
     }
     dictionary->clear();
     *entry_count = 0;
 
+    errno = 0;
     FILE *in = fopen(path, "rb");
     if (in == nullptr) {
+        if (system_errno != nullptr) *system_errno = errno;
         return missing_is_empty ? dictionary_transfer_status_t::OK
                                 : dictionary_transfer_status_t::SOURCE_NOT_FOUND;
     }
@@ -108,45 +123,122 @@ dictionary_transfer_status_t load_dictionary(const char *path, dictionary_t *dic
             return dictionary_transfer_status_t::INVALID_FORMAT;
         }
     }
-    if (ferror(in) != 0 || fclose(in) != 0) return dictionary_transfer_status_t::IO_ERROR;
+    const int read_errno = ferror(in) != 0 ? errno : 0;
+    const int close_result = fclose(in);
+    if (read_errno != 0 || close_result != 0) {
+        if (system_errno != nullptr) *system_errno = read_errno != 0 ? read_errno : errno;
+        return dictionary_transfer_status_t::IO_ERROR;
+    }
 
     for (const auto &entry : *dictionary) *entry_count += entry.second.size();
     return dictionary_transfer_status_t::OK;
 }
 
-dictionary_transfer_status_t write_dictionary_atomic(const char *path, const dictionary_t &dictionary)
+dictionary_transfer_result_t write_dictionary_atomic(const char *path, const dictionary_t &dictionary)
 {
-    if (path == nullptr || path[0] == '\0') return dictionary_transfer_status_t::TARGET_UNAVAILABLE;
+    dictionary_transfer_result_t result = {};
+    if (path == nullptr || path[0] == '\0') {
+        set_failure(&result, dictionary_transfer_status_t::TARGET_UNAVAILABLE,
+                    dictionary_transfer_stage_t::NONE, 0);
+        return result;
+    }
 
     const std::string temporary_path = std::string(path) + ".tmp";
-    FILE *out = fopen(temporary_path.c_str(), "wb");
-    if (out == nullptr) return dictionary_transfer_status_t::IO_ERROR;
+    const std::string backup_path = std::string(path) + ".bak";
+    remove(temporary_path.c_str());
 
-    bool ok = fputs("; TAB5 SKK user dictionary (UTF-8/LF)\n", out) >= 0;
+    errno = 0;
+    FILE *out = fopen(temporary_path.c_str(), "wb");
+    if (out == nullptr) {
+        set_failure(&result, dictionary_transfer_status_t::IO_ERROR,
+                    dictionary_transfer_stage_t::TEMPORARY_OPEN, errno);
+        return result;
+    }
+
+    bool write_ok = fputs("; TAB5 SKK user dictionary (UTF-8/LF)\n", out) >= 0;
     for (const auto &entry : dictionary) {
-        if (!ok) break;
+        if (!write_ok) break;
         if (fprintf(out, "%s ", entry.first.c_str()) < 0) {
-            ok = false;
+            write_ok = false;
             break;
         }
         for (const std::string &candidate : entry.second) {
             if (fprintf(out, "/%s", candidate.c_str()) < 0) {
-                ok = false;
+                write_ok = false;
                 break;
             }
         }
-        if (!ok || fputs("/\n", out) < 0) {
-            ok = false;
+        if (!write_ok || fputs("/\n", out) < 0) {
+            write_ok = false;
             break;
         }
     }
-    if (fflush(out) != 0 || fclose(out) != 0) ok = false;
 
-    if (!ok || rename(temporary_path.c_str(), path) != 0) {
+    const int write_errno = write_ok ? 0 : errno;
+    const int flush_result = fflush(out);
+    const int flush_errno = flush_result == 0 ? 0 : errno;
+    const int close_result = fclose(out);
+    const int close_errno = close_result == 0 ? 0 : errno;
+    if (!write_ok || flush_result != 0 || close_result != 0) {
         remove(temporary_path.c_str());
-        return dictionary_transfer_status_t::IO_ERROR;
+        const dictionary_transfer_stage_t stage = !write_ok
+            ? dictionary_transfer_stage_t::TEMPORARY_WRITE
+            : (flush_result != 0 ? dictionary_transfer_stage_t::TEMPORARY_WRITE
+                                 : dictionary_transfer_stage_t::TEMPORARY_CLOSE);
+        const int error = write_errno != 0 ? write_errno
+                        : (flush_errno != 0 ? flush_errno : close_errno);
+        set_failure(&result, dictionary_transfer_status_t::IO_ERROR, stage, error);
+        return result;
     }
-    return dictionary_transfer_status_t::OK;
+
+    struct stat existing = {};
+    errno = 0;
+    const bool target_exists = stat(path, &existing) == 0;
+    if (!target_exists && errno != ENOENT) {
+        remove(temporary_path.c_str());
+        set_failure(&result, dictionary_transfer_status_t::IO_ERROR,
+                    dictionary_transfer_stage_t::TARGET_BACKUP, errno);
+        return result;
+    }
+
+    bool moved_old_target = false;
+    if (target_exists) {
+        errno = 0;
+        if (remove(backup_path.c_str()) != 0 && errno != ENOENT) {
+            remove(temporary_path.c_str());
+            set_failure(&result, dictionary_transfer_status_t::IO_ERROR,
+                        dictionary_transfer_stage_t::TARGET_BACKUP, errno);
+            return result;
+        }
+        errno = 0;
+        if (rename(path, backup_path.c_str()) != 0) {
+            remove(temporary_path.c_str());
+            set_failure(&result, dictionary_transfer_status_t::IO_ERROR,
+                        dictionary_transfer_stage_t::TARGET_BACKUP, errno);
+            return result;
+        }
+        moved_old_target = true;
+    }
+
+    errno = 0;
+    if (rename(temporary_path.c_str(), path) != 0) {
+        const int rename_errno = errno;
+        if (moved_old_target) rename(backup_path.c_str(), path);
+        remove(temporary_path.c_str());
+        set_failure(&result, dictionary_transfer_status_t::IO_ERROR,
+                    dictionary_transfer_stage_t::TARGET_RENAME, rename_errno);
+        return result;
+    }
+
+    if (moved_old_target) {
+        errno = 0;
+        if (remove(backup_path.c_str()) != 0) {
+            set_failure(&result, dictionary_transfer_status_t::IO_ERROR,
+                        dictionary_transfer_stage_t::BACKUP_CLEANUP, errno);
+            return result;
+        }
+    }
+    return result;
 }
 
 void merge_dictionary(dictionary_t *destination, const dictionary_t &source)
@@ -173,11 +265,19 @@ dictionary_transfer_result_t dictionary_transfer_export(const char *user_diction
 {
     dictionary_transfer_result_t result = {};
     dictionary_t source;
-    result.status = load_dictionary(user_dictionary_path, &source, &result.source_entries, true);
-    if (result.status != dictionary_transfer_status_t::OK) return result;
+    int system_errno = 0;
+    result.status = load_dictionary(user_dictionary_path, &source, &result.source_entries, true,
+                                    &system_errno);
+    if (result.status != dictionary_transfer_status_t::OK) {
+        result.stage = dictionary_transfer_stage_t::SOURCE_READ;
+        result.system_errno = system_errno;
+        return result;
+    }
 
-    result.status = write_dictionary_atomic(target_path, source);
-    result.resulting_entries = candidate_count(source);
+    result = write_dictionary_atomic(target_path, source);
+    result.source_entries = candidate_count(source);
+    result.resulting_entries = result.status == dictionary_transfer_status_t::OK
+        ? result.source_entries : 0;
     return result;
 }
 
@@ -187,21 +287,34 @@ dictionary_transfer_result_t dictionary_transfer_import(const char *source_path,
 {
     dictionary_transfer_result_t result = {};
     dictionary_t imported;
-    result.status = load_dictionary(source_path, &imported, &result.source_entries, false);
-    if (result.status != dictionary_transfer_status_t::OK) return result;
+    int system_errno = 0;
+    result.status = load_dictionary(source_path, &imported, &result.source_entries, false,
+                                    &system_errno);
+    if (result.status != dictionary_transfer_status_t::OK) {
+        result.stage = dictionary_transfer_stage_t::SOURCE_READ;
+        result.system_errno = system_errno;
+        return result;
+    }
 
     dictionary_t target;
     if (mode == dictionary_transfer_mode_t::MERGE) {
         size_t existing_entries = 0;
-        result.status = load_dictionary(user_dictionary_path, &target, &existing_entries, true);
-        if (result.status != dictionary_transfer_status_t::OK) return result;
+        result.status = load_dictionary(user_dictionary_path, &target, &existing_entries, true,
+                                        &system_errno);
+        if (result.status != dictionary_transfer_status_t::OK) {
+            result.stage = dictionary_transfer_stage_t::TARGET_READ;
+            result.system_errno = system_errno;
+            return result;
+        }
         merge_dictionary(&target, imported);
     } else {
         target = imported;
     }
 
-    result.status = write_dictionary_atomic(user_dictionary_path, target);
-    result.resulting_entries = candidate_count(target);
+    result = write_dictionary_atomic(user_dictionary_path, target);
+    result.source_entries = candidate_count(imported);
+    result.resulting_entries = result.status == dictionary_transfer_status_t::OK
+        ? candidate_count(target) : 0;
     return result;
 }
 
@@ -214,5 +327,23 @@ const char *dictionary_transfer_status_text(dictionary_transfer_status_t status)
     case dictionary_transfer_status_t::INVALID_FORMAT: return "Invalid SKK dictionary format";
     case dictionary_transfer_status_t::IO_ERROR: return "SD card I/O error";
     default: return "Unknown error";
+    }
+}
+
+const char *dictionary_transfer_stage_text(dictionary_transfer_stage_t stage)
+{
+    switch (stage) {
+    case dictionary_transfer_stage_t::NONE: return "none";
+    case dictionary_transfer_stage_t::SOURCE_READ: return "source read";
+    case dictionary_transfer_stage_t::TARGET_READ: return "target read";
+    case dictionary_transfer_stage_t::TEMPORARY_OPEN: return "temporary open";
+    case dictionary_transfer_stage_t::TEMPORARY_WRITE: return "temporary write";
+    case dictionary_transfer_stage_t::TEMPORARY_CLOSE: return "temporary close";
+    case dictionary_transfer_stage_t::TARGET_BACKUP: return "backup old file";
+    case dictionary_transfer_stage_t::TARGET_RENAME: return "publish new file";
+    case dictionary_transfer_stage_t::BACKUP_CLEANUP: return "cleanup backup";
+    case dictionary_transfer_stage_t::SD_MOUNT: return "SD mount";
+    case dictionary_transfer_stage_t::SD_DIRECTORY: return "create exchange directory";
+    default: return "unknown";
     }
 }

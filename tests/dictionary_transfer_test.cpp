@@ -45,6 +45,19 @@ int main()
     assert(exported_text.find("きt /来/着/\n") != std::string::npos);
     assert(exported_text.find("かんじ /漢字/\n") != std::string::npos);
 
+    // FATFS does not replace a destination during rename. Exporting again must
+    // therefore publish over an existing exchange file without losing it.
+    write_file(user, "きt /来/\n");
+    dictionary_transfer_result_t exported_again = dictionary_transfer_export(user, sd_export);
+    assert(exported_again.status == dictionary_transfer_status_t::OK);
+    const std::string exported_again_text = read_file(sd_export);
+    assert(exported_again_text.find("きt /来/\n") != std::string::npos);
+    assert(exported_again_text.find("かんじ") == std::string::npos);
+    assert(std::remove("/tmp/tab5-transfer-export.txt.bak") != 0);
+
+    // Restore the multi-entry user dictionary for merge coverage.
+    write_file(user, "; user dictionary\nきt /来/着/\nかんじ /漢字/\n");
+
     // Merge keeps current order and appends only imported non-duplicate values.
     write_file(sd_import, "; imported\nきt /着/帰/\nみr /見/\n");
     dictionary_transfer_result_t merged = dictionary_transfer_import(

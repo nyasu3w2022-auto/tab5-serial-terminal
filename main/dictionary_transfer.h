@@ -20,10 +20,27 @@ enum class dictionary_transfer_status_t : unsigned char {
     IO_ERROR,
 };
 
+/** Stage at which a transfer stopped; used for concise UI and serial diagnostics. */
+enum class dictionary_transfer_stage_t : unsigned char {
+    NONE,
+    SOURCE_READ,
+    TARGET_READ,
+    TEMPORARY_OPEN,
+    TEMPORARY_WRITE,
+    TEMPORARY_CLOSE,
+    TARGET_BACKUP,
+    TARGET_RENAME,
+    BACKUP_CLEANUP,
+    SD_MOUNT,
+    SD_DIRECTORY,
+};
+
 struct dictionary_transfer_result_t {
     dictionary_transfer_status_t status = dictionary_transfer_status_t::OK;
     size_t source_entries = 0;
     size_t resulting_entries = 0;
+    dictionary_transfer_stage_t stage = dictionary_transfer_stage_t::NONE;
+    int system_errno = 0;
 };
 
 /** Copy a user dictionary to target_path through a temporary file then rename. */
@@ -41,3 +58,6 @@ dictionary_transfer_result_t dictionary_transfer_import(const char *source_path,
 
 /** Human-readable status used by the local Dictionary Editor. */
 const char *dictionary_transfer_status_text(dictionary_transfer_status_t status);
+
+/** Short processing-stage name for diagnostics. */
+const char *dictionary_transfer_stage_text(dictionary_transfer_stage_t stage);
