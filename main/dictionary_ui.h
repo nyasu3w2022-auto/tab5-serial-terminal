@@ -26,6 +26,9 @@ bool dictionary_ui_add_or_promote(void);
 /** Delete the exact current Reading + Okuri + Candidate entry. */
 bool dictionary_ui_delete_exact(void);
 
+/** Save RAM-pending learned priority to Flash and back up the result to microSD. */
+bool dictionary_ui_save_learning(void);
+
 /** Export the writable user dictionary to the standard microSD exchange file. */
 bool dictionary_ui_export_to_sd(void);
 

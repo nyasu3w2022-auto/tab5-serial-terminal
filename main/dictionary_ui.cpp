@@ -32,6 +32,7 @@ enum class editor_field_t : uint8_t {
 enum class editor_action_t : uint8_t {
     ADD = 0,
     REMOVE,
+    SAVE_LEARNING,
     EXPORT,
     IMPORT_MERGE,
     IMPORT_REPLACE,
@@ -151,7 +152,14 @@ static void update_editor_locked()
             field == s_focus ? lv_color_make(35, 65, 105) : lv_color_make(28, 28, 45), 0);
     }
     update_ime_preview_locked();
-    lv_label_set_text(s_status_label, s_status);
+    char status[256] = {};
+    if (s_ime != nullptr && s_ime->pending_learning_count() > 0) {
+        snprintf(status, sizeof(status), "%s  Learning pending: %u", s_status,
+                 (unsigned)s_ime->pending_learning_count());
+        lv_label_set_text(s_status_label, status);
+    } else {
+        lv_label_set_text(s_status_label, s_status);
+    }
     lv_obj_move_foreground(s_overlay);
 }
 
@@ -197,12 +205,50 @@ static void set_transfer_status(const char *operation, const dictionary_transfer
     }
 }
 
+static bool flush_learning_before_dictionary_edit(void)
+{
+    if (s_ime->pending_learning_count() == 0) return true;
+    if (s_ime->flush_pending_learning()) return true;
+    set_status("Pending learning save to Flash failed");
+    return false;
+}
+
+static bool backup_user_dictionary_to_sd(const char *flash_status)
+{
+    const dictionary_transfer_result_t result =
+        sd_dictionary_export_user(s_ime->user_dictionary_path().c_str());
+    if (result.status == dictionary_transfer_status_t::OK) {
+        snprintf(s_status, sizeof(s_status), "%s and SD backup: %u entries", flash_status,
+                 (unsigned)result.resulting_entries);
+        return true;
+    }
+    if (result.system_errno != 0) {
+        snprintf(s_status, sizeof(s_status), "%s; SD backup failed: %s (errno=%d)",
+                 flash_status, dictionary_transfer_stage_text(result.stage), result.system_errno);
+    } else {
+        snprintf(s_status, sizeof(s_status), "%s; SD backup failed: %s", flash_status,
+                 dictionary_transfer_status_text(result.status));
+    }
+    return false;
+}
+
 static void apply_action(editor_action_t action)
 {
     if (!is_editor_ready()) return;
 
     bool ok = false;
-    if (action == editor_action_t::EXPORT) {
+    if (action == editor_action_t::SAVE_LEARNING) {
+        s_replace_import_pending = false;
+        if (!s_ime->user_dictionary_writable()) {
+            set_status("User dictionary storage unavailable: reflash updated partition table");
+        } else if (s_ime->pending_learning_count() == 0) {
+            set_status("No pending learning changes");
+        } else if (s_ime->flush_pending_learning()) {
+            backup_user_dictionary_to_sd("Learning saved to Flash");
+        } else {
+            set_status("Learning save to Flash failed");
+        }
+    } else if (action == editor_action_t::EXPORT) {
         s_replace_import_pending = false;
         if (!s_ime->user_dictionary_writable()) {
             set_status("User dictionary storage unavailable: reflash updated partition table");
@@ -213,9 +259,14 @@ static void apply_action(editor_action_t action)
         s_replace_import_pending = false;
         if (!s_ime->user_dictionary_writable()) {
             set_status("User dictionary storage unavailable: reflash updated partition table");
-        } else {
-            set_transfer_status("Import merge", sd_dictionary_import_user(
-                s_ime->user_dictionary_path().c_str(), dictionary_transfer_mode_t::MERGE));
+        } else if (flush_learning_before_dictionary_edit()) {
+            const dictionary_transfer_result_t result = sd_dictionary_import_user(
+                s_ime->user_dictionary_path().c_str(), dictionary_transfer_mode_t::MERGE);
+            if (result.status == dictionary_transfer_status_t::OK) {
+                backup_user_dictionary_to_sd("Import merge saved to Flash");
+            } else {
+                set_transfer_status("Import merge", result);
+            }
         }
     } else if (action == editor_action_t::IMPORT_REPLACE) {
         if (!s_replace_import_pending) {
@@ -224,10 +275,15 @@ static void apply_action(editor_action_t action)
         } else if (!s_ime->user_dictionary_writable()) {
             s_replace_import_pending = false;
             set_status("User dictionary storage unavailable: reflash updated partition table");
-        } else {
+        } else if (flush_learning_before_dictionary_edit()) {
             s_replace_import_pending = false;
-            set_transfer_status("Import replace", sd_dictionary_import_user(
-                s_ime->user_dictionary_path().c_str(), dictionary_transfer_mode_t::REPLACE));
+            const dictionary_transfer_result_t result = sd_dictionary_import_user(
+                s_ime->user_dictionary_path().c_str(), dictionary_transfer_mode_t::REPLACE);
+            if (result.status == dictionary_transfer_status_t::OK) {
+                backup_user_dictionary_to_sd("Import replace saved to Flash");
+            } else {
+                set_transfer_status("Import replace", result);
+            }
         }
     } else if (!s_ime->user_dictionary_writable()) {
         s_replace_import_pending = false;
@@ -235,12 +291,19 @@ static void apply_action(editor_action_t action)
     } else if (action == editor_action_t::ADD) {
         s_replace_import_pending = false;
         ok = s_ime->register_user_candidate(s_reading, s_okuri, s_candidate);
-        set_status(ok ? "Saved to user dictionary"
-                      : "Cannot add: Reading/Candidate required; Okuri must be a-z");
+        if (ok) {
+            backup_user_dictionary_to_sd("Entry saved to Flash");
+        } else {
+            set_status("Cannot add: Reading/Candidate required; Okuri must be a-z");
+        }
     } else {
         s_replace_import_pending = false;
         ok = s_ime->remove_user_candidate(s_reading, s_okuri, s_candidate);
-        set_status(ok ? "Removed from user dictionary" : "Candidate was not in user dictionary");
+        if (ok) {
+            backup_user_dictionary_to_sd("Entry removed from Flash");
+        } else {
+            set_status("Candidate was not in user dictionary");
+        }
     }
     update_editor_locked();
 }
@@ -306,7 +369,7 @@ static void ensure_editor_locked()
     lv_obj_align(title_label, LV_ALIGN_LEFT_MID, 0, 0);
 
     lv_obj_t *help = lv_label_create(s_overlay);
-    lv_label_set_text(help, "Tab: field  Ctrl+J: set  Ctrl+S: save  Ctrl+X: delete");
+    lv_label_set_text(help, "Tab: field  Ctrl+J: set  Ctrl+S: add  Ctrl+X: delete  Ctrl+W: save learning");
     lv_obj_set_style_text_font(help, &lv_font_unscii_16, 0);
     lv_obj_set_style_text_color(help, lv_color_make(180, 205, 235), 0);
     lv_obj_set_pos(help, 90, 60);
@@ -323,7 +386,7 @@ static void ensure_editor_locked()
 
     lv_obj_t *add_button = lv_button_create(s_overlay);
     lv_obj_set_size(add_button, 220, 54);
-    lv_obj_set_pos(add_button, 410, 330);
+    lv_obj_set_pos(add_button, 230, 330);
     lv_obj_set_style_bg_color(add_button, lv_color_make(0, 125, 60), 0);
     lv_obj_set_style_bg_color(add_button, lv_color_make(0, 175, 80), LV_STATE_PRESSED);
     lv_obj_add_event_cb(add_button, action_event_cb, LV_EVENT_CLICKED,
@@ -336,7 +399,7 @@ static void ensure_editor_locked()
 
     lv_obj_t *remove_button = lv_button_create(s_overlay);
     lv_obj_set_size(remove_button, 220, 54);
-    lv_obj_set_pos(remove_button, 650, 330);
+    lv_obj_set_pos(remove_button, 530, 330);
     lv_obj_set_style_bg_color(remove_button, lv_color_make(145, 50, 50), 0);
     lv_obj_set_style_bg_color(remove_button, lv_color_make(195, 70, 70), LV_STATE_PRESSED);
     lv_obj_add_event_cb(remove_button, action_event_cb, LV_EVENT_CLICKED,
@@ -346,6 +409,19 @@ static void ensure_editor_locked()
     lv_obj_set_style_text_font(remove_label, &lv_font_unscii_16, 0);
     lv_obj_set_style_text_color(remove_label, lv_color_white(), 0);
     lv_obj_center(remove_label);
+
+    lv_obj_t *save_learning_button = lv_button_create(s_overlay);
+    lv_obj_set_size(save_learning_button, 220, 54);
+    lv_obj_set_pos(save_learning_button, 830, 330);
+    lv_obj_set_style_bg_color(save_learning_button, lv_color_make(100, 80, 20), 0);
+    lv_obj_set_style_bg_color(save_learning_button, lv_color_make(150, 120, 25), LV_STATE_PRESSED);
+    lv_obj_add_event_cb(save_learning_button, action_event_cb, LV_EVENT_CLICKED,
+                        (void *)(uintptr_t)editor_action_t::SAVE_LEARNING);
+    lv_obj_t *save_learning_label = lv_label_create(save_learning_button);
+    lv_label_set_text(save_learning_label, "Save Learning");
+    lv_obj_set_style_text_font(save_learning_label, &lv_font_unscii_16, 0);
+    lv_obj_set_style_text_color(save_learning_label, lv_color_white(), 0);
+    lv_obj_center(save_learning_label);
 
     s_preedit_label = lv_label_create(s_overlay);
     lv_obj_set_size(s_preedit_label, 1100, 40);
@@ -427,7 +503,10 @@ void dictionary_ui_open(ime_skk_t *ime)
     s_okuri = '\0';
     s_candidate.clear();
     s_replace_import_pending = false;
-    set_status("Ready: select a field, then enter its value");
+    const char *learning_name = "Deferred";
+    if (s_ime->learning_mode() == ime_learning_mode_t::OFF) learning_name = "Off";
+    else if (s_ime->learning_mode() == ime_learning_mode_t::MANUAL) learning_name = "Manual";
+    snprintf(s_status, sizeof(s_status), "Ready: select a field. Learning mode: %s", learning_name);
     ensure_editor_locked();
     update_editor_locked();
     lvgl_port_unlock();
@@ -472,6 +551,15 @@ bool dictionary_ui_delete_exact(void)
     if (!is_editor_ready()) return false;
     lvgl_port_lock(0);
     apply_action(editor_action_t::REMOVE);
+    lvgl_port_unlock();
+    return true;
+}
+
+bool dictionary_ui_save_learning(void)
+{
+    if (!is_editor_ready()) return false;
+    lvgl_port_lock(0);
+    apply_action(editor_action_t::SAVE_LEARNING);
     lvgl_port_unlock();
     return true;
 }

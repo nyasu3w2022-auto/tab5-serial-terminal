@@ -101,7 +101,19 @@ M5Stack TAB5 (ESP32-P4) 向けの VT100 互換スタンドアロンシリアル�
 
 > **注意:** ▽／▼状態でのEnter、または未確定状態での`Ctrl+J`は、日本語文字列を確定するだけでCRは送信しません。リモートシェルでコマンドを実行するには、確定後にもう一度Enterを押してください。`Ctrl+J`は標準的なSKKの確定操作です。未確定入力を残したままTab・ナビゲーション・Delete・ファンクションキー・Alt修飾・通常のCtrl制御キーを使う場合は、リモート端末との編集状態の乖離を防ぐため、TAB5側の未確定入力を取消してから該当キーを送信します。接続先側もUTF-8を解釈できる必要があります。Local Echo BackをONにした場合は、確定後のUTF-8文字列だけがローカル表示されます。
 
-辞書は、ユーザー辞書、TAB5補助辞書、システム辞書の順に検索します。システム辞書`assets/SKK-JISYO.S.txt`と補助辞書`assets/SKK-JISYO.TAB5.txt`はビルド時にSPIFFSの`skk`パーティションへ組み込まれ、実行時にはそれぞれ`/skk/SKK-JISYO.S.txt`、`/skk/SKK-JISYO.TAB5.txt`として利用されます。候補を確定すると、選択候補はSPIFFSの別パーティション`userdict`にあるユーザー辞書`/skk-user/SKK-JISYO.user.txt`へ自動学習され、次回以降は同じ読みの先頭候補になります。ユーザー辞書はシステム辞書の再フラッシュでは保持されますが、`idf.py erase-flash`または`userdict`パーティションの消去では初期化されます。辞書が読み込めない場合でもひらがな入力・確定は利用できますが、漢字候補は表示されません。変換方式の詳細は [`docs/japanese_ime_design.md`](docs/japanese_ime_design.md) を参照してください。
+辞書は、ユーザー辞書、TAB5補助辞書、システム辞書の順に検索します。システム辞書`assets/SKK-JISYO.S.txt`と補助辞書`assets/SKK-JISYO.TAB5.txt`はビルド時にSPIFFSの`skk`パーティションへ組み込まれ、実行時にはそれぞれ`/skk/SKK-JISYO.S.txt`、`/skk/SKK-JISYO.TAB5.txt`として利用されます。学習済み候補はSPIFFSの別パーティション`userdict`にあるユーザー辞書`/skk-user/SKK-JISYO.user.txt`へ保存できます。ユーザー辞書はシステム辞書の再フラッシュでは保持されますが、`idf.py erase-flash`または`userdict`パーティションの消去では初期化されます。辞書が読み込めない場合でもひらがな入力・確定は利用できますが、漢字候補は表示されません。変換方式の詳細は [`docs/japanese_ime_design.md`](docs/japanese_ime_design.md) を参照してください。
+
+### 学習保存モード
+
+設定画面の**Learning**で、候補確定時の優先学習とFlash保存方式を選択します。初期値は**Deferred (batch)**です。
+
+| 設定画面の選択肢 | 日本語での意味 | 候補確定後 | Flash保存 |
+|:---|:---|:---|:---|
+| `Off (no learning)` | 学習しない | 候補順を変更しない | 行わない |
+| `Deferred (batch)` | 保留保存 | RAM上で直ちに候補順へ反映 | 60秒間の無操作時、または16件の保留時にまとめて保存 |
+| `Manual save` | 手動保存 | RAM上で直ちに候補順へ反映 | Dictionary Editorの**Save Learning**または`Ctrl+W`だけで保存 |
+
+保留中の候補順は、再変換時に再起動前から反映されます。手動保存を行わずに電源断・リセットした場合、最後の保存以降の候補順位だけが失われる可能性があります。補助辞書・システム辞書と、すでに保存済みのユーザー辞書は失われません。
 
 ### ユーザー辞書の手動登録・削除
 
@@ -114,6 +126,7 @@ M5Stack TAB5 (ESP32-P4) 向けの VT100 互換スタンドアロンシリアル�
 | Okuriフィールドで`a`〜`z` | 送り仮名の先頭英字を設定。不要なら空欄 |
 | Ctrl+S | Reading + Okuri + Candidateをユーザー辞書へ登録し、同じキーの先頭候補へ昇格 |
 | Ctrl+X | 完全一致するCandidateをユーザー辞書から削除。最後の候補ならキー行も削除 |
+| Ctrl+W | 保留中の学習候補をFlashへ保存し、保存後の完全なユーザー辞書をSDカードへバックアップ |
 | Backspace | IME未確定文字列があればIME編集、なければ選択フィールド末尾を削除 |
 | Esc | IME未確定文字列を取消。未確定文字列がなければEditorを閉じる |
 | `Ctrl+Alt+D` | Editorを閉じ、未保存のフィールド内容を破棄 |
@@ -124,9 +137,11 @@ M5Stack TAB5 (ESP32-P4) 向けの VT100 互換スタンドアロンシリアル�
 
 ### microSDによるユーザー辞書のバックアップ・移行
 
-microSDカードを**FAT32**でフォーマットしてTab5へ挿入します。Dictionary Editor内では、**Ctrl+E**または`Export SD`でSPIFFS上の学習辞書を`/TAB5-SKK/SKKUSER.TXT`として書き出します。この名前は、long file name機能を有効にしていないFATFSでも動作する8.3形式です。書込み時は既存ファイルを8.3形式のバックアップ名へ退避してから新しいファイルを公開するため、FATFSの既存ファイル上書き制約を回避します。
+microSDカードを**FAT32**でフォーマットしてTab5へ挿入します。Dictionary Editor内では、**Ctrl+E**または`Export SD`でFlashに保存済みのユーザー辞書を`/TAB5-SKK/SKKUSER.TXT`として書き出します。Export SDはFlashを更新しません。この名前は、long file name機能を有効にしていないFATFSでも動作する8.3形式です。書込み時は既存ファイルを8.3形式のバックアップ名へ退避してから新しいファイルを公開するため、FATFSの既存ファイル上書き制約を回避します。
 
 PCで同ファイルをUTF-8／LFのSKK形式のまま編集した後、microSDへ戻してください。**Ctrl+I**または`Import Merge`は既存の候補順を保ったまま、ファイル側にのみある候補を追加します。**Ctrl+R**または`Import Replace`は、1回目に確認を表示し、2回目でSPIFFS上のユーザー辞書をSDカード側の有効な内容へ置き換えます。置換は既存の学習内容を失うため、通常はマージを利用してください。
+
+Dictionary Editorの**Add / Promote**、**Delete Exact**、**Save Learning**、および有効なインポートは、Flash保存後に同じ完全な辞書をSDカードへ自動バックアップします。SD未挿入・書込み失敗時もFlashの保存済み内容は取り消さず、黄色い状態欄にSDバックアップ失敗を表示します。次回の手動保存またはExport SDでバックアップを再試行できます。
 
 
 ### リモートへの送信（選択中の接続方式へそのまま転送）
@@ -337,7 +352,6 @@ keyboard_event_cb() → key_queueへの書き込み
 ## 既知の制限・今後の予定
 
 - **スクロールバック** — 画面外にスクロールしたデータは参照不可
-- **Port A共有制約** — Port AをUARTとして使う間は、同じGPIO53/54を使うI2C拡張機器を併用不可
 - **MBUS共有制約** — MBUS UART2を使う間は、MBUSピン15/16（GPIO7/GPIO6）を使用する拡張モジュールを併用不可
 - **起動時のまれなハング** — USB ホスト初期化中に稀に停止することがある（調査中）
 

@@ -201,10 +201,21 @@ int main()
     ime_result_t commit = ime.input_key(ime_key_t::ENTER);
     assert(commit.commit == "幹事");
     assert(ime.state() == ime_state_t::IDLE);
+    // Earlier 「頭」選択に加え、送り仮名キー「あたまk」と今回の
+    // 「幹事」が別のSKKキーとしてRAMに保留される。再選択は同一キー
+    // の保留を重複させない。
+    assert(ime.pending_learning_count() == 3);
+    assert(!ime.user_dictionary_available());
+
+    // Deferred learning changes candidate priority in RAM immediately, but a
+    // reboot only sees it after an explicit or scheduled flush.
+    assert(ime.flush_pending_learning());
+    assert(ime.pending_learning_count() == 0);
     assert(ime.user_dictionary_available());
 
-    // A fresh engine must prefer the learned candidate without duplicating the
-    // bundled candidate list. This models a reboot after a user choice.
+    // A fresh engine must prefer the saved learned candidate without
+    // duplicating the bundled candidate list. This models a reboot after a
+    // user choice followed by a successful deferred flush.
     ime_skk_t learned_ime;
     learned_ime.set_dictionary_path(dict_path);
     learned_ime.set_user_dictionary_path(user_dict_path);
@@ -383,6 +394,44 @@ int main()
     assert(ime.candidate_at(0) == "言");
     assert(ime.input_key(ime_key_t::ENTER).commit == "言った");
 
+    // Manual-save mode learns in RAM immediately, affects the next lookup,
+    // and writes nothing until the explicit flush operation.
+    const char *manual_learning_path = "/tmp/tab5-ime-test-manual-learning.txt";
+    std::remove(manual_learning_path);
+    ime_skk_t manual_learning;
+    manual_learning.set_dictionary_path(dict_path);
+    manual_learning.set_user_dictionary_path(manual_learning_path);
+    manual_learning.set_learning_mode(ime_learning_mode_t::MANUAL);
+    type(manual_learning, "Kanji");
+    manual_learning.input_key(ime_key_t::SPACE);
+    manual_learning.input_key(ime_key_t::RIGHT);
+    assert(manual_learning.input_key(ime_key_t::COMMIT).commit == "幹事");
+    assert(manual_learning.pending_learning_count() == 1);
+    assert(!manual_learning.user_dictionary_available());
+    type(manual_learning, "Kanji");
+    manual_learning.input_key(ime_key_t::SPACE);
+    assert(manual_learning.candidate_at(0) == "幹事");
+    assert(manual_learning.flush_pending_learning());
+    assert(manual_learning.pending_learning_count() == 0);
+    assert(manual_learning.user_dictionary_available());
+
+    // Off disables automatic priority learning altogether; selecting a later
+    // candidate neither queues nor writes a user-dictionary change.
+    const char *off_learning_path = "/tmp/tab5-ime-test-off-learning.txt";
+    std::remove(off_learning_path);
+    ime_skk_t off_learning;
+    off_learning.set_dictionary_path(dict_path);
+    off_learning.set_user_dictionary_path(off_learning_path);
+    off_learning.set_learning_mode(ime_learning_mode_t::OFF);
+    type(off_learning, "Kanji");
+    off_learning.input_key(ime_key_t::SPACE);
+    off_learning.input_key(ime_key_t::RIGHT);
+    assert(off_learning.input_key(ime_key_t::COMMIT).commit == "幹事");
+    assert(off_learning.pending_learning_count() == 0);
+    assert(!off_learning.user_dictionary_available());
+
+    std::remove(manual_learning_path);
+    std::remove(off_learning_path);
     std::remove(dict_path);
     std::remove(supplement_dict_path);
     std::remove(user_dict_path);

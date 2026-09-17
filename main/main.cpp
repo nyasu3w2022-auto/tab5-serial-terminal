@@ -59,6 +59,11 @@ static bool s_japanese_input_active = false;
 static constexpr const char *SKK_DICT_PATH = "/skk/SKK-JISYO.S.txt";
 static constexpr const char *SKK_SUPPLEMENT_DICT_PATH = "/skk/SKK-JISYO.TAB5.txt";
 static constexpr const char *SKK_USER_DICT_PATH = "/skk-user/SKK-JISYO.user.txt";
+static constexpr size_t LEARNING_FLUSH_THRESHOLD = 16;
+static constexpr TickType_t LEARNING_FLUSH_IDLE_TICKS = pdMS_TO_TICKS(60000);
+static uint32_t s_last_learning_generation = 0;
+static TickType_t s_pending_learning_since = 0;
+static TickType_t s_deferred_retry_after = 0;
 
 static void refresh_ime_input_indicator(void)
 {
@@ -92,6 +97,65 @@ static void set_japanese_input_active(bool active)
     }
     s_japanese_input_active = active;
     refresh_ime_input_indicator();
+}
+
+static void apply_ime_learning_save_mode(app_learning_save_mode_t mode)
+{
+    switch (mode) {
+    case LEARNING_SAVE_OFF:
+        s_ime.set_learning_mode(ime_learning_mode_t::OFF);
+        break;
+    case LEARNING_SAVE_MANUAL:
+        s_ime.set_learning_mode(ime_learning_mode_t::MANUAL);
+        break;
+    case LEARNING_SAVE_DEFERRED:
+    default:
+        s_ime.set_learning_mode(ime_learning_mode_t::DEFERRED);
+        break;
+    }
+    s_last_learning_generation = s_ime.learning_generation();
+    s_pending_learning_since = s_ime.pending_learning_count() ? xTaskGetTickCount() : 0;
+    s_deferred_retry_after = 0;
+}
+
+static void service_deferred_learning(void)
+{
+    if (s_ime.learning_mode() != ime_learning_mode_t::DEFERRED) return;
+
+    const size_t pending = s_ime.pending_learning_count();
+    if (pending == 0) {
+        s_pending_learning_since = 0;
+        s_deferred_retry_after = 0;
+        s_last_learning_generation = s_ime.learning_generation();
+        return;
+    }
+
+    const TickType_t now = xTaskGetTickCount();
+    const uint32_t generation = s_ime.learning_generation();
+    if (generation != s_last_learning_generation) {
+        s_last_learning_generation = generation;
+        s_pending_learning_since = now;
+        s_deferred_retry_after = 0;
+    }
+    if (s_deferred_retry_after != 0 &&
+        (int32_t)(now - s_deferred_retry_after) < 0) return;
+
+    const bool threshold_reached = pending >= LEARNING_FLUSH_THRESHOLD;
+    const bool idle_timeout = s_pending_learning_since != 0 &&
+                              (now - s_pending_learning_since) >= LEARNING_FLUSH_IDLE_TICKS;
+    if (!threshold_reached && !idle_timeout) return;
+
+    if (s_ime.flush_pending_learning()) {
+        ESP_LOGI(TAG, "Saved %u deferred SKK learning entries", (unsigned)pending);
+        s_last_learning_generation = s_ime.learning_generation();
+        s_pending_learning_since = 0;
+        s_deferred_retry_after = 0;
+    } else {
+        // Avoid retrying on every loop if the writable SPIFFS partition is
+        // temporarily unavailable. The next retry occurs after another idle interval.
+        ESP_LOGW(TAG, "Deferred SKK learning save failed; will retry later");
+        s_deferred_retry_after = now + LEARNING_FLUSH_IDLE_TICKS;
+    }
 }
 
 static void init_ime_dictionary_storage(void)
@@ -155,6 +219,7 @@ static void on_settings_saved(const app_settings_t *saved)
     if (saved) {
         s_settings = *saved;
         apply_ime_punctuation_style(s_settings.punctuation_style);
+        apply_ime_learning_save_mode(s_settings.learning_save_mode);
         set_japanese_input_active(s_settings.input_mode == INPUT_MODE_JAPANESE);
         if (s_japanese_input_active && s_ime.state() != ime_state_t::IDLE) {
             ime_ui_update(true, s_ime);
@@ -443,6 +508,7 @@ static bool handle_key_event(const key_event_msg_t *msg)
             if (k == 'J') return dictionary_editor_commit_ime();
             if (k == 'S') return dictionary_ui_add_or_promote();
             if (k == 'X') return dictionary_ui_delete_exact();
+            if (k == 'W') return dictionary_ui_save_learning();
             if (k == 'E') return dictionary_ui_export_to_sd();
             if (k == 'I') return dictionary_ui_import_merge_from_sd();
             if (k == 'R') return dictionary_ui_import_replace_from_sd();
@@ -632,6 +698,7 @@ extern "C" void app_main(void)
     // ---- Shared serial infrastructure (queues, RX ring buffer, logs) ----
     usb_init();
     init_ime_dictionary_storage();
+    apply_ime_learning_save_mode(s_settings.learning_save_mode);
     serial_transport_init();
     // DSR/DA terminal responses use whichever transport is currently active.
     vt100_set_tx_cb(vt100_transport_tx_cb);
@@ -729,7 +796,11 @@ extern "C" void app_main(void)
             update_status_bar();
         }
 
-        // 3. Process keyboard input (5 ms wait to keep USB RX responsive)
+        // 3. Batch-save only in the configured deferred-learning mode. Manual
+        // mode is saved by Dictionary Editor actions; Off never learns.
+        service_deferred_learning();
+
+        // 4. Process keyboard input (5 ms wait to keep USB RX responsive)
         key_event_msg_t key_msg;
         if (xQueueReceive(key_q, &key_msg, pdMS_TO_TICKS(5)) == pdTRUE) {
             bool kb_refresh = handle_key_event(&key_msg);

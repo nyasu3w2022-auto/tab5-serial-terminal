@@ -10,9 +10,11 @@
  */
 
 #include <stddef.h>
+#include <stdint.h>
 
 #include <array>
 #include <string>
+#include <vector>
 
 /** Result produced by an IME key operation. */
 struct ime_result_t {
@@ -50,6 +52,13 @@ enum class ime_punctuation_style_t {
     JAPANESE,
     ASCII,
     FULLWIDTH,
+};
+
+/** Persistence policy for automatically learned candidate priority. */
+enum class ime_learning_mode_t {
+    OFF,       /**< Do not change candidate priority after confirmation. */
+    DEFERRED,  /**< Keep changes in RAM; application flushes them in batches. */
+    MANUAL,    /**< Keep changes in RAM until the user explicitly saves. */
 };
 
 /**
@@ -91,6 +100,21 @@ public:
 
     /** Set the punctuation conversion profile used in Japanese input mode. */
     void set_punctuation_style(ime_punctuation_style_t style);
+
+    /** Configure how automatically learned candidate priority is persisted. */
+    void set_learning_mode(ime_learning_mode_t mode);
+
+    /** Current candidate-priority persistence policy. */
+    ime_learning_mode_t learning_mode() const;
+
+    /** Number of learned priority changes held in RAM but not yet saved. */
+    size_t pending_learning_count() const;
+
+    /** Changes whenever the RAM-pending learning state is modified. */
+    uint32_t learning_generation() const;
+
+    /** Save all pending learned candidate priorities to the user dictionary. */
+    bool flush_pending_learning();
 
     /** Returns true when the configured system dictionary can be opened for reading. */
     bool dictionary_available() const;
@@ -145,6 +169,14 @@ private:
     std::string s_supplement_dictionary_path;
     std::string s_user_dictionary_path;
 
+    struct learning_entry_t {
+        std::string key;
+        std::string candidate;
+    };
+    std::vector<learning_entry_t> s_pending_learning;
+    ime_learning_mode_t s_learning_mode = ime_learning_mode_t::DEFERRED;
+    uint32_t s_learning_generation = 0;
+
     // Internal readings are always hiragana.  Katakana conversion is applied
     // only to direct (non-SKK-conversion) display and commit output.
     std::string s_kana;
@@ -175,7 +207,11 @@ private:
     bool search_dictionary_okuri_family(const std::string &path, const std::string &reading);
     bool append_candidate(const char *candidate, size_t len);
     bool learn_current_candidate();
+    bool queue_learned_candidate(const std::string &key, const std::string &candidate);
+    void apply_pending_learning(const std::string &key);
+    bool user_candidate_is_first(const std::string &key, const std::string &candidate) const;
     bool update_user_dictionary(const std::string &key, const std::string &candidate);
+    bool update_user_dictionary_batch(const std::vector<learning_entry_t> &updates);
     bool remove_user_dictionary_candidate(const std::string &key, const std::string &candidate);
     static bool make_dictionary_key(const std::string &reading, char okuri_initial, std::string *key);
     std::string current_dictionary_key() const;

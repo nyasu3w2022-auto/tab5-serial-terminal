@@ -235,6 +235,40 @@ void ime_skk_t::set_punctuation_style(ime_punctuation_style_t style)
     s_punctuation_style = style;
 }
 
+void ime_skk_t::set_learning_mode(ime_learning_mode_t mode)
+{
+    s_learning_mode = mode;
+    if (mode == ime_learning_mode_t::OFF && !s_pending_learning.empty()) {
+        s_pending_learning.clear();
+        ++s_learning_generation;
+    }
+}
+
+ime_learning_mode_t ime_skk_t::learning_mode() const
+{
+    return s_learning_mode;
+}
+
+size_t ime_skk_t::pending_learning_count() const
+{
+    return s_pending_learning.size();
+}
+
+uint32_t ime_skk_t::learning_generation() const
+{
+    return s_learning_generation;
+}
+
+bool ime_skk_t::flush_pending_learning()
+{
+    if (s_pending_learning.empty()) return true;
+    if (s_user_dictionary_path.empty()) return false;
+    if (!update_user_dictionary_batch(s_pending_learning)) return false;
+    s_pending_learning.clear();
+    ++s_learning_generation;
+    return true;
+}
+
 bool ime_skk_t::dictionary_available() const
 {
     if (s_dictionary_path.empty()) return false;
@@ -470,14 +504,18 @@ bool ime_skk_t::search_dictionary()
     clear_candidates();
     if (s_kana.empty()) return false;
 
-    // A user dictionary is searched first, so learned candidates take
-    // precedence. Results from the bundled dictionary are then appended to
-    // keep standard SKK fallback candidates available.
+    // A user dictionary is searched first, so persisted learned candidates
+    // take precedence. RAM-only learning is applied after the fallback
+    // dictionaries to provide the same ordering before it is flushed.
     const std::string key = current_dictionary_key();
     if (!s_user_dictionary_path.empty()) search_dictionary_key(s_user_dictionary_path, key);
     if (!s_supplement_dictionary_path.empty()) search_dictionary_key(s_supplement_dictionary_path, key);
     if (!s_dictionary_path.empty()) search_dictionary_key(s_dictionary_path, key);
-    if (s_candidate_count > 0) return true;
+    if (s_candidate_count > 0) {
+        apply_pending_learning(key);
+        update_state();
+        return true;
+    }
 
     // Some inflected forms start their okurigana with a sokuon (っ), while
     // SKK-JISYO registers the verb using another inflection's initial letter.
@@ -485,7 +523,11 @@ bool ime_skk_t::search_dictionary()
         if (!s_user_dictionary_path.empty()) search_dictionary_okuri_family(s_user_dictionary_path, s_kana);
         if (!s_supplement_dictionary_path.empty()) search_dictionary_okuri_family(s_supplement_dictionary_path, s_kana);
         if (!s_dictionary_path.empty()) search_dictionary_okuri_family(s_dictionary_path, s_kana);
-        if (s_candidate_count > 0) return true;
+        if (s_candidate_count > 0) {
+            apply_pending_learning(key);
+            update_state();
+            return true;
+        }
     }
     if (s_okuri_active) {
         if (!s_user_dictionary_path.empty()) search_dictionary_key(s_user_dictionary_path, s_kana);
@@ -493,6 +535,7 @@ bool ime_skk_t::search_dictionary()
         if (!s_dictionary_path.empty()) search_dictionary_key(s_dictionary_path, s_kana);
     }
 
+    apply_pending_learning(key);
     update_state();
     return s_candidate_count > 0;
 }
@@ -657,7 +700,10 @@ bool ime_skk_t::register_user_candidate(const std::string &reading, char okuri_i
     std::string key;
     if (!make_dictionary_key(reading, okuri_initial, &key) ||
         !is_safe_dictionary_field(candidate, false)) return false;
-    return update_user_dictionary(key, candidate);
+
+    // Dictionary Editor operations are explicit saves. Persist any learned
+    // priority first so manual updates cannot overwrite pending RAM changes.
+    return flush_pending_learning() && update_user_dictionary(key, candidate);
 }
 
 bool ime_skk_t::remove_user_candidate(const std::string &reading, char okuri_initial,
@@ -666,20 +712,100 @@ bool ime_skk_t::remove_user_candidate(const std::string &reading, char okuri_ini
     std::string key;
     if (!make_dictionary_key(reading, okuri_initial, &key) ||
         !is_safe_dictionary_field(candidate, false)) return false;
-    return remove_user_dictionary_candidate(key, candidate);
+
+    // As with registration, make the manual edit against the complete saved
+    // dictionary rather than an older on-flash snapshot.
+    return flush_pending_learning() && remove_user_dictionary_candidate(key, candidate);
+}
+
+bool ime_skk_t::user_candidate_is_first(const std::string &key, const std::string &candidate) const
+{
+    if (s_user_dictionary_path.empty()) return false;
+    FILE *fp = fopen(s_user_dictionary_path.c_str(), "rb");
+    if (fp == nullptr) return false;
+
+    bool first = false;
+    char line[MAX_DICT_LINE_BYTES + 1] = {};
+    while (fgets(line, sizeof(line), fp) != nullptr) {
+        char *separator = strchr(line, ' ');
+        const size_t key_len = separator ? (size_t)(separator - line) : 0;
+        if (separator == nullptr || key_len != key.size() || memcmp(line, key.data(), key_len) != 0) continue;
+
+        std::vector<std::string> values;
+        parse_dictionary_values(strchr(separator, '/'), &values);
+        first = !values.empty() && values.front() == candidate;
+        break;
+    }
+    fclose(fp);
+    return first;
+}
+
+bool ime_skk_t::queue_learned_candidate(const std::string &key, const std::string &candidate)
+{
+    if (s_user_dictionary_path.empty() || !is_safe_dictionary_field(key, true) ||
+        !is_safe_dictionary_field(candidate, false)) return false;
+
+    for (learning_entry_t &entry : s_pending_learning) {
+        if (entry.key != key) continue;
+        if (entry.candidate != candidate) {
+            entry.candidate = candidate;
+            ++s_learning_generation;
+        }
+        return true;
+    }
+
+    // Re-selecting the persisted first candidate has no observable effect and
+    // must not cause a Flash rewrite.
+    if (user_candidate_is_first(key, candidate)) return true;
+
+    s_pending_learning.push_back({key, candidate});
+    ++s_learning_generation;
+    return true;
+}
+
+void ime_skk_t::apply_pending_learning(const std::string &key)
+{
+    for (const learning_entry_t &entry : s_pending_learning) {
+        if (entry.key != key) continue;
+
+        size_t found = s_candidate_count;
+        for (size_t i = 0; i < s_candidate_count; ++i) {
+            if (s_candidates[i] == entry.candidate) {
+                found = i;
+                break;
+            }
+        }
+
+        if (found == 0) return;
+        const size_t last = (found < s_candidate_count)
+                          ? found : ((s_candidate_count < MAX_CANDIDATES)
+                                     ? s_candidate_count++ : MAX_CANDIDATES - 1);
+        for (size_t i = last; i > 0; --i) s_candidates[i] = s_candidates[i - 1];
+        s_candidates[0] = entry.candidate;
+        s_candidate_index = 0;
+        return;
+    }
 }
 
 bool ime_skk_t::update_user_dictionary(const std::string &key, const std::string &candidate)
 {
-    if (s_user_dictionary_path.empty() || !is_safe_dictionary_field(key, true) ||
-        !is_safe_dictionary_field(candidate, false)) return false;
+    return update_user_dictionary_batch(std::vector<learning_entry_t>{{key, candidate}});
+}
+
+bool ime_skk_t::update_user_dictionary_batch(const std::vector<learning_entry_t> &updates)
+{
+    if (s_user_dictionary_path.empty() || updates.empty()) return false;
+    for (const learning_entry_t &entry : updates) {
+        if (!is_safe_dictionary_field(entry.key, true) ||
+            !is_safe_dictionary_field(entry.candidate, false)) return false;
+    }
 
     const std::string temporary_path = s_user_dictionary_path + ".tmp";
     FILE *out = fopen(temporary_path.c_str(), "wb");
     if (out == nullptr) return false;
 
     FILE *in = fopen(s_user_dictionary_path.c_str(), "rb");
-    bool found_key = false;
+    std::vector<bool> applied(updates.size(), false);
     bool ok = true;
     char line[MAX_DICT_LINE_BYTES + 1] = {};
     while (in != nullptr && fgets(line, sizeof(line), in) != nullptr) {
@@ -691,23 +817,38 @@ bool ime_skk_t::update_user_dictionary(const std::string &key, const std::string
         }
         char *separator = strchr(line, ' ');
         const size_t key_len = separator ? (size_t)(separator - line) : 0;
-        if (separator == nullptr || key_len != key.size() || memcmp(line, key.data(), key_len) != 0) {
+        size_t update_index = updates.size();
+        if (separator != nullptr) {
+            for (size_t i = 0; i < updates.size(); ++i) {
+                if (updates[i].key.size() == key_len &&
+                    memcmp(line, updates[i].key.data(), key_len) == 0) {
+                    update_index = i;
+                    break;
+                }
+            }
+        }
+        if (update_index == updates.size()) {
             if (fputs(line, out) < 0) ok = false;
             continue;
         }
 
-        found_key = true;
+        applied[update_index] = true;
         std::vector<std::string> values;
         parse_dictionary_values(strchr(separator, '/'), &values);
         std::vector<std::string> reordered;
-        reordered.push_back(candidate);
+        reordered.push_back(updates[update_index].candidate);
         for (const std::string &value : values) {
-            if (value != candidate) reordered.push_back(value);
+            if (value != updates[update_index].candidate) reordered.push_back(value);
         }
-        if (!write_dictionary_values(out, key, reordered)) ok = false;
+        if (!write_dictionary_values(out, updates[update_index].key, reordered)) ok = false;
     }
     if (in != nullptr) fclose(in);
-    if (!found_key && !write_dictionary_values(out, key, std::vector<std::string>{candidate})) ok = false;
+    for (size_t i = 0; i < updates.size(); ++i) {
+        if (!applied[i] && !write_dictionary_values(out, updates[i].key,
+                                                     std::vector<std::string>{updates[i].candidate})) {
+            ok = false;
+        }
+    }
     if (fclose(out) != 0) ok = false;
 
     if (!ok || std::rename(temporary_path.c_str(), s_user_dictionary_path.c_str()) != 0) {
@@ -773,7 +914,8 @@ bool ime_skk_t::remove_user_dictionary_candidate(const std::string &key,
 bool ime_skk_t::learn_current_candidate()
 {
     if (s_candidate_count == 0 || s_candidate_index >= s_candidate_count) return false;
-    return update_user_dictionary(current_dictionary_key(), s_candidates[s_candidate_index]);
+    if (s_learning_mode == ime_learning_mode_t::OFF) return true;
+    return queue_learned_candidate(current_dictionary_key(), s_candidates[s_candidate_index]);
 }
 
 std::string ime_skk_t::direct_commit_text() const

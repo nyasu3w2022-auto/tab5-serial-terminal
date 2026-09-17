@@ -44,6 +44,7 @@ static lv_obj_t *s_dd_font       = NULL;  // font size dropdown
 static lv_obj_t *s_dd_echo       = NULL;  // local echo dropdown
 static lv_obj_t *s_dd_input_mode = NULL;  // default keyboard input mode
 static lv_obj_t *s_dd_punctuation = NULL; // Japanese input punctuation style
+static lv_obj_t *s_dd_learning_save = NULL; // SKK learning persistence mode
 
 // Callback registered by main.cpp to synchronize its current settings copy
 static settings_saved_cb_t s_saved_cb = NULL;
@@ -91,8 +92,8 @@ static lv_obj_t *create_row(lv_obj_t *parent, int y_pos,
     lv_obj_t *dd = lv_dropdown_create(parent);
     lv_dropdown_set_options(dd, options);
     lv_dropdown_set_selected(dd, (uint16_t)selected_idx);
-    // Taller height (56px) for easier touch on Tab5 touchscreen
-    lv_obj_set_size(dd, 500, 56);
+    // 50px rows keep all eight settings touch-friendly within the TAB5 view.
+    lv_obj_set_size(dd, 500, 50);
     lv_obj_set_pos(dd, 300, y_pos);
     lv_obj_add_flag(dd, LV_OBJ_FLAG_CLICKABLE);  // ensure hit-test works in LVGL v9
     lv_obj_set_style_text_font(dd, &lv_font_unscii_16, 0);
@@ -155,13 +156,18 @@ static void save_close_cb(lv_event_t *e)
                            ? (app_punctuation_style_t)punctuation_idx
                            : SETTINGS_DEFAULT_PUNCTUATION_STYLE;
 
+    uint16_t learning_idx = lv_dropdown_get_selected(s_dd_learning_save);
+    ns.learning_save_mode = (learning_idx <= (uint16_t)LEARNING_SAVE_MANUAL)
+                            ? (app_learning_save_mode_t)learning_idx
+                            : SETTINGS_DEFAULT_LEARNING_SAVE_MODE;
+
     // Save to NVS
     settings_save(&ns);
 
-    ESP_LOGI(TAG, "Settings saved: baud=%"PRIu32" iface=%d log=%d font=%d local_echo=%d input_mode=%d punct=%d",
+    ESP_LOGI(TAG, "Settings saved: baud=%"PRIu32" iface=%d log=%d font=%d local_echo=%d input_mode=%d punct=%d learn_save=%d",
              ns.baud_rate, (int)ns.serial_if, (int)ns.log_level,
              (int)ns.font_size, (int)ns.local_echo, (int)ns.input_mode,
-             (int)ns.punctuation_style);
+             (int)ns.punctuation_style, (int)ns.learning_save_mode);
 
     // Close the overlay BEFORE applying settings that rebuild the UI
     // (settings_apply may call ui_rebuild_for_font_size which destroys/recreates
@@ -239,64 +245,44 @@ void settings_ui_open(const app_settings_t *current)
     lv_obj_set_style_border_width(sep, 0, 0);
 
     // ---- Setting rows ----
-    // Row 1: Baud Rate
-    s_dd_baud = create_row(s_overlay, 64,
-                           "Baud Rate:",
-                           BAUD_OPTIONS,
+    // Eight compact but touch-friendly 50px rows fit above the action area.
+    s_dd_baud = create_row(s_overlay, 58, "Baud Rate:", BAUD_OPTIONS,
                            baud_to_index(current->baud_rate));
-
-    // Row 2: Interface
-    s_dd_iface = create_row(s_overlay, 124,
-                            "Interface:",
+    s_dd_iface = create_row(s_overlay, 112, "Interface:",
                             "USB Serial\nPortA UART (GPIO53/54)\nMBUS UART2 (GPIO6/7)",
                             (int)current->serial_if);
-
-    // Row 3: Log Level
-    s_dd_log = create_row(s_overlay, 184,
-                          "Log Level:",
+    s_dd_log = create_row(s_overlay, 166, "Log Level:",
                           "NONE\nERROR\nWARN\nINFO\nDEBUG\nVERBOSE",
                           (int)current->log_level);
-
-    // Row 4: Font Size
-    s_dd_font = create_row(s_overlay, 244,
-                           "Font Size:",
+    s_dd_font = create_row(s_overlay, 220, "Font Size:",
                            "Small (160x43)\nLarge (91x25)",
                            (int)current->font_size);
-
-    // Row 5: Echo typed key input on this terminal only
-    s_dd_echo = create_row(s_overlay, 304,
-                           "Echo Back:",
-                           "OFF\nON",
+    s_dd_echo = create_row(s_overlay, 274, "Echo Back:", "OFF\nON",
                            (int)current->local_echo);
-
-    // Row 6: Default local keyboard input mode
-    s_dd_input_mode = create_row(s_overlay, 364,
-                                 "Input Mode:",
+    s_dd_input_mode = create_row(s_overlay, 328, "Input Mode:",
                                  "Direct\nJapanese (SKK)",
                                  (int)current->input_mode);
-
-    // Row 7: Japanese input punctuation conversion
-    s_dd_punctuation = create_row(s_overlay, 424,
-                                  "Punctuation:",
+    s_dd_punctuation = create_row(s_overlay, 382, "Punctuation:",
                                   "Japanese (JP)\nASCII\nFullwidth",
                                   (int)current->punctuation_style);
+    s_dd_learning_save = create_row(s_overlay, 436, "Learning:",
+                                    "Off (no learning)\nDeferred (batch)\nManual save",
+                                    (int)current->learning_save_mode);
 
     // ---- Note ----
     lv_obj_t *note = lv_label_create(s_overlay);
     lv_label_set_text(note,
-        "  Note: All settings are applied when Save & Close is pressed.\n"
-        "  Punctuation controls . , - only while Japanese (SKK) input is active.\n"
-        "  Echo Back renders sent keys locally only; Japanese (SKK) sends committed UTF-8 only.\n"
-        "  PortA UART: GPIO53 (TX) / GPIO54 (RX); MBUS UART2: GPIO6 (TX) / GPIO7 (RX).");
+        "  Settings apply at Save & Close.  Learning: Off=no learning; Deferred=batch; Manual=explicit save.\n"
+        "  Punctuation affects . , - only in Japanese input.  Echo Back is local display only.");
     lv_obj_set_style_text_font(note, &lv_font_unscii_16, 0);
     lv_obj_set_style_text_color(note, lv_color_make(180, 180, 180), 0);
-    lv_obj_set_pos(note, 40, 490);
+    lv_obj_set_pos(note, 40, 494);
     lv_obj_set_width(note, LVGL_W - 80);
 
     // ---- Separator 2 ----
     lv_obj_t *sep2 = lv_obj_create(s_overlay);
     lv_obj_set_size(sep2, LVGL_W, 2);
-    lv_obj_set_pos(sep2, 0, 570);
+    lv_obj_set_pos(sep2, 0, 558);
     lv_obj_set_style_bg_color(sep2, lv_color_make(80, 80, 120), 0);
     lv_obj_set_style_bg_opa(sep2, LV_OPA_COVER, 0);
     lv_obj_set_style_border_width(sep2, 0, 0);
@@ -339,6 +325,7 @@ void settings_ui_close(void)
     s_dd_echo  = NULL;
     s_dd_input_mode = NULL;
     s_dd_punctuation = NULL;
+    s_dd_learning_save = NULL;
     lvgl_port_unlock();
 
     // Force full terminal redraw so the screen is restored

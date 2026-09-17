@@ -66,6 +66,13 @@ typedef enum {
     PUNCTUATION_FULLWIDTH = 2, /**< . , - → ． ， － */
 } app_punctuation_style_t;
 
+/** How automatic SKK candidate learning is persisted. */
+typedef enum {
+    LEARNING_SAVE_OFF      = 0, /**< Do not learn candidate priority. */
+    LEARNING_SAVE_DEFERRED = 1, /**< Learn in RAM and batch-save automatically. */
+    LEARNING_SAVE_MANUAL   = 2, /**< Learn in RAM; save only on explicit user action. */
+} app_learning_save_mode_t;
+
 // ==============================================================
 // Settings Structure
 // ==============================================================
@@ -78,6 +85,7 @@ typedef struct {
     local_echo_t    local_echo;  /**< Local TAB5 keyboard echo setting       */
     app_input_mode_t input_mode; /**< Default local keyboard input mode       */
     app_punctuation_style_t punctuation_style; /**< Japanese input punctuation style */
+    app_learning_save_mode_t learning_save_mode; /**< SKK candidate learning persistence */
 } app_settings_t;
 
 // ==============================================================
@@ -91,6 +99,7 @@ typedef struct {
 #define SETTINGS_DEFAULT_LOCAL_ECHO LOCAL_ECHO_OFF
 #define SETTINGS_DEFAULT_INPUT_MODE INPUT_MODE_DIRECT
 #define SETTINGS_DEFAULT_PUNCTUATION_STYLE PUNCTUATION_JAPANESE
+#define SETTINGS_DEFAULT_LEARNING_SAVE_MODE LEARNING_SAVE_DEFERRED
 
 // ==============================================================
 // API
