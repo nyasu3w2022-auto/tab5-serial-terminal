@@ -44,7 +44,12 @@ static lv_obj_t *s_dd_font       = NULL;  // font size dropdown
 static lv_obj_t *s_dd_echo       = NULL;  // local echo dropdown
 static lv_obj_t *s_dd_input_mode = NULL;  // default keyboard input mode
 static lv_obj_t *s_dd_punctuation = NULL; // Japanese input punctuation style
-static lv_obj_t *s_dd_learning_save = NULL; // SKK learning persistence mode
+// The original settings screen used seven LVGL dropdowns reliably.  Keep the
+// new learning setting out of the screen-level dropdown popup mechanism: its
+// large button cycles the three modes directly and cannot leave a popup list
+// over the terminal/settings overlay.
+static lv_obj_t *s_learning_button = NULL;
+static lv_obj_t *s_learning_label = NULL;
 
 // Callback registered by main.cpp to synchronize its current settings copy
 static settings_saved_cb_t s_saved_cb = NULL;
@@ -92,8 +97,8 @@ static lv_obj_t *create_row(lv_obj_t *parent, int y_pos,
     lv_obj_t *dd = lv_dropdown_create(parent);
     lv_dropdown_set_options(dd, options);
     lv_dropdown_set_selected(dd, (uint16_t)selected_idx);
-    // 50px rows keep all eight settings touch-friendly within the TAB5 view.
-    lv_obj_set_size(dd, 500, 50);
+    // Keep the original 56px touch target used by the verified settings UI.
+    lv_obj_set_size(dd, 500, 56);
     lv_obj_set_pos(dd, 300, y_pos);
     lv_obj_add_flag(dd, LV_OBJ_FLAG_CLICKABLE);  // ensure hit-test works in LVGL v9
     lv_obj_set_style_text_font(dd, &lv_font_unscii_16, 0);
@@ -116,6 +121,64 @@ static lv_obj_t *create_row(lv_obj_t *parent, int y_pos,
     }
 
     return dd;
+}
+
+static const char *learning_mode_name(app_learning_save_mode_t mode)
+{
+    switch (mode) {
+    case LEARNING_SAVE_OFF:
+        return "Off (no learning)";
+    case LEARNING_SAVE_MANUAL:
+        return "Manual save";
+    case LEARNING_SAVE_DEFERRED:
+    default:
+        return "Deferred (batch)";
+    }
+}
+
+static void update_learning_button_text(void)
+{
+    if (s_learning_label == NULL) return;
+    lv_label_set_text(s_learning_label, learning_mode_name(s_current.learning_save_mode));
+    lv_obj_center(s_learning_label);
+}
+
+static void learning_cycle_cb(lv_event_t *e)
+{
+    (void)e;
+
+    const int next = ((int)s_current.learning_save_mode + 1) %
+                     ((int)LEARNING_SAVE_MANUAL + 1);
+    s_current.learning_save_mode = (app_learning_save_mode_t)next;
+    update_learning_button_text();
+    ESP_LOGI(TAG, "Learning mode selected: %s",
+             learning_mode_name(s_current.learning_save_mode));
+}
+
+static void create_learning_cycle_control(lv_obj_t *parent, int y_pos)
+{
+    lv_obj_t *lbl = lv_label_create(parent);
+    lv_label_set_text(lbl, "Learning:");
+    lv_obj_set_style_text_font(lbl, &lv_font_unscii_16, 0);
+    lv_obj_set_style_text_color(lbl, lv_color_white(), 0);
+    lv_obj_set_pos(lbl, 820, y_pos + 18);
+
+    s_learning_button = lv_button_create(parent);
+    lv_obj_set_size(s_learning_button, 300, 56);
+    lv_obj_set_pos(s_learning_button, 940, y_pos);
+    lv_obj_add_flag(s_learning_button, LV_OBJ_FLAG_CLICKABLE);
+    lv_obj_set_ext_click_area(s_learning_button, 10);
+    lv_obj_set_style_bg_color(s_learning_button, lv_color_make(75, 65, 145), 0);
+    lv_obj_set_style_bg_color(s_learning_button, lv_color_make(105, 90, 190), LV_STATE_PRESSED);
+    lv_obj_set_style_border_color(s_learning_button, lv_color_make(150, 135, 230), 0);
+    lv_obj_set_style_border_width(s_learning_button, 2, 0);
+    lv_obj_set_style_radius(s_learning_button, 8, 0);
+    lv_obj_add_event_cb(s_learning_button, learning_cycle_cb, LV_EVENT_CLICKED, NULL);
+
+    s_learning_label = lv_label_create(s_learning_button);
+    lv_obj_set_style_text_font(s_learning_label, &lv_font_unscii_16, 0);
+    lv_obj_set_style_text_color(s_learning_label, lv_color_white(), 0);
+    update_learning_button_text();
 }
 
 // ==============================================================
@@ -156,15 +219,12 @@ static void save_close_cb(lv_event_t *e)
                            ? (app_punctuation_style_t)punctuation_idx
                            : SETTINGS_DEFAULT_PUNCTUATION_STYLE;
 
-    uint16_t learning_idx = lv_dropdown_get_selected(s_dd_learning_save);
-    ns.learning_save_mode = (learning_idx <= (uint16_t)LEARNING_SAVE_MANUAL)
-                            ? (app_learning_save_mode_t)learning_idx
-                            : SETTINGS_DEFAULT_LEARNING_SAVE_MODE;
+    ns.learning_save_mode = s_current.learning_save_mode;
 
     // Save to NVS
     settings_save(&ns);
 
-    ESP_LOGI(TAG, "Settings saved: baud=%"PRIu32" iface=%d log=%d font=%d local_echo=%d input_mode=%d punct=%d learn_save=%d",
+    ESP_LOGI(TAG, "Settings saved: baud=%" PRIu32 " iface=%d log=%d font=%d local_echo=%d input_mode=%d punct=%d learn_save=%d",
              ns.baud_rate, (int)ns.serial_if, (int)ns.log_level,
              (int)ns.font_size, (int)ns.local_echo, (int)ns.input_mode,
              (int)ns.punctuation_style, (int)ns.learning_save_mode);
@@ -245,44 +305,46 @@ void settings_ui_open(const app_settings_t *current)
     lv_obj_set_style_border_width(sep, 0, 0);
 
     // ---- Setting rows ----
-    // Eight compact but touch-friendly 50px rows fit above the action area.
-    s_dd_baud = create_row(s_overlay, 58, "Baud Rate:", BAUD_OPTIONS,
+    // Keep the original seven-dropdown layout.  The learning selector shares
+    // the punctuation row as a direct cycle button rather than adding an
+    // eighth screen-level LVGL dropdown list.
+    s_dd_baud = create_row(s_overlay, 64, "Baud Rate:", BAUD_OPTIONS,
                            baud_to_index(current->baud_rate));
-    s_dd_iface = create_row(s_overlay, 112, "Interface:",
+    s_dd_iface = create_row(s_overlay, 124, "Interface:",
                             "USB Serial\nPortA UART (GPIO53/54)\nMBUS UART2 (GPIO6/7)",
                             (int)current->serial_if);
-    s_dd_log = create_row(s_overlay, 166, "Log Level:",
+    s_dd_log = create_row(s_overlay, 184, "Log Level:",
                           "NONE\nERROR\nWARN\nINFO\nDEBUG\nVERBOSE",
                           (int)current->log_level);
-    s_dd_font = create_row(s_overlay, 220, "Font Size:",
+    s_dd_font = create_row(s_overlay, 244, "Font Size:",
                            "Small (160x43)\nLarge (91x25)",
                            (int)current->font_size);
-    s_dd_echo = create_row(s_overlay, 274, "Echo Back:", "OFF\nON",
+    s_dd_echo = create_row(s_overlay, 304, "Echo Back:", "OFF\nON",
                            (int)current->local_echo);
-    s_dd_input_mode = create_row(s_overlay, 328, "Input Mode:",
+    s_dd_input_mode = create_row(s_overlay, 364, "Input Mode:",
                                  "Direct\nJapanese (SKK)",
                                  (int)current->input_mode);
-    s_dd_punctuation = create_row(s_overlay, 382, "Punctuation:",
+    s_dd_punctuation = create_row(s_overlay, 424, "Punctuation:",
                                   "Japanese (JP)\nASCII\nFullwidth",
                                   (int)current->punctuation_style);
-    s_dd_learning_save = create_row(s_overlay, 436, "Learning:",
-                                    "Off (no learning)\nDeferred (batch)\nManual save",
-                                    (int)current->learning_save_mode);
+    create_learning_cycle_control(s_overlay, 424);
 
     // ---- Note ----
     lv_obj_t *note = lv_label_create(s_overlay);
     lv_label_set_text(note,
-        "  Settings apply at Save & Close.  Learning: Off=no learning; Deferred=batch; Manual=explicit save.\n"
-        "  Punctuation affects . , - only in Japanese input.  Echo Back is local display only.");
+        "  Note: All settings apply when Save & Close is pressed.  Tap Learning to cycle Off / Deferred / Manual.\n"
+        "  Punctuation controls . , - only while Japanese (SKK) input is active.\n"
+        "  Echo Back renders sent keys locally only; Japanese (SKK) sends committed UTF-8 only.\n"
+        "  PortA UART: GPIO53 (TX) / GPIO54 (RX); MBUS UART2: GPIO6 (TX) / GPIO7 (RX).");
     lv_obj_set_style_text_font(note, &lv_font_unscii_16, 0);
     lv_obj_set_style_text_color(note, lv_color_make(180, 180, 180), 0);
-    lv_obj_set_pos(note, 40, 494);
+    lv_obj_set_pos(note, 40, 490);
     lv_obj_set_width(note, LVGL_W - 80);
 
     // ---- Separator 2 ----
     lv_obj_t *sep2 = lv_obj_create(s_overlay);
     lv_obj_set_size(sep2, LVGL_W, 2);
-    lv_obj_set_pos(sep2, 0, 558);
+    lv_obj_set_pos(sep2, 0, 570);
     lv_obj_set_style_bg_color(sep2, lv_color_make(80, 80, 120), 0);
     lv_obj_set_style_bg_opa(sep2, LV_OPA_COVER, 0);
     lv_obj_set_style_border_width(sep2, 0, 0);
@@ -325,7 +387,8 @@ void settings_ui_close(void)
     s_dd_echo  = NULL;
     s_dd_input_mode = NULL;
     s_dd_punctuation = NULL;
-    s_dd_learning_save = NULL;
+    s_learning_button = NULL;
+    s_learning_label = NULL;
     lvgl_port_unlock();
 
     // Force full terminal redraw so the screen is restored
