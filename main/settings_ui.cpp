@@ -1,21 +1,10 @@
 /*
  * settings_ui.cpp — LVGL-based settings screen overlay.
  *
- * Layout (landscape 1280x720):
- *   ┌──────────────────────────────────────────────────────────┐
- *   │  TAB5 Serial Terminal — Settings          [Ctrl+Alt+S]   │  title bar 48px
- *   ├──────────────────────────────────────────────────────────┤
- *   │  Baud Rate:   [115200 ▼]                                 │  row 1
- *   │  Interface:   [USB Serial ▼]                             │  row 2
- *   │  Log Level:   [INFO ▼]                                   │  row 3
- *   │  Font Size:   [Large (91x25) ▼]                          │  row 4
- *   │  Echo Back:   [OFF ▼]                                    │  row 5
- *   │  Input Mode:  [Direct ▼]                                 │  row 6
- *   ├──────────────────────────────────────────────────────────┤
- *   │  (i) Notes                                               │  note
- *   ├──────────────────────────────────────────────────────────┤
- *   │                    [ Save & Close ]                       │  button
- *   └──────────────────────────────────────────────────────────┘
+ * The TAB5 display path is stable for ordinary LVGL buttons, but the LVGL
+ * dropdown popup/list path regressed after the learning setting was added.
+ * Each setting is therefore represented by one large button. Tapping it
+ * cycles through that setting's valid values; Save & Close applies them.
  *
  * SPDX-License-Identifier: MIT
  */
@@ -25,8 +14,10 @@
 #include "terminal.h"    // LVGL_W, LVGL_H, STATUS_BAR_H
 #include "display.h"     // term_refresh_display, update_status_bar
 
+#include <inttypes.h>
+#include <stdint.h>
+
 #include <esp_log.h>
-#include <string.h>
 #include "lvgl.h"
 #include "lvgl_port.h"
 
@@ -36,213 +27,225 @@ static const char *TAG = "settings_ui";
 // Internal state
 // ==============================================================
 
-static lv_obj_t *s_overlay       = NULL;  // root overlay panel
-static lv_obj_t *s_dd_baud       = NULL;  // baud rate dropdown
-static lv_obj_t *s_dd_iface      = NULL;  // interface dropdown
-static lv_obj_t *s_dd_log        = NULL;  // log level dropdown
-static lv_obj_t *s_dd_font       = NULL;  // font size dropdown
-static lv_obj_t *s_dd_echo       = NULL;  // local echo dropdown
-static lv_obj_t *s_dd_input_mode = NULL;  // default keyboard input mode
-static lv_obj_t *s_dd_punctuation = NULL; // Japanese input punctuation style
-// The original settings screen used seven LVGL dropdowns reliably.  Keep the
-// new learning setting out of the screen-level dropdown popup mechanism: its
-// large button cycles the three modes directly and cannot leave a popup list
-// over the terminal/settings overlay.
-static lv_obj_t *s_learning_button = NULL;
-static lv_obj_t *s_learning_label = NULL;
-
-// Callback registered by main.cpp to synchronize its current settings copy
+static lv_obj_t *s_overlay = NULL;
 static settings_saved_cb_t s_saved_cb = NULL;
-
-// Current settings snapshot (filled at open time)
 static app_settings_t s_current = {};
-
-// ==============================================================
-// Baud rate table
-// ==============================================================
 
 static const uint32_t BAUD_TABLE[] = {
     9600, 19200, 38400, 57600, 115200, 230400, 460800, 921600
 };
-static const int BAUD_TABLE_LEN = (int)(sizeof(BAUD_TABLE) / sizeof(BAUD_TABLE[0]));
+static constexpr size_t BAUD_TABLE_LEN = sizeof(BAUD_TABLE) / sizeof(BAUD_TABLE[0]);
 
-static const char *BAUD_OPTIONS =
-    "9600\n19200\n38400\n57600\n115200\n230400\n460800\n921600";
+static const char *const BAUD_LABELS[] = {
+    "9600", "19200", "38400", "57600", "115200", "230400", "460800", "921600"
+};
+static const char *const IFACE_LABELS[] = {
+    "USB Serial", "PortA UART (GPIO53/54)", "MBUS UART2 (GPIO6/7)"
+};
+static const char *const LOG_LABELS[] = {
+    "NONE", "ERROR", "WARN", "INFO", "DEBUG", "VERBOSE"
+};
+static const char *const FONT_LABELS[] = {
+    "Small (160x43)", "Large (91x25)"
+};
+static const char *const ECHO_LABELS[] = {
+    "OFF", "ON"
+};
+static const char *const INPUT_MODE_LABELS[] = {
+    "Direct", "Japanese (SKK)"
+};
+static const char *const PUNCTUATION_LABELS[] = {
+    "Japanese (JP)", "ASCII", "Fullwidth"
+};
+static const char *const LEARNING_LABELS[] = {
+    "Off (no learning)", "Deferred (batch)", "Manual save"
+};
 
-static int baud_to_index(uint32_t baud)
+enum class choice_id_t : uint8_t {
+    BAUD = 0,
+    INTERFACE,
+    LOG_LEVEL,
+    FONT_SIZE,
+    ECHO_BACK,
+    INPUT_MODE,
+    PUNCTUATION,
+    LEARNING,
+    COUNT,
+};
+
+struct choice_control_t {
+    lv_obj_t *button = NULL;
+    lv_obj_t *value_label = NULL;
+    choice_id_t id = choice_id_t::BAUD;
+    uint8_t selected = 0;
+};
+
+static choice_control_t s_choices[(size_t)choice_id_t::COUNT] = {};
+
+static size_t choice_index(choice_id_t id)
 {
-    for (int i = 0; i < BAUD_TABLE_LEN; i++) {
-        if (BAUD_TABLE[i] == baud) return i;
+    return (size_t)id;
+}
+
+static size_t choice_count(choice_id_t id)
+{
+    switch (id) {
+    case choice_id_t::BAUD:        return BAUD_TABLE_LEN;
+    case choice_id_t::INTERFACE:   return sizeof(IFACE_LABELS) / sizeof(IFACE_LABELS[0]);
+    case choice_id_t::LOG_LEVEL:   return sizeof(LOG_LABELS) / sizeof(LOG_LABELS[0]);
+    case choice_id_t::FONT_SIZE:   return sizeof(FONT_LABELS) / sizeof(FONT_LABELS[0]);
+    case choice_id_t::ECHO_BACK:   return sizeof(ECHO_LABELS) / sizeof(ECHO_LABELS[0]);
+    case choice_id_t::INPUT_MODE:  return sizeof(INPUT_MODE_LABELS) / sizeof(INPUT_MODE_LABELS[0]);
+    case choice_id_t::PUNCTUATION: return sizeof(PUNCTUATION_LABELS) / sizeof(PUNCTUATION_LABELS[0]);
+    case choice_id_t::LEARNING:    return sizeof(LEARNING_LABELS) / sizeof(LEARNING_LABELS[0]);
+    case choice_id_t::COUNT:       return 0;
     }
-    return 4; // default: 115200
+    return 0;
+}
+
+static const char *choice_label(choice_id_t id, size_t selected)
+{
+    switch (id) {
+    case choice_id_t::BAUD:        return BAUD_LABELS[selected];
+    case choice_id_t::INTERFACE:   return IFACE_LABELS[selected];
+    case choice_id_t::LOG_LEVEL:   return LOG_LABELS[selected];
+    case choice_id_t::FONT_SIZE:   return FONT_LABELS[selected];
+    case choice_id_t::ECHO_BACK:   return ECHO_LABELS[selected];
+    case choice_id_t::INPUT_MODE:  return INPUT_MODE_LABELS[selected];
+    case choice_id_t::PUNCTUATION: return PUNCTUATION_LABELS[selected];
+    case choice_id_t::LEARNING:    return LEARNING_LABELS[selected];
+    case choice_id_t::COUNT:       return "";
+    }
+    return "";
+}
+
+static uint8_t baud_to_index(uint32_t baud)
+{
+    for (size_t i = 0; i < BAUD_TABLE_LEN; ++i) {
+        if (BAUD_TABLE[i] == baud) return (uint8_t)i;
+    }
+    return 4;  // 115200
+}
+
+static uint8_t validated_index(int value, size_t count, uint8_t fallback)
+{
+    return (value >= 0 && (size_t)value < count) ? (uint8_t)value : fallback;
+}
+
+static void apply_choice_to_snapshot(const choice_control_t &control)
+{
+    switch (control.id) {
+    case choice_id_t::BAUD:
+        s_current.baud_rate = BAUD_TABLE[control.selected];
+        break;
+    case choice_id_t::INTERFACE:
+        s_current.serial_if = (serial_if_t)control.selected;
+        break;
+    case choice_id_t::LOG_LEVEL:
+        s_current.log_level = (app_log_level_t)control.selected;
+        break;
+    case choice_id_t::FONT_SIZE:
+        s_current.font_size = (app_font_size_t)control.selected;
+        break;
+    case choice_id_t::ECHO_BACK:
+        s_current.local_echo = (local_echo_t)control.selected;
+        break;
+    case choice_id_t::INPUT_MODE:
+        s_current.input_mode = (app_input_mode_t)control.selected;
+        break;
+    case choice_id_t::PUNCTUATION:
+        s_current.punctuation_style = (app_punctuation_style_t)control.selected;
+        break;
+    case choice_id_t::LEARNING:
+        s_current.learning_save_mode = (app_learning_save_mode_t)control.selected;
+        break;
+    case choice_id_t::COUNT:
+        break;
+    }
+}
+
+static void update_choice_label(choice_control_t *control)
+{
+    if (control == NULL || control->value_label == NULL) return;
+    lv_label_set_text(control->value_label, choice_label(control->id, control->selected));
+    lv_obj_center(control->value_label);
+}
+
+static void choice_cycle_cb(lv_event_t *event)
+{
+    choice_control_t *control = (choice_control_t *)lv_event_get_user_data(event);
+    if (control == NULL) return;
+
+    const size_t count = choice_count(control->id);
+    if (count == 0) return;
+    control->selected = (uint8_t)(((size_t)control->selected + 1) % count);
+    apply_choice_to_snapshot(*control);
+    update_choice_label(control);
+
+    ESP_LOGI(TAG, "%s selected", choice_label(control->id, control->selected));
+}
+
+static void create_choice_row(lv_obj_t *parent, int y_pos, const char *label_text,
+                              choice_id_t id, uint8_t initial_selection)
+{
+    choice_control_t *control = &s_choices[choice_index(id)];
+    const size_t count = choice_count(id);
+    control->id = id;
+    control->selected = initial_selection < count ? initial_selection : 0;
+    apply_choice_to_snapshot(*control);
+
+    lv_obj_t *label = lv_label_create(parent);
+    lv_label_set_text(label, label_text);
+    lv_obj_set_style_text_font(label, &lv_font_unscii_16, 0);
+    lv_obj_set_style_text_color(label, lv_color_white(), 0);
+    lv_obj_set_pos(label, 40, y_pos + 18);
+
+    control->button = lv_button_create(parent);
+    lv_obj_set_size(control->button, 500, 56);
+    lv_obj_set_pos(control->button, 300, y_pos);
+    lv_obj_add_flag(control->button, LV_OBJ_FLAG_CLICKABLE);
+    lv_obj_set_ext_click_area(control->button, 10);
+    lv_obj_set_style_bg_color(control->button, lv_color_make(40, 40, 60), 0);
+    lv_obj_set_style_bg_color(control->button, lv_color_make(64, 64, 100), LV_STATE_PRESSED);
+    lv_obj_set_style_border_color(control->button, lv_color_make(100, 100, 180), 0);
+    lv_obj_set_style_border_width(control->button, 2, 0);
+    lv_obj_set_style_radius(control->button, 8, 0);
+    lv_obj_add_event_cb(control->button, choice_cycle_cb, LV_EVENT_CLICKED, control);
+
+    control->value_label = lv_label_create(control->button);
+    lv_obj_set_style_text_font(control->value_label, &lv_font_unscii_16, 0);
+    lv_obj_set_style_text_color(control->value_label, lv_color_white(), 0);
+    update_choice_label(control);
 }
 
 // ==============================================================
-// Helper: create a labeled row with a dropdown
+// Save & Close
 // ==============================================================
 
-static lv_obj_t *create_row(lv_obj_t *parent, int y_pos,
-                             const char *label_text,
-                             const char *options,
-                             int selected_idx)
+static void save_close_cb(lv_event_t *event)
 {
-    // Label
-    lv_obj_t *lbl = lv_label_create(parent);
-    lv_label_set_text(lbl, label_text);
-    lv_obj_set_style_text_font(lbl, &lv_font_unscii_16, 0);
-    lv_obj_set_style_text_color(lbl, lv_color_white(), 0);
-    lv_obj_set_pos(lbl, 40, y_pos + 8);
+    (void)event;
 
-    // Dropdown
-    lv_obj_t *dd = lv_dropdown_create(parent);
-    lv_dropdown_set_options(dd, options);
-    lv_dropdown_set_selected(dd, (uint16_t)selected_idx);
-    // Keep the original 56px touch target used by the verified settings UI.
-    lv_obj_set_size(dd, 500, 56);
-    lv_obj_set_pos(dd, 300, y_pos);
-    lv_obj_add_flag(dd, LV_OBJ_FLAG_CLICKABLE);  // ensure hit-test works in LVGL v9
-    lv_obj_set_style_text_font(dd, &lv_font_unscii_16, 0);
-    lv_obj_set_style_bg_color(dd, lv_color_make(40, 40, 60), 0);
-    lv_obj_set_style_text_color(dd, lv_color_white(), 0);
-    lv_obj_set_style_border_color(dd, lv_color_make(100, 100, 180), 0);
-    lv_obj_set_style_border_width(dd, 2, 0);
-    // Extend touch hit area by 10px on all sides
-    lv_obj_set_ext_click_area(dd, 10);
-
-    // Style the dropdown list
-    lv_obj_t *list = lv_dropdown_get_list(dd);
-    if (list) {
-        lv_obj_set_style_bg_color(list, lv_color_make(30, 30, 50), 0);
-        lv_obj_set_style_text_color(list, lv_color_white(), 0);
-        lv_obj_set_style_text_font(list, &lv_font_unscii_16, 0);
-        // Larger row height for easier touch selection
-        lv_obj_set_style_pad_top(list, 8, LV_PART_ITEMS);
-        lv_obj_set_style_pad_bottom(list, 8, LV_PART_ITEMS);
+    // Every control updates s_current immediately, but nothing is persisted or
+    // applied to the serial transport until this explicit button is pressed.
+    const app_settings_t saved = s_current;
+    if (!settings_save(&saved)) {
+        ESP_LOGE(TAG, "Settings save failed");
+        return;
     }
-
-    return dd;
-}
-
-static const char *learning_mode_name(app_learning_save_mode_t mode)
-{
-    switch (mode) {
-    case LEARNING_SAVE_OFF:
-        return "Off (no learning)";
-    case LEARNING_SAVE_MANUAL:
-        return "Manual save";
-    case LEARNING_SAVE_DEFERRED:
-    default:
-        return "Deferred (batch)";
-    }
-}
-
-static void update_learning_button_text(void)
-{
-    if (s_learning_label == NULL) return;
-    lv_label_set_text(s_learning_label, learning_mode_name(s_current.learning_save_mode));
-    lv_obj_center(s_learning_label);
-}
-
-static void learning_cycle_cb(lv_event_t *e)
-{
-    (void)e;
-
-    const int next = ((int)s_current.learning_save_mode + 1) %
-                     ((int)LEARNING_SAVE_MANUAL + 1);
-    s_current.learning_save_mode = (app_learning_save_mode_t)next;
-    update_learning_button_text();
-    ESP_LOGI(TAG, "Learning mode selected: %s",
-             learning_mode_name(s_current.learning_save_mode));
-}
-
-static void create_learning_cycle_control(lv_obj_t *parent, int y_pos)
-{
-    lv_obj_t *lbl = lv_label_create(parent);
-    lv_label_set_text(lbl, "Learning:");
-    lv_obj_set_style_text_font(lbl, &lv_font_unscii_16, 0);
-    lv_obj_set_style_text_color(lbl, lv_color_white(), 0);
-    lv_obj_set_pos(lbl, 820, y_pos + 18);
-
-    s_learning_button = lv_button_create(parent);
-    lv_obj_set_size(s_learning_button, 300, 56);
-    lv_obj_set_pos(s_learning_button, 940, y_pos);
-    lv_obj_add_flag(s_learning_button, LV_OBJ_FLAG_CLICKABLE);
-    lv_obj_set_ext_click_area(s_learning_button, 10);
-    lv_obj_set_style_bg_color(s_learning_button, lv_color_make(75, 65, 145), 0);
-    lv_obj_set_style_bg_color(s_learning_button, lv_color_make(105, 90, 190), LV_STATE_PRESSED);
-    lv_obj_set_style_border_color(s_learning_button, lv_color_make(150, 135, 230), 0);
-    lv_obj_set_style_border_width(s_learning_button, 2, 0);
-    lv_obj_set_style_radius(s_learning_button, 8, 0);
-    lv_obj_add_event_cb(s_learning_button, learning_cycle_cb, LV_EVENT_CLICKED, NULL);
-
-    s_learning_label = lv_label_create(s_learning_button);
-    lv_obj_set_style_text_font(s_learning_label, &lv_font_unscii_16, 0);
-    lv_obj_set_style_text_color(s_learning_label, lv_color_white(), 0);
-    update_learning_button_text();
-}
-
-// ==============================================================
-// Save & Close button callback
-// ==============================================================
-
-static void save_close_cb(lv_event_t *e)
-{
-    (void)e;
-
-    // Read values from dropdowns
-    app_settings_t ns = s_current;
-
-    uint16_t baud_idx = lv_dropdown_get_selected(s_dd_baud);
-    if (baud_idx < (uint16_t)BAUD_TABLE_LEN) {
-        ns.baud_rate = BAUD_TABLE[baud_idx];
-    }
-
-    uint16_t iface_idx = lv_dropdown_get_selected(s_dd_iface);
-    ns.serial_if = (serial_if_t)iface_idx;
-
-    uint16_t log_idx = lv_dropdown_get_selected(s_dd_log);
-    ns.log_level = (app_log_level_t)log_idx;
-
-    uint16_t font_idx = lv_dropdown_get_selected(s_dd_font);
-    ns.font_size = (app_font_size_t)font_idx;
-
-    uint16_t echo_idx = lv_dropdown_get_selected(s_dd_echo);
-    ns.local_echo = (echo_idx == (uint16_t)LOCAL_ECHO_ON)
-                    ? LOCAL_ECHO_ON : LOCAL_ECHO_OFF;
-
-    uint16_t input_mode_idx = lv_dropdown_get_selected(s_dd_input_mode);
-    ns.input_mode = (input_mode_idx == (uint16_t)INPUT_MODE_JAPANESE)
-                    ? INPUT_MODE_JAPANESE : INPUT_MODE_DIRECT;
-
-    uint16_t punctuation_idx = lv_dropdown_get_selected(s_dd_punctuation);
-    ns.punctuation_style = (punctuation_idx <= (uint16_t)PUNCTUATION_FULLWIDTH)
-                           ? (app_punctuation_style_t)punctuation_idx
-                           : SETTINGS_DEFAULT_PUNCTUATION_STYLE;
-
-    ns.learning_save_mode = s_current.learning_save_mode;
-
-    // Save to NVS
-    settings_save(&ns);
 
     ESP_LOGI(TAG, "Settings saved: baud=%" PRIu32 " iface=%d log=%d font=%d local_echo=%d input_mode=%d punct=%d learn_save=%d",
-             ns.baud_rate, (int)ns.serial_if, (int)ns.log_level,
-             (int)ns.font_size, (int)ns.local_echo, (int)ns.input_mode,
-             (int)ns.punctuation_style, (int)ns.learning_save_mode);
+             saved.baud_rate, (int)saved.serial_if, (int)saved.log_level,
+             (int)saved.font_size, (int)saved.local_echo, (int)saved.input_mode,
+             (int)saved.punctuation_style, (int)saved.learning_save_mode);
 
-    // Close the overlay BEFORE applying settings that rebuild the UI
-    // (settings_apply may call ui_rebuild_for_font_size which destroys/recreates
-    //  all LVGL objects including the overlay itself)
+    // The overlay must be removed before a font-size apply can rebuild all
+    // terminal LVGL objects.
     settings_ui_close();
+    settings_apply(&saved);
 
-    // Apply settings (may trigger UI rebuild for font size change)
-    settings_apply(&ns);
-
-    // Update the UI snapshot and notify the application of the saved values.
-    // The notification keeps main.cpp's s_settings in sync for subsequent opens.
-    s_current = ns;
-    if (s_saved_cb) {
-        s_saved_cb(&s_current);
-    }
+    s_current = saved;
+    if (s_saved_cb != NULL) s_saved_cb(&s_current);
 }
 
 void settings_ui_set_saved_cb(settings_saved_cb_t cb)
@@ -256,8 +259,8 @@ void settings_ui_set_saved_cb(settings_saved_cb_t cb)
 
 void settings_ui_open(const app_settings_t *current)
 {
+    if (current == NULL) return;
     if (s_overlay != NULL) {
-        // Already open — just bring to front
         lvgl_port_lock(0);
         lv_obj_move_foreground(s_overlay);
         lvgl_port_unlock();
@@ -265,13 +268,10 @@ void settings_ui_open(const app_settings_t *current)
     }
 
     s_current = *current;
-
     lvgl_port_lock(0);
 
-    lv_obj_t *scr = lv_scr_act();
-
-    // ---- Root overlay panel ----
-    s_overlay = lv_obj_create(scr);
+    lv_obj_t *screen = lv_scr_act();
+    s_overlay = lv_obj_create(screen);
     lv_obj_set_size(s_overlay, LVGL_W, LVGL_H - STATUS_BAR_H);
     lv_obj_set_pos(s_overlay, 0, 0);
     lv_obj_set_style_bg_color(s_overlay, lv_color_make(20, 20, 35), 0);
@@ -280,7 +280,6 @@ void settings_ui_open(const app_settings_t *current)
     lv_obj_set_style_pad_all(s_overlay, 0, 0);
     lv_obj_clear_flag(s_overlay, LV_OBJ_FLAG_SCROLLABLE);
 
-    // ---- Title bar ----
     lv_obj_t *title_bar = lv_obj_create(s_overlay);
     lv_obj_set_size(title_bar, LVGL_W, 48);
     lv_obj_set_pos(title_bar, 0, 0);
@@ -290,87 +289,101 @@ void settings_ui_open(const app_settings_t *current)
     lv_obj_set_style_pad_all(title_bar, 0, 0);
     lv_obj_clear_flag(title_bar, LV_OBJ_FLAG_SCROLLABLE);
 
-    lv_obj_t *title_lbl = lv_label_create(title_bar);
-    lv_label_set_text(title_lbl, "  TAB5 Serial Terminal  -  Settings  (Ctrl+Alt+S to close)");
-    lv_obj_set_style_text_font(title_lbl, &lv_font_unscii_16, 0);
-    lv_obj_set_style_text_color(title_lbl, lv_color_white(), 0);
-    lv_obj_align(title_lbl, LV_ALIGN_LEFT_MID, 0, 0);
+    lv_obj_t *title = lv_label_create(title_bar);
+    lv_label_set_text(title, "  TAB5 Serial Terminal  -  Settings  (Ctrl+Alt+S to close)");
+    lv_obj_set_style_text_font(title, &lv_font_unscii_16, 0);
+    lv_obj_set_style_text_color(title, lv_color_white(), 0);
+    lv_obj_align(title, LV_ALIGN_LEFT_MID, 0, 0);
 
-    // ---- Separator ----
-    lv_obj_t *sep = lv_obj_create(s_overlay);
-    lv_obj_set_size(sep, LVGL_W, 2);
-    lv_obj_set_pos(sep, 0, 48);
-    lv_obj_set_style_bg_color(sep, lv_color_make(80, 80, 120), 0);
-    lv_obj_set_style_bg_opa(sep, LV_OPA_COVER, 0);
-    lv_obj_set_style_border_width(sep, 0, 0);
+    lv_obj_t *separator = lv_obj_create(s_overlay);
+    lv_obj_set_size(separator, LVGL_W, 2);
+    lv_obj_set_pos(separator, 0, 48);
+    lv_obj_set_style_bg_color(separator, lv_color_make(80, 80, 120), 0);
+    lv_obj_set_style_bg_opa(separator, LV_OPA_COVER, 0);
+    lv_obj_set_style_border_width(separator, 0, 0);
 
-    // ---- Setting rows ----
-    // Keep the original seven-dropdown layout.  The learning selector shares
-    // the punctuation row as a direct cycle button rather than adding an
-    // eighth screen-level LVGL dropdown list.
-    s_dd_baud = create_row(s_overlay, 64, "Baud Rate:", BAUD_OPTIONS,
-                           baud_to_index(current->baud_rate));
-    s_dd_iface = create_row(s_overlay, 124, "Interface:",
-                            "USB Serial\nPortA UART (GPIO53/54)\nMBUS UART2 (GPIO6/7)",
-                            (int)current->serial_if);
-    s_dd_log = create_row(s_overlay, 184, "Log Level:",
-                          "NONE\nERROR\nWARN\nINFO\nDEBUG\nVERBOSE",
-                          (int)current->log_level);
-    s_dd_font = create_row(s_overlay, 244, "Font Size:",
-                           "Small (160x43)\nLarge (91x25)",
-                           (int)current->font_size);
-    s_dd_echo = create_row(s_overlay, 304, "Echo Back:", "OFF\nON",
-                           (int)current->local_echo);
-    s_dd_input_mode = create_row(s_overlay, 364, "Input Mode:",
-                                 "Direct\nJapanese (SKK)",
-                                 (int)current->input_mode);
-    s_dd_punctuation = create_row(s_overlay, 424, "Punctuation:",
-                                  "Japanese (JP)\nASCII\nFullwidth",
-                                  (int)current->punctuation_style);
-    create_learning_cycle_control(s_overlay, 424);
+    // Plain buttons deliberately replace every lv_dropdown. This avoids LVGL
+    // popup-list creation and selection handling on the TAB5's direct DSI path.
+    create_choice_row(s_overlay, 64,  "Baud Rate:",   choice_id_t::BAUD,
+                      baud_to_index(current->baud_rate));
+    create_choice_row(s_overlay, 124, "Interface:",   choice_id_t::INTERFACE,
+                      validated_index((int)current->serial_if, choice_count(choice_id_t::INTERFACE), 0));
+    create_choice_row(s_overlay, 184, "Log Level:",   choice_id_t::LOG_LEVEL,
+                      validated_index((int)current->log_level, choice_count(choice_id_t::LOG_LEVEL), 3));
+    create_choice_row(s_overlay, 244, "Font Size:",   choice_id_t::FONT_SIZE,
+                      validated_index((int)current->font_size, choice_count(choice_id_t::FONT_SIZE), 1));
+    create_choice_row(s_overlay, 304, "Echo Back:",   choice_id_t::ECHO_BACK,
+                      validated_index((int)current->local_echo, choice_count(choice_id_t::ECHO_BACK), 0));
+    create_choice_row(s_overlay, 364, "Input Mode:",  choice_id_t::INPUT_MODE,
+                      validated_index((int)current->input_mode, choice_count(choice_id_t::INPUT_MODE), 0));
+    create_choice_row(s_overlay, 424, "Punctuation:", choice_id_t::PUNCTUATION,
+                      validated_index((int)current->punctuation_style, choice_count(choice_id_t::PUNCTUATION), 0));
 
-    // ---- Note ----
+    // Learning uses a separate right-side button on the same row, retaining
+    // the original compact screen footprint without introducing a popup list.
+    choice_control_t *learning = &s_choices[choice_index(choice_id_t::LEARNING)];
+    learning->id = choice_id_t::LEARNING;
+    learning->selected = validated_index((int)current->learning_save_mode,
+                                         choice_count(choice_id_t::LEARNING), 1);
+    apply_choice_to_snapshot(*learning);
+
+    lv_obj_t *learning_name = lv_label_create(s_overlay);
+    lv_label_set_text(learning_name, "Learning:");
+    lv_obj_set_style_text_font(learning_name, &lv_font_unscii_16, 0);
+    lv_obj_set_style_text_color(learning_name, lv_color_white(), 0);
+    lv_obj_set_pos(learning_name, 820, 442);
+
+    learning->button = lv_button_create(s_overlay);
+    lv_obj_set_size(learning->button, 300, 56);
+    lv_obj_set_pos(learning->button, 940, 424);
+    lv_obj_add_flag(learning->button, LV_OBJ_FLAG_CLICKABLE);
+    lv_obj_set_ext_click_area(learning->button, 10);
+    lv_obj_set_style_bg_color(learning->button, lv_color_make(75, 65, 145), 0);
+    lv_obj_set_style_bg_color(learning->button, lv_color_make(105, 90, 190), LV_STATE_PRESSED);
+    lv_obj_set_style_border_color(learning->button, lv_color_make(150, 135, 230), 0);
+    lv_obj_set_style_border_width(learning->button, 2, 0);
+    lv_obj_set_style_radius(learning->button, 8, 0);
+    lv_obj_add_event_cb(learning->button, choice_cycle_cb, LV_EVENT_CLICKED, learning);
+    learning->value_label = lv_label_create(learning->button);
+    lv_obj_set_style_text_font(learning->value_label, &lv_font_unscii_16, 0);
+    lv_obj_set_style_text_color(learning->value_label, lv_color_white(), 0);
+    update_choice_label(learning);
+
     lv_obj_t *note = lv_label_create(s_overlay);
     lv_label_set_text(note,
-        "  Note: All settings apply when Save & Close is pressed.  Tap Learning to cycle Off / Deferred / Manual.\n"
-        "  Punctuation controls . , - only while Japanese (SKK) input is active.\n"
-        "  Echo Back renders sent keys locally only; Japanese (SKK) sends committed UTF-8 only.\n"
-        "  PortA UART: GPIO53 (TX) / GPIO54 (RX); MBUS UART2: GPIO6 (TX) / GPIO7 (RX).");
+        "  Tap a value to cycle through its choices. All settings are applied only at Save & Close.\n"
+        "  Learning order: Off / Deferred / Manual. Punctuation affects . , - only in Japanese input.\n"
+        "  Echo Back is local display only. PortA: GPIO53/54; MBUS UART2: GPIO6/7.");
     lv_obj_set_style_text_font(note, &lv_font_unscii_16, 0);
     lv_obj_set_style_text_color(note, lv_color_make(180, 180, 180), 0);
     lv_obj_set_pos(note, 40, 490);
     lv_obj_set_width(note, LVGL_W - 80);
 
-    // ---- Separator 2 ----
-    lv_obj_t *sep2 = lv_obj_create(s_overlay);
-    lv_obj_set_size(sep2, LVGL_W, 2);
-    lv_obj_set_pos(sep2, 0, 570);
-    lv_obj_set_style_bg_color(sep2, lv_color_make(80, 80, 120), 0);
-    lv_obj_set_style_bg_opa(sep2, LV_OPA_COVER, 0);
-    lv_obj_set_style_border_width(sep2, 0, 0);
+    lv_obj_t *bottom_separator = lv_obj_create(s_overlay);
+    lv_obj_set_size(bottom_separator, LVGL_W, 2);
+    lv_obj_set_pos(bottom_separator, 0, 570);
+    lv_obj_set_style_bg_color(bottom_separator, lv_color_make(80, 80, 120), 0);
+    lv_obj_set_style_bg_opa(bottom_separator, LV_OPA_COVER, 0);
+    lv_obj_set_style_border_width(bottom_separator, 0, 0);
 
-    // ---- Save & Close button ----
-    lv_obj_t *btn = lv_button_create(s_overlay);
-    lv_obj_set_size(btn, 480, 72);
-    // LVGL_W=1280, btn_w=480 -> x=(1280-480)/2=400
-    // overlay_h=700, btn_h=72, margin=30 -> y=700-72-30=598
-    lv_obj_set_pos(btn, (LVGL_W - 480) / 2, (LVGL_H - STATUS_BAR_H) - 72 - 30);
-    lv_obj_add_flag(btn, LV_OBJ_FLAG_CLICKABLE);
-    lv_obj_set_style_bg_color(btn, lv_color_make(0, 140, 60), 0);
-    lv_obj_set_style_bg_color(btn, lv_color_make(0, 180, 80), LV_STATE_PRESSED);
-    lv_obj_set_style_radius(btn, 12, 0);
-    lv_obj_set_ext_click_area(btn, 16);
-    lv_obj_add_event_cb(btn, save_close_cb, LV_EVENT_CLICKED, NULL);
+    lv_obj_t *save_button = lv_button_create(s_overlay);
+    lv_obj_set_size(save_button, 480, 72);
+    lv_obj_set_pos(save_button, (LVGL_W - 480) / 2, (LVGL_H - STATUS_BAR_H) - 72 - 30);
+    lv_obj_add_flag(save_button, LV_OBJ_FLAG_CLICKABLE);
+    lv_obj_set_ext_click_area(save_button, 16);
+    lv_obj_set_style_bg_color(save_button, lv_color_make(0, 140, 60), 0);
+    lv_obj_set_style_bg_color(save_button, lv_color_make(0, 180, 80), LV_STATE_PRESSED);
+    lv_obj_set_style_radius(save_button, 12, 0);
+    lv_obj_add_event_cb(save_button, save_close_cb, LV_EVENT_CLICKED, NULL);
 
-    lv_obj_t *btn_lbl = lv_label_create(btn);
-    lv_label_set_text(btn_lbl, "Save & Close");
-    lv_obj_set_style_text_font(btn_lbl, &lv_font_unscii_16, 0);
-    lv_obj_set_style_text_color(btn_lbl, lv_color_white(), 0);
-    lv_obj_center(btn_lbl);
+    lv_obj_t *save_label = lv_label_create(save_button);
+    lv_label_set_text(save_label, "Save & Close");
+    lv_obj_set_style_text_font(save_label, &lv_font_unscii_16, 0);
+    lv_obj_set_style_text_color(save_label, lv_color_white(), 0);
+    lv_obj_center(save_label);
 
     lvgl_port_unlock();
-
-    ESP_LOGI(TAG, "Settings UI opened");
+    ESP_LOGI(TAG, "Settings UI opened (button controls)");
 }
 
 void settings_ui_close(void)
@@ -379,23 +392,16 @@ void settings_ui_close(void)
 
     lvgl_port_lock(0);
     lv_obj_delete(s_overlay);
-    s_overlay  = NULL;
-    s_dd_baud  = NULL;
-    s_dd_iface = NULL;
-    s_dd_log   = NULL;
-    s_dd_font  = NULL;
-    s_dd_echo  = NULL;
-    s_dd_input_mode = NULL;
-    s_dd_punctuation = NULL;
-    s_learning_button = NULL;
-    s_learning_label = NULL;
+    s_overlay = NULL;
+    for (size_t i = 0; i < (size_t)choice_id_t::COUNT; ++i) {
+        s_choices[i].button = NULL;
+        s_choices[i].value_label = NULL;
+    }
     lvgl_port_unlock();
 
-    // Force full terminal redraw so the screen is restored
     term_mark_all_dirty();
     term_refresh_display();
     update_status_bar();
-
     ESP_LOGI(TAG, "Settings UI closed");
 }
 
