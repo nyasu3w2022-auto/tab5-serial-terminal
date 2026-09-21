@@ -1,10 +1,12 @@
 /*
  * settings_ui.cpp — LVGL-based settings screen overlay.
  *
- * The TAB5 display path is stable for ordinary LVGL buttons, but the LVGL
- * dropdown popup/list path regressed after the learning setting was added.
- * Each setting is therefore represented by one large button. Tapping it
- * cycles through that setting's valid values; Save & Close applies them.
+ * Settings values open a fixed, application-owned selection panel.  This
+ * preserves one-tap list selection without using the LVGL dropdown widget's
+ * screen-level popup list.  The panel, scrim, and every option button are
+ * created as children of the settings overlay when it opens; selecting a
+ * value only changes visibility and never reparents, auto-sizes, or scrolls
+ * an LVGL list object.
  *
  * SPDX-License-Identifier: MIT
  */
@@ -15,6 +17,7 @@
 #include "display.h"     // term_refresh_display, update_status_bar
 
 #include <inttypes.h>
+#include <stddef.h>
 #include <stdint.h>
 
 #include <esp_log.h>
@@ -24,10 +27,14 @@
 static const char *TAG = "settings_ui";
 
 // ==============================================================
-// Internal state
+// Internal state and fixed option tables
 // ==============================================================
 
 static lv_obj_t *s_overlay = NULL;
+static lv_obj_t *s_picker_scrim = NULL;
+static lv_obj_t *s_picker_panel = NULL;
+static lv_obj_t *s_picker_title = NULL;
+static lv_obj_t *s_picker_hint = NULL;
 static settings_saved_cb_t s_saved_cb = NULL;
 static app_settings_t s_current = {};
 
@@ -35,6 +42,7 @@ static const uint32_t BAUD_TABLE[] = {
     9600, 19200, 38400, 57600, 115200, 230400, 460800, 921600
 };
 static constexpr size_t BAUD_TABLE_LEN = sizeof(BAUD_TABLE) / sizeof(BAUD_TABLE[0]);
+static constexpr size_t MAX_PICKER_OPTIONS = BAUD_TABLE_LEN;
 
 static const char *const BAUD_LABELS[] = {
     "9600", "19200", "38400", "57600", "115200", "230400", "460800", "921600"
@@ -80,11 +88,48 @@ struct choice_control_t {
     uint8_t selected = 0;
 };
 
+struct picker_option_t {
+    choice_control_t *control = NULL;
+    uint8_t option_index = 0;
+    lv_obj_t *button = NULL;
+    lv_obj_t *label = NULL;
+};
+
 static choice_control_t s_choices[(size_t)choice_id_t::COUNT] = {};
+static picker_option_t s_picker_options[MAX_PICKER_OPTIONS] = {};
+static choice_control_t *s_picker_active = NULL;
+
+static constexpr int PICKER_PANEL_W = 1040;
+static constexpr int PICKER_PANEL_H = 520;
+static constexpr int PICKER_PANEL_X = (LVGL_W - PICKER_PANEL_W) / 2;
+static constexpr int PICKER_PANEL_Y = ((LVGL_H - STATUS_BAR_H) - PICKER_PANEL_H) / 2;
+static constexpr int PICKER_OPTION_H = 60;
+static constexpr int PICKER_OPTION_GAP_X = 30;
+static constexpr int PICKER_OPTION_GAP_Y = 14;
+
+// ==============================================================
+// Setting value helpers
+// ==============================================================
 
 static size_t choice_index(choice_id_t id)
 {
     return (size_t)id;
+}
+
+static const char *choice_name(choice_id_t id)
+{
+    switch (id) {
+    case choice_id_t::BAUD:        return "Baud Rate";
+    case choice_id_t::INTERFACE:   return "Interface";
+    case choice_id_t::LOG_LEVEL:   return "Log Level";
+    case choice_id_t::FONT_SIZE:   return "Font Size";
+    case choice_id_t::ECHO_BACK:   return "Echo Back";
+    case choice_id_t::INPUT_MODE:  return "Input Mode";
+    case choice_id_t::PUNCTUATION: return "Punctuation";
+    case choice_id_t::LEARNING:    return "Learning";
+    case choice_id_t::COUNT:       return "";
+    }
+    return "";
 }
 
 static size_t choice_count(choice_id_t id)
@@ -171,18 +216,176 @@ static void update_choice_label(choice_control_t *control)
     lv_obj_center(control->value_label);
 }
 
-static void choice_cycle_cb(lv_event_t *event)
+// ==============================================================
+// Fixed selection panel
+// ==============================================================
+
+static void hide_picker(void)
 {
-    choice_control_t *control = (choice_control_t *)lv_event_get_user_data(event);
-    if (control == NULL) return;
+    if (s_picker_scrim != NULL) lv_obj_add_flag(s_picker_scrim, LV_OBJ_FLAG_HIDDEN);
+    if (s_picker_panel != NULL) lv_obj_add_flag(s_picker_panel, LV_OBJ_FLAG_HIDDEN);
+    s_picker_active = NULL;
+}
+
+static void picker_cancel_cb(lv_event_t *event)
+{
+    (void)event;
+    hide_picker();
+}
+
+static void picker_option_cb(lv_event_t *event)
+{
+    picker_option_t *option = (picker_option_t *)lv_event_get_user_data(event);
+    if (option == NULL || option->control == NULL || option->control != s_picker_active) return;
+
+    option->control->selected = option->option_index;
+    apply_choice_to_snapshot(*option->control);
+    update_choice_label(option->control);
+    ESP_LOGI(TAG, "%s selected: %s", choice_name(option->control->id),
+             choice_label(option->control->id, option->control->selected));
+    hide_picker();
+}
+
+static void show_picker(choice_control_t *control)
+{
+    if (control == NULL || s_picker_panel == NULL || s_picker_scrim == NULL) return;
 
     const size_t count = choice_count(control->id);
-    if (count == 0) return;
-    control->selected = (uint8_t)(((size_t)control->selected + 1) % count);
-    apply_choice_to_snapshot(*control);
-    update_choice_label(control);
+    if (count == 0 || count > MAX_PICKER_OPTIONS) return;
 
-    ESP_LOGI(TAG, "%s selected", choice_label(control->id, control->selected));
+    s_picker_active = control;
+    lv_label_set_text_fmt(s_picker_title, "Select %s", choice_name(control->id));
+    lv_label_set_text(s_picker_hint, "Tap a value to select it. Cancel keeps the current choice.");
+
+    // Eight baud-rate choices use a 2 x 4 grid. All shorter lists use a
+    // single column, which preserves a large, easy-to-read touch target.
+    const int columns = count >= 4 ? 2 : 1;
+    const int rows = (int)((count + (size_t)columns - 1) / (size_t)columns);
+    const int content_w = PICKER_PANEL_W - 80;
+    const int option_w = (content_w - (columns - 1) * PICKER_OPTION_GAP_X) / columns;
+    const int grid_w = columns * option_w + (columns - 1) * PICKER_OPTION_GAP_X;
+    const int grid_x = (PICKER_PANEL_W - grid_w) / 2;
+    const int grid_h = rows * PICKER_OPTION_H + (rows - 1) * PICKER_OPTION_GAP_Y;
+    const int grid_y = 118 + (270 - grid_h) / 2;
+
+    for (size_t i = 0; i < MAX_PICKER_OPTIONS; ++i) {
+        picker_option_t *option = &s_picker_options[i];
+        if (i >= count) {
+            lv_obj_add_flag(option->button, LV_OBJ_FLAG_HIDDEN);
+            continue;
+        }
+
+        option->control = control;
+        option->option_index = (uint8_t)i;
+        lv_label_set_text(option->label, choice_label(control->id, i));
+        lv_obj_center(option->label);
+
+        const int row = (int)(i / (size_t)columns);
+        const int col = (int)(i % (size_t)columns);
+        lv_obj_set_size(option->button, option_w, PICKER_OPTION_H);
+        lv_obj_set_pos(option->button,
+                       grid_x + col * (option_w + PICKER_OPTION_GAP_X),
+                       grid_y + row * (PICKER_OPTION_H + PICKER_OPTION_GAP_Y));
+        lv_obj_clear_flag(option->button, LV_OBJ_FLAG_HIDDEN);
+
+        const bool selected = i == (size_t)control->selected;
+        lv_obj_set_style_bg_color(option->button,
+                                  selected ? lv_color_make(0, 115, 180)
+                                           : lv_color_make(45, 45, 72),
+                                  0);
+        lv_obj_set_style_border_color(option->button,
+                                      selected ? lv_color_make(130, 220, 255)
+                                               : lv_color_make(110, 110, 175),
+                                      0);
+    }
+
+    // Both objects are persistent children of s_overlay. Their order is
+    // stable: scrim blocks background controls, panel is moved above it.
+    lv_obj_remove_flag(s_picker_scrim, LV_OBJ_FLAG_HIDDEN);
+    lv_obj_remove_flag(s_picker_panel, LV_OBJ_FLAG_HIDDEN);
+    lv_obj_move_foreground(s_picker_scrim);
+    lv_obj_move_foreground(s_picker_panel);
+}
+
+static void choice_open_cb(lv_event_t *event)
+{
+    show_picker((choice_control_t *)lv_event_get_user_data(event));
+}
+
+static void create_picker(lv_obj_t *parent)
+{
+    // The scrim is deliberately an overlay child, not a screen-level popup.
+    // It catches touches outside the panel and provides a cancel action.
+    s_picker_scrim = lv_obj_create(parent);
+    lv_obj_set_size(s_picker_scrim, LVGL_W, LVGL_H - STATUS_BAR_H);
+    lv_obj_set_pos(s_picker_scrim, 0, 0);
+    lv_obj_set_style_bg_color(s_picker_scrim, lv_color_make(0, 0, 0), 0);
+    lv_obj_set_style_bg_opa(s_picker_scrim, LV_OPA_50, 0);
+    lv_obj_set_style_border_width(s_picker_scrim, 0, 0);
+    lv_obj_set_style_pad_all(s_picker_scrim, 0, 0);
+    lv_obj_add_flag(s_picker_scrim, LV_OBJ_FLAG_CLICKABLE);
+    lv_obj_clear_flag(s_picker_scrim, LV_OBJ_FLAG_SCROLLABLE);
+    lv_obj_add_event_cb(s_picker_scrim, picker_cancel_cb, LV_EVENT_CLICKED, NULL);
+    lv_obj_add_flag(s_picker_scrim, LV_OBJ_FLAG_HIDDEN);
+
+    s_picker_panel = lv_obj_create(parent);
+    lv_obj_set_size(s_picker_panel, PICKER_PANEL_W, PICKER_PANEL_H);
+    lv_obj_set_pos(s_picker_panel, PICKER_PANEL_X, PICKER_PANEL_Y);
+    lv_obj_set_style_bg_color(s_picker_panel, lv_color_make(28, 28, 48), 0);
+    lv_obj_set_style_bg_opa(s_picker_panel, LV_OPA_COVER, 0);
+    lv_obj_set_style_border_color(s_picker_panel, lv_color_make(105, 125, 205), 0);
+    lv_obj_set_style_border_width(s_picker_panel, 3, 0);
+    lv_obj_set_style_radius(s_picker_panel, 12, 0);
+    lv_obj_set_style_pad_all(s_picker_panel, 0, 0);
+    lv_obj_add_flag(s_picker_panel, LV_OBJ_FLAG_CLICKABLE);
+    lv_obj_clear_flag(s_picker_panel, LV_OBJ_FLAG_SCROLLABLE);
+    lv_obj_add_flag(s_picker_panel, LV_OBJ_FLAG_HIDDEN);
+
+    s_picker_title = lv_label_create(s_picker_panel);
+    lv_obj_set_style_text_font(s_picker_title, &lv_font_unscii_16, 0);
+    lv_obj_set_style_text_color(s_picker_title, lv_color_white(), 0);
+    lv_obj_set_pos(s_picker_title, 40, 26);
+
+    s_picker_hint = lv_label_create(s_picker_panel);
+    lv_obj_set_style_text_font(s_picker_hint, &lv_font_unscii_16, 0);
+    lv_obj_set_style_text_color(s_picker_hint, lv_color_make(185, 195, 225), 0);
+    lv_obj_set_pos(s_picker_hint, 40, 62);
+
+    for (size_t i = 0; i < MAX_PICKER_OPTIONS; ++i) {
+        picker_option_t *option = &s_picker_options[i];
+        option->button = lv_button_create(s_picker_panel);
+        lv_obj_add_flag(option->button, LV_OBJ_FLAG_CLICKABLE);
+        lv_obj_set_ext_click_area(option->button, 8);
+        lv_obj_set_style_bg_color(option->button, lv_color_make(45, 45, 72), 0);
+        lv_obj_set_style_bg_color(option->button, lv_color_make(70, 70, 112), LV_STATE_PRESSED);
+        lv_obj_set_style_border_color(option->button, lv_color_make(110, 110, 175), 0);
+        lv_obj_set_style_border_width(option->button, 2, 0);
+        lv_obj_set_style_radius(option->button, 8, 0);
+        lv_obj_add_event_cb(option->button, picker_option_cb, LV_EVENT_CLICKED, option);
+
+        option->label = lv_label_create(option->button);
+        lv_obj_set_style_text_font(option->label, &lv_font_unscii_16, 0);
+        lv_obj_set_style_text_color(option->label, lv_color_white(), 0);
+        lv_obj_add_flag(option->button, LV_OBJ_FLAG_HIDDEN);
+    }
+
+    lv_obj_t *cancel_button = lv_button_create(s_picker_panel);
+    lv_obj_set_size(cancel_button, 300, 62);
+    lv_obj_set_pos(cancel_button, (PICKER_PANEL_W - 300) / 2, 434);
+    lv_obj_add_flag(cancel_button, LV_OBJ_FLAG_CLICKABLE);
+    lv_obj_set_ext_click_area(cancel_button, 8);
+    lv_obj_set_style_bg_color(cancel_button, lv_color_make(100, 60, 60), 0);
+    lv_obj_set_style_bg_color(cancel_button, lv_color_make(145, 78, 78), LV_STATE_PRESSED);
+    lv_obj_set_style_border_color(cancel_button, lv_color_make(190, 115, 115), 0);
+    lv_obj_set_style_border_width(cancel_button, 2, 0);
+    lv_obj_set_style_radius(cancel_button, 8, 0);
+    lv_obj_add_event_cb(cancel_button, picker_cancel_cb, LV_EVENT_CLICKED, NULL);
+
+    lv_obj_t *cancel_label = lv_label_create(cancel_button);
+    lv_label_set_text(cancel_label, "Cancel");
+    lv_obj_set_style_text_font(cancel_label, &lv_font_unscii_16, 0);
+    lv_obj_set_style_text_color(cancel_label, lv_color_white(), 0);
+    lv_obj_center(cancel_label);
 }
 
 static void create_choice_row(lv_obj_t *parent, int y_pos, const char *label_text,
@@ -210,12 +413,18 @@ static void create_choice_row(lv_obj_t *parent, int y_pos, const char *label_tex
     lv_obj_set_style_border_color(control->button, lv_color_make(100, 100, 180), 0);
     lv_obj_set_style_border_width(control->button, 2, 0);
     lv_obj_set_style_radius(control->button, 8, 0);
-    lv_obj_add_event_cb(control->button, choice_cycle_cb, LV_EVENT_CLICKED, control);
+    lv_obj_add_event_cb(control->button, choice_open_cb, LV_EVENT_CLICKED, control);
 
     control->value_label = lv_label_create(control->button);
     lv_obj_set_style_text_font(control->value_label, &lv_font_unscii_16, 0);
     lv_obj_set_style_text_color(control->value_label, lv_color_white(), 0);
     update_choice_label(control);
+
+    lv_obj_t *indicator = lv_label_create(control->button);
+    lv_label_set_text(indicator, "v");
+    lv_obj_set_style_text_font(indicator, &lv_font_unscii_16, 0);
+    lv_obj_set_style_text_color(indicator, lv_color_make(190, 200, 255), 0);
+    lv_obj_set_pos(indicator, 468, 18);
 }
 
 // ==============================================================
@@ -226,8 +435,8 @@ static void save_close_cb(lv_event_t *event)
 {
     (void)event;
 
-    // Every control updates s_current immediately, but nothing is persisted or
-    // applied to the serial transport until this explicit button is pressed.
+    // The picker consumes background touches while visible, so this callback
+    // can only run after a selection panel was closed or never opened.
     const app_settings_t saved = s_current;
     if (!settings_save(&saved)) {
         ESP_LOGE(TAG, "Settings save failed");
@@ -302,8 +511,6 @@ void settings_ui_open(const app_settings_t *current)
     lv_obj_set_style_bg_opa(separator, LV_OPA_COVER, 0);
     lv_obj_set_style_border_width(separator, 0, 0);
 
-    // Plain buttons deliberately replace every lv_dropdown. This avoids LVGL
-    // popup-list creation and selection handling on the TAB5's direct DSI path.
     create_choice_row(s_overlay, 64,  "Baud Rate:",   choice_id_t::BAUD,
                       baud_to_index(current->baud_rate));
     create_choice_row(s_overlay, 124, "Interface:",   choice_id_t::INTERFACE,
@@ -319,8 +526,6 @@ void settings_ui_open(const app_settings_t *current)
     create_choice_row(s_overlay, 424, "Punctuation:", choice_id_t::PUNCTUATION,
                       validated_index((int)current->punctuation_style, choice_count(choice_id_t::PUNCTUATION), 0));
 
-    // Learning uses a separate right-side button on the same row, retaining
-    // the original compact screen footprint without introducing a popup list.
     choice_control_t *learning = &s_choices[choice_index(choice_id_t::LEARNING)];
     learning->id = choice_id_t::LEARNING;
     learning->selected = validated_index((int)current->learning_save_mode,
@@ -343,17 +548,24 @@ void settings_ui_open(const app_settings_t *current)
     lv_obj_set_style_border_color(learning->button, lv_color_make(150, 135, 230), 0);
     lv_obj_set_style_border_width(learning->button, 2, 0);
     lv_obj_set_style_radius(learning->button, 8, 0);
-    lv_obj_add_event_cb(learning->button, choice_cycle_cb, LV_EVENT_CLICKED, learning);
+    lv_obj_add_event_cb(learning->button, choice_open_cb, LV_EVENT_CLICKED, learning);
+
     learning->value_label = lv_label_create(learning->button);
     lv_obj_set_style_text_font(learning->value_label, &lv_font_unscii_16, 0);
     lv_obj_set_style_text_color(learning->value_label, lv_color_white(), 0);
     update_choice_label(learning);
 
+    lv_obj_t *learning_indicator = lv_label_create(learning->button);
+    lv_label_set_text(learning_indicator, "v");
+    lv_obj_set_style_text_font(learning_indicator, &lv_font_unscii_16, 0);
+    lv_obj_set_style_text_color(learning_indicator, lv_color_make(220, 215, 255), 0);
+    lv_obj_set_pos(learning_indicator, 268, 18);
+
     lv_obj_t *note = lv_label_create(s_overlay);
     lv_label_set_text(note,
-        "  Tap a value to cycle through its choices. All settings are applied only at Save & Close.\n"
-        "  Learning order: Off / Deferred / Manual. Punctuation affects . , - only in Japanese input.\n"
-        "  Echo Back is local display only. PortA: GPIO53/54; MBUS UART2: GPIO6/7.");
+        "  Tap a value to open its choices. Settings apply only at Save & Close.\n"
+        "  Punctuation affects . , - only in Japanese input. Echo Back is local display only.\n"
+        "  PortA: GPIO53/54; MBUS UART2: GPIO6/7.");
     lv_obj_set_style_text_font(note, &lv_font_unscii_16, 0);
     lv_obj_set_style_text_color(note, lv_color_make(180, 180, 180), 0);
     lv_obj_set_pos(note, 40, 490);
@@ -382,8 +594,12 @@ void settings_ui_open(const app_settings_t *current)
     lv_obj_set_style_text_color(save_label, lv_color_white(), 0);
     lv_obj_center(save_label);
 
+    // Create the picker after all settings controls, keeping it permanently
+    // above the base settings screen while it is visible.
+    create_picker(s_overlay);
+
     lvgl_port_unlock();
-    ESP_LOGI(TAG, "Settings UI opened (button controls)");
+    ESP_LOGI(TAG, "Settings UI opened (fixed selection panel controls)");
 }
 
 void settings_ui_close(void)
@@ -393,9 +609,19 @@ void settings_ui_close(void)
     lvgl_port_lock(0);
     lv_obj_delete(s_overlay);
     s_overlay = NULL;
+    s_picker_scrim = NULL;
+    s_picker_panel = NULL;
+    s_picker_title = NULL;
+    s_picker_hint = NULL;
+    s_picker_active = NULL;
     for (size_t i = 0; i < (size_t)choice_id_t::COUNT; ++i) {
         s_choices[i].button = NULL;
         s_choices[i].value_label = NULL;
+    }
+    for (size_t i = 0; i < MAX_PICKER_OPTIONS; ++i) {
+        s_picker_options[i].control = NULL;
+        s_picker_options[i].button = NULL;
+        s_picker_options[i].label = NULL;
     }
     lvgl_port_unlock();
 
