@@ -496,8 +496,14 @@ static bool handle_key_event(const key_event_msg_t *msg)
         return false;
     }
 
-    // ---- If settings screen is open, swallow all other keys ----
+    // ---- Settings screen owns input while it is open ----
     if (settings_ui_is_open()) {
+        // Esc is hierarchical cancellation: close an open choice panel first;
+        // otherwise close settings without saving or applying pending changes.
+        if (!ctrl && !alt &&
+            (strcasecmp(msg->str, "escape") == 0 || strcasecmp(msg->str, "esc") == 0)) {
+            settings_ui_cancel();
+        }
         return false;
     }
 

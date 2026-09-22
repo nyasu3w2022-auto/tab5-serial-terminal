@@ -4,8 +4,9 @@
  *
  * The settings screen is a full-screen overlay that appears on top of
  * the terminal canvas when the user presses Ctrl+Alt+S.  When the user
- * presses "Save & Close" or Ctrl+Alt+S again, the overlay is destroyed
- * and the terminal canvas is restored.
+ * presses "Save & Close", Esc, or Ctrl+Alt+S again, the overlay is destroyed
+ * and the terminal canvas is restored.  Esc first closes an open choice panel
+ * without changing its selected value.
  *
  * SPDX-License-Identifier: MIT
  */
@@ -41,6 +42,17 @@ void settings_ui_set_saved_cb(settings_saved_cb_t cb);
  * @param current  Current settings to display as initial values.
  */
 void settings_ui_open(const app_settings_t *current);
+
+/**
+ * @brief Cancel the currently active settings UI level.
+ *
+ * If a fixed choice panel is open, it is hidden and the current setting value
+ * is retained. Otherwise the settings overlay is closed without saving or
+ * applying its in-memory snapshot.
+ *
+ * @return true when a panel or the settings overlay was cancelled.
+ */
+bool settings_ui_cancel(void);
 
 /**
  * @brief Close the settings screen.
