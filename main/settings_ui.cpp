@@ -36,7 +36,6 @@ static lv_obj_t *s_overlay = NULL;
 static lv_obj_t *s_picker_scrim = NULL;
 static lv_obj_t *s_picker_panel = NULL;
 static lv_obj_t *s_picker_title = NULL;
-static lv_obj_t *s_picker_hint = NULL;
 static settings_saved_cb_t s_saved_cb = NULL;
 static app_settings_t s_current = {};
 
@@ -106,7 +105,7 @@ static constexpr int SECTION_X_LEFT = 30;
 static constexpr int SECTION_X_RIGHT = 660;
 static constexpr int SECTION_Y = 64;
 static constexpr int SECTION_W = 590;
-static constexpr int SECTION_H = 450;
+static constexpr int SECTION_H = 490;
 static constexpr int SECTION_LABEL_X = 20;
 static constexpr int SECTION_BUTTON_X = 196;
 static constexpr int SECTION_BUTTON_W = 374;
@@ -315,7 +314,6 @@ static void show_picker(choice_control_t *control)
 
     s_picker_active = control;
     lv_label_set_text_fmt(s_picker_title, "Select %s", choice_name(control->id));
-    lv_label_set_text(s_picker_hint, "Tap a value to select it. Esc, Cancel, or outside keeps the current choice.");
 
     // Eight baud-rate choices use a 2 x 4 grid. All shorter lists use a
     // single column, which preserves a large, easy-to-read touch target.
@@ -326,7 +324,7 @@ static void show_picker(choice_control_t *control)
     const int grid_w = columns * option_w + (columns - 1) * PICKER_OPTION_GAP_X;
     const int grid_x = (PICKER_PANEL_W - grid_w) / 2;
     const int grid_h = rows * PICKER_OPTION_H + (rows - 1) * PICKER_OPTION_GAP_Y;
-    const int grid_y = 118 + (270 - grid_h) / 2;
+    const int grid_y = 96 + (282 - grid_h) / 2;
 
     for (size_t i = 0; i < MAX_PICKER_OPTIONS; ++i) {
         picker_option_t *option = &s_picker_options[i];
@@ -418,11 +416,6 @@ static void create_picker(lv_obj_t *parent)
     lv_obj_set_style_text_color(s_picker_title, lv_color_white(), 0);
     lv_obj_set_pos(s_picker_title, 40, 26);
 
-    s_picker_hint = lv_label_create(s_picker_panel);
-    lv_obj_set_style_text_font(s_picker_hint, &lv_font_unscii_16, 0);
-    lv_obj_set_style_text_color(s_picker_hint, lv_color_make(185, 195, 225), 0);
-    lv_obj_set_pos(s_picker_hint, 40, 62);
-
     for (size_t i = 0; i < MAX_PICKER_OPTIONS; ++i) {
         picker_option_t *option = &s_picker_options[i];
         option->button = lv_button_create(s_picker_panel);
@@ -465,7 +458,7 @@ static void create_picker(lv_obj_t *parent)
 // ==============================================================
 
 static lv_obj_t *create_section(lv_obj_t *parent, int x, const char *title_text,
-                                const char *subtitle_text, bool skk_section)
+                                bool skk_section)
 {
     lv_obj_t *section = lv_obj_create(parent);
     lv_obj_set_size(section, SECTION_W, SECTION_H);
@@ -493,15 +486,9 @@ static lv_obj_t *create_section(lv_obj_t *parent, int x, const char *title_text,
                                 0);
     lv_obj_set_pos(title, 20, 16);
 
-    lv_obj_t *subtitle = lv_label_create(section);
-    lv_label_set_text(subtitle, subtitle_text);
-    lv_obj_set_style_text_font(subtitle, &lv_font_unscii_16, 0);
-    lv_obj_set_style_text_color(subtitle, lv_color_make(180, 185, 205), 0);
-    lv_obj_set_pos(subtitle, 20, 42);
-
     lv_obj_t *separator = lv_obj_create(section);
     lv_obj_set_size(separator, SECTION_W - 40, 1);
-    lv_obj_set_pos(separator, 20, 72);
+    lv_obj_set_pos(separator, 20, 50);
     lv_obj_set_style_bg_color(separator,
                               skk_section ? lv_color_make(120, 90, 175)
                                           : lv_color_make(74, 105, 160),
@@ -551,18 +538,6 @@ static void create_choice_row(lv_obj_t *parent, int y_pos, const char *label_tex
         lv_obj_set_style_text_color(indicator, lv_color_make(190, 200, 255), 0);
         lv_obj_set_pos(indicator, SECTION_BUTTON_W - 28, 18);
     }
-}
-
-static void create_skk_help(lv_obj_t *parent)
-{
-    lv_obj_t *help = lv_label_create(parent);
-    lv_label_set_text(help,
-        "Punctuation converts . , - while Japanese (SKK) input is active.\n"
-        "Learning controls candidate-priority persistence: Off / Deferred / Manual.");
-    lv_obj_set_style_text_font(help, &lv_font_unscii_16, 0);
-    lv_obj_set_style_text_color(help, lv_color_make(200, 185, 230), 0);
-    lv_obj_set_pos(help, 20, 330);
-    lv_obj_set_width(help, SECTION_W - 40);
 }
 
 // ==============================================================
@@ -637,53 +612,36 @@ void settings_ui_open(const app_settings_t *current)
     lv_obj_clear_flag(title_bar, LV_OBJ_FLAG_SCROLLABLE);
 
     lv_obj_t *title = lv_label_create(title_bar);
-    lv_label_set_text(title, "  TAB5 Serial Terminal - Settings    Esc: Cancel    Ctrl+Alt+S: Close");
+    lv_label_set_text(title, "  TAB5 Serial Terminal - Settings");
     lv_obj_set_style_text_font(title, &lv_font_unscii_16, 0);
     lv_obj_set_style_text_color(title, lv_color_white(), 0);
     lv_obj_align(title, LV_ALIGN_LEFT_MID, 0, 0);
 
     lv_obj_t *terminal_section = create_section(
-        s_overlay, SECTION_X_LEFT, "Connection & Display",
-        "Serial transport, terminal font, and local echo.", false);
-    create_choice_row(terminal_section, 92,  "Baud Rate:", choice_id_t::BAUD,
+        s_overlay, SECTION_X_LEFT, "Connection & Display", false);
+    create_choice_row(terminal_section, 76,  "Baud Rate:", choice_id_t::BAUD,
                       baud_to_index(current->baud_rate));
-    create_choice_row(terminal_section, 154, "Interface:", choice_id_t::INTERFACE,
+    create_choice_row(terminal_section, 142, "Interface:", choice_id_t::INTERFACE,
                       validated_index((int)current->serial_if, choice_count(choice_id_t::INTERFACE), 0));
-    create_choice_row(terminal_section, 216, "Log Level:", choice_id_t::LOG_LEVEL,
+    create_choice_row(terminal_section, 208, "Log Level:", choice_id_t::LOG_LEVEL,
                       validated_index((int)current->log_level, choice_count(choice_id_t::LOG_LEVEL), 3));
-    create_choice_row(terminal_section, 278, "Font Size:", choice_id_t::FONT_SIZE,
+    create_choice_row(terminal_section, 274, "Font Size:", choice_id_t::FONT_SIZE,
                       validated_index((int)current->font_size, choice_count(choice_id_t::FONT_SIZE), 1));
     create_choice_row(terminal_section, 340, "Echo Back:", choice_id_t::ECHO_BACK,
                       validated_index((int)current->local_echo, choice_count(choice_id_t::ECHO_BACK), 0));
 
-    lv_obj_t *terminal_help = lv_label_create(terminal_section);
-    lv_label_set_text(terminal_help, "Two-choice values toggle immediately when tapped.");
-    lv_obj_set_style_text_font(terminal_help, &lv_font_unscii_16, 0);
-    lv_obj_set_style_text_color(terminal_help, lv_color_make(185, 200, 220), 0);
-    lv_obj_set_pos(terminal_help, 20, 414);
-
     lv_obj_t *skk_section = create_section(
-        s_overlay, SECTION_X_RIGHT, "Japanese Input (SKK)",
-        "Applied when Input Mode is Japanese (SKK).", true);
-    create_choice_row(skk_section, 112, "Input Mode:", choice_id_t::INPUT_MODE,
+        s_overlay, SECTION_X_RIGHT, "Japanese Input (SKK)", true);
+    create_choice_row(skk_section, 96, "Input Mode:", choice_id_t::INPUT_MODE,
                       validated_index((int)current->input_mode, choice_count(choice_id_t::INPUT_MODE), 0));
-    create_choice_row(skk_section, 186, "Punctuation:", choice_id_t::PUNCTUATION,
+    create_choice_row(skk_section, 174, "Punctuation:", choice_id_t::PUNCTUATION,
                       validated_index((int)current->punctuation_style, choice_count(choice_id_t::PUNCTUATION), 0));
-    create_choice_row(skk_section, 260, "Learning:", choice_id_t::LEARNING,
+    create_choice_row(skk_section, 252, "Learning:", choice_id_t::LEARNING,
                       validated_index((int)current->learning_save_mode, choice_count(choice_id_t::LEARNING), 1));
-    create_skk_help(skk_section);
-
-    lv_obj_t *note = lv_label_create(s_overlay);
-    lv_label_set_text(note,
-        "Two-choice values toggle directly; other values open a fixed choice panel. Esc cancels the panel first, then the settings screen.");
-    lv_obj_set_style_text_font(note, &lv_font_unscii_16, 0);
-    lv_obj_set_style_text_color(note, lv_color_make(190, 190, 200), 0);
-    lv_obj_set_pos(note, 40, 530);
-    lv_obj_set_width(note, LVGL_W - 80);
 
     lv_obj_t *bottom_separator = lv_obj_create(s_overlay);
     lv_obj_set_size(bottom_separator, LVGL_W, 2);
-    lv_obj_set_pos(bottom_separator, 0, 562);
+    lv_obj_set_pos(bottom_separator, 0, 570);
     lv_obj_set_style_bg_color(bottom_separator, lv_color_make(80, 80, 120), 0);
     lv_obj_set_style_bg_opa(bottom_separator, LV_OPA_COVER, 0);
     lv_obj_set_style_border_width(bottom_separator, 0, 0);
@@ -741,7 +699,6 @@ void settings_ui_close(void)
     s_picker_scrim = NULL;
     s_picker_panel = NULL;
     s_picker_title = NULL;
-    s_picker_hint = NULL;
     s_picker_active = NULL;
     for (size_t i = 0; i < (size_t)choice_id_t::COUNT; ++i) {
         s_choices[i].button = NULL;
