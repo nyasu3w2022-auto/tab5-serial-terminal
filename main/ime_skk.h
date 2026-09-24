@@ -66,9 +66,11 @@ enum class ime_learning_mode_t {
  *
  * Lowercase romaji creates direct hiragana or katakana text.  An uppercase
  * initial starts SKK conversion; a subsequent uppercase initial begins an
- * okurigana segment (`MiRu` -> dictionary key `みr` -> `見る`).  `q` toggles
- * direct hiragana/katakana input while there is no unfinished composition.
- * The class never accesses LVGL, ESP-IDF or serial transport directly.
+ * okurigana segment (`MiRu` -> dictionary key `みr` -> `見る`).  `/` at an
+ * empty direct-kana boundary starts ASCII abbreviation input, which searches
+ * the same dictionaries using an ASCII key. `q` toggles direct
+ * hiragana/katakana input while there is no unfinished composition. The class
+ * never accesses LVGL, ESP-IDF or serial transport directly.
  */
 class ime_skk_t {
 public:
@@ -149,6 +151,9 @@ public:
     /** True in temporary ASCII entry mode, entered by l with no preedit. */
     bool is_ascii_mode() const;
 
+    /** True in slash-started ASCII abbreviation input mode. */
+    bool is_abbrev_mode() const;
+
     /** Text to show as preedit. Direct katakana is rendered in katakana. */
     std::string preedit_text() const;
 
@@ -188,6 +193,8 @@ private:
     ime_kana_mode_t s_kana_mode = ime_kana_mode_t::HIRAGANA;
     ime_punctuation_style_t s_punctuation_style = ime_punctuation_style_t::JAPANESE;
     bool        s_ascii_mode = false;
+    bool        s_abbrev_mode = false;
+    std::string s_abbrev;
     bool        s_z_prefix = false;
 
     std::array<std::string, MAX_CANDIDATES> s_candidates;
@@ -203,6 +210,7 @@ private:
     void process_romaji();
     void erase_last_preedit();
     bool search_dictionary();
+    bool search_abbreviation_dictionary();
     bool search_dictionary_key(const std::string &path, const std::string &key);
     bool search_dictionary_okuri_family(const std::string &path, const std::string &reading);
     bool append_candidate(const char *candidate, size_t len);

@@ -32,7 +32,11 @@ bool is_safe_field(const std::string &value, bool is_key)
 {
     if (value.empty()) return false;
     for (unsigned char ch : value) {
-        if (ch < 0x20 || ch == '/' || ch == '\\' || ch == ';' || (is_key && ch == ' ')) {
+        // A slash is the candidate delimiter, so it remains forbidden in
+        // candidate text. It is unambiguous before the key/value separator
+        // space and is needed for abbreviation keys such as usr/bin.
+        if (ch < 0x20 || (!is_key && ch == '/') || ch == '\\' || ch == ';' ||
+            (is_key && ch == ' ')) {
             return false;
         }
     }

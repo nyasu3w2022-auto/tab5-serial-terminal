@@ -17,7 +17,9 @@ int main()
     const char *dict_path = "/tmp/tab5-ime-test-skk.txt";
     const char *supplement_dict_path = "/tmp/tab5-ime-test-supplement.txt";
     const char *user_dict_path = "/tmp/tab5-ime-test-user.txt";
+    const char *abbrev_user_path = "/tmp/tab5-ime-test-abbrev-user.txt";
     std::remove(user_dict_path);
+    std::remove(abbrev_user_path);
     FILE *supplement = fopen(supplement_dict_path, "wb");
     assert(supplement != nullptr);
     fputs("; TAB5 supplement dictionary\n", supplement);
@@ -33,6 +35,8 @@ int main()
     fputs("はしr /走/\n", dict);
     fputs("いu /言/云/\n", dict);
     fputs("わん /腕/碗/湾/椀/\n", dict);
+    fputs("git /Git/GitHub/\n", dict);
+    fputs("is /インクリメンタル・サーチ/\n", dict);
     fclose(dict);
 
     ime_skk_t ime;
@@ -95,6 +99,86 @@ int main()
     assert(ime.input_key(ime_key_t::ESCAPE).consumed);
     assert(!ime.is_ascii_mode());
     assert(ime.state() == ime_state_t::IDLE);
+
+    // / starts an ASCII SKK abbreviation. It remains local, searches the
+    // ordinary dictionary chain, and commits a selected candidate without CR
+    // or Japanese candidate-priority learning.
+    assert(ime.pending_learning_count() == 0);
+    type(ime, "/");
+    assert(ime.is_abbrev_mode());
+    assert(ime.state() == ime_state_t::COMPOSING);
+    assert(ime.preedit_text().empty());
+    type(ime, "git");
+    assert(ime.preedit_text() == "git");
+    ime_result_t abbrev_search = ime.input_key(ime_key_t::SPACE);
+    assert(abbrev_search.consumed && abbrev_search.changed && abbrev_search.commit.empty());
+    assert(ime.state() == ime_state_t::CANDIDATE);
+    assert(ime.candidate_count() == 2);
+    assert(ime.candidate_at(0) == "Git");
+    assert(ime.candidate_at(1) == "GitHub");
+
+    // Typing after a highlighted abbreviation commits it, but must not add an
+    // ASCII key to the Japanese candidate-priority learning queue.
+    ime_result_t abbrev_following_text = type(ime, "a");
+    assert(abbrev_following_text.commit == "Git");
+    assert(ime.pending_learning_count() == 0);
+    assert(ime.preedit_text() == "あ");
+    assert(ime.input_key(ime_key_t::ESCAPE).consumed);
+
+    type(ime, "/git");
+    ime.input_key(ime_key_t::SPACE);
+    ime.input_key(ime_key_t::RIGHT);
+    assert(ime.input_key(ime_key_t::ENTER).commit == "GitHub");
+    assert(ime.state() == ime_state_t::IDLE);
+    assert(!ime.is_abbrev_mode());
+    assert(ime.pending_learning_count() == 0);
+
+    // Missing entries become a local literal candidate. Both Enter and Ctrl+J
+    // confirm abbreviations without a terminal CR.
+    type(ime, "/curl");
+    ime.input_key(ime_key_t::SPACE);
+    assert(ime.candidate_count() == 1);
+    assert(ime.candidate_at(0) == "curl");
+    assert(ime.input_key(ime_key_t::COMMIT).commit == "curl");
+    type(ime, "/usr/bin");
+    assert(ime.preedit_text() == "usr/bin");
+    assert(ime.input_key(ime_key_t::ENTER).commit == "usr/bin");
+
+    // Escape first closes an abbreviation candidate list, then cancels its
+    // ASCII preedit. Backspace edits the local ASCII preedit without remote TX.
+    type(ime, "/is");
+    ime.input_key(ime_key_t::SPACE);
+    assert(ime.candidate_at(0) == "インクリメンタル・サーチ");
+    assert(ime.input_key(ime_key_t::ESCAPE).consumed);
+    assert(ime.is_abbrev_mode());
+    assert(ime.preedit_text() == "is");
+    assert(ime.input_key(ime_key_t::ESCAPE).consumed);
+    assert(ime.state() == ime_state_t::IDLE);
+    type(ime, "/abc");
+    assert(ime.input_key(ime_key_t::BACKSPACE).consumed);
+    assert(ime.preedit_text() == "ab");
+    assert(ime.input_key(ime_key_t::ESCAPE).consumed);
+
+    // ASCII abbreviation keys follow the same user -> supplement -> system
+    // lookup order as Japanese SKK keys.
+    FILE *abbrev_user = fopen(abbrev_user_path, "wb");
+    assert(abbrev_user != nullptr);
+    fputs("myhost /MyHost/\n", abbrev_user);
+    fputs("usr/bin /USR-BIN/\n", abbrev_user);
+    fclose(abbrev_user);
+    ime_skk_t user_abbrev_ime;
+    user_abbrev_ime.set_dictionary_path(dict_path);
+    user_abbrev_ime.set_user_dictionary_path(abbrev_user_path);
+    type(user_abbrev_ime, "/myhost");
+    user_abbrev_ime.input_key(ime_key_t::SPACE);
+    assert(user_abbrev_ime.candidate_count() == 1);
+    assert(user_abbrev_ime.candidate_at(0) == "MyHost");
+    assert(user_abbrev_ime.input_key(ime_key_t::COMMIT).commit == "MyHost");
+    type(user_abbrev_ime, "/usr/bin");
+    user_abbrev_ime.input_key(ime_key_t::SPACE);
+    assert(user_abbrev_ime.candidate_count() == 1);
+    assert(user_abbrev_ime.candidate_at(0) == "USR-BIN");
+    assert(user_abbrev_ime.input_key(ime_key_t::COMMIT).commit == "USR-BIN");
 
     // Space starts candidate selection even when the reading was entered in
     // lowercase.  It must not transmit the raw hiragana plus a space.
@@ -375,6 +459,11 @@ int main()
     assert(ime.candidate_count() >= 1);
     assert(ime.candidate_at(0) == "来");
     assert(ime.input_key(ime_key_t::ENTER).commit == "来た");
+    type(ime, "/github");
+    ime.input_key(ime_key_t::SPACE);
+    assert(ime.candidate_count() >= 1);
+    assert(ime.candidate_at(0) == "GitHub");
+    assert(ime.input_key(ime_key_t::ENTER).commit == "GitHub");
     type(ime, "MiRu");
     ime_result_t full_dict_search = ime.input_key(ime_key_t::SPACE);
     assert(full_dict_search.consumed && full_dict_search.changed);
@@ -435,6 +524,7 @@ int main()
     std::remove(dict_path);
     std::remove(supplement_dict_path);
     std::remove(user_dict_path);
+    std::remove(abbrev_user_path);
     puts("ime_skk tests passed");
     return 0;
 }

@@ -211,6 +211,8 @@ void ime_skk_t::reset()
     clear_composition();
     clear_candidates();
     s_ascii_mode = false;
+    s_abbrev_mode = false;
+    s_abbrev.clear();
     s_z_prefix = false;
     s_state = ime_state_t::IDLE;
 }
@@ -322,9 +324,15 @@ bool ime_skk_t::is_ascii_mode() const
     return s_ascii_mode;
 }
 
+bool ime_skk_t::is_abbrev_mode() const
+{
+    return s_abbrev_mode;
+}
+
 std::string ime_skk_t::preedit_text() const
 {
     if (s_ascii_mode) return "ASCII";
+    if (s_abbrev_mode) return s_abbrev;
     if (s_conversion_active) {
         // Conversion state is identified by the overlay status line.  Keep
         // this text ASCII-marker-free because the terminal CJK font does not
@@ -378,6 +386,8 @@ void ime_skk_t::clear_composition()
     s_okuri_initial = '\0';
     s_conversion_active = false;
     s_okuri_active = false;
+    s_abbrev_mode = false;
+    s_abbrev.clear();
     s_z_prefix = false;
 }
 
@@ -385,7 +395,8 @@ void ime_skk_t::update_state()
 {
     if (s_candidate_count > 0) {
         s_state = ime_state_t::CANDIDATE;
-    } else if (s_ascii_mode || s_conversion_active || !s_kana.empty() || !s_okuri_kana.empty() || !s_romaji.empty() || s_z_prefix) {
+    } else if (s_ascii_mode || s_abbrev_mode || s_conversion_active ||
+               !s_kana.empty() || !s_okuri_kana.empty() || !s_romaji.empty() || s_z_prefix) {
         s_state = ime_state_t::COMPOSING;
     } else {
         s_state = ime_state_t::IDLE;
@@ -485,7 +496,14 @@ void ime_skk_t::process_romaji()
 void ime_skk_t::erase_last_preedit()
 {
     clear_candidates();
-    if (!s_romaji.empty()) {
+    if (s_abbrev_mode) {
+        if (!s_abbrev.empty()) {
+            s_abbrev.pop_back();
+        } else {
+            reset();
+            return;
+        }
+    } else if (!s_romaji.empty()) {
         s_romaji.pop_back();
     } else if (s_okuri_active) {
         erase_last_utf8(&s_okuri_kana);
@@ -536,6 +554,29 @@ bool ime_skk_t::search_dictionary()
     }
 
     apply_pending_learning(key);
+    update_state();
+    return s_candidate_count > 0;
+}
+
+bool ime_skk_t::search_abbreviation_dictionary()
+{
+    clear_candidates();
+    if (s_abbrev.empty()) {
+        update_state();
+        return false;
+    }
+
+    // SKK abbrev uses the normal dictionary chain; only the lookup key is
+    // ASCII instead of hiragana. Abbreviation confirmations do not learn or
+    // alter candidate priority, so pending Japanese-key learning is not
+    // applied here.
+    if (!s_user_dictionary_path.empty()) search_dictionary_key(s_user_dictionary_path, s_abbrev);
+    if (!s_supplement_dictionary_path.empty()) search_dictionary_key(s_supplement_dictionary_path, s_abbrev);
+    if (!s_dictionary_path.empty()) search_dictionary_key(s_dictionary_path, s_abbrev);
+
+    // A missing dictionary entry must still offer a deterministic, local
+    // confirmation path for command fragments, paths, URLs, and identifiers.
+    if (s_candidate_count == 0) append_candidate(s_abbrev.c_str(), s_abbrev.size());
     update_state();
     return s_candidate_count > 0;
 }
@@ -941,7 +982,7 @@ ime_result_t ime_skk_t::input_text(const char *text, size_t len)
 
     if (s_state == ime_state_t::CANDIDATE && s_candidate_count > 0) {
         result.consumed = true;
-        learn_current_candidate();
+        if (!s_abbrev_mode) learn_current_candidate();
         result.commit = current_candidate_commit();
         clear_composition();
         clear_candidates();
@@ -958,6 +999,19 @@ ime_result_t ime_skk_t::input_text(const char *text, size_t len)
             continue;
         }
 
+        // Slash-started abbreviation input stores printable ASCII locally and
+        // searches the normal SKK dictionaries only after Space. The original
+        // ASCII must never be sent before an explicit commit.
+        if (s_abbrev_mode) {
+            result.consumed = true;
+            if (byte >= 0x21 && byte <= 0x7E && s_abbrev.size() < MAX_READING_BYTES) {
+                s_abbrev.push_back((char)byte);
+                result.changed = true;
+                update_state();
+            }
+            continue;
+        }
+
         // z is a direct-kana symbol prefix. It is held for one following
         // byte so ordinary romaji such as za continues to work unchanged.
         if (s_z_prefix) {
@@ -971,6 +1025,19 @@ ime_result_t ime_skk_t::input_text(const char *text, size_t len)
                 continue;
             }
             s_romaji.push_back('z');
+        }
+
+        // / at an empty direct-kana boundary enters SKK abbrev mode. A slash
+        // later in abbrev mode is stored as ordinary ASCII, so paths such as
+        // /usr/bin can be entered as / followed by usr/bin.
+        if (byte == '/' && !s_conversion_active && s_romaji.empty() &&
+            s_kana.empty() && s_okuri_kana.empty()) {
+            s_abbrev_mode = true;
+            s_abbrev.clear();
+            result.consumed = true;
+            result.changed = true;
+            update_state();
+            continue;
         }
 
         // In direct Japanese input, a lone l enters a temporary ASCII mode.
@@ -1107,7 +1174,7 @@ ime_result_t ime_skk_t::input_key(ime_key_t key)
             return result;
         case ime_key_t::ENTER:
         case ime_key_t::COMMIT:
-            learn_current_candidate();
+            if (!s_abbrev_mode) learn_current_candidate();
             result.commit = current_candidate_commit();
             reset();
             result.changed = true;
@@ -1123,6 +1190,36 @@ ime_result_t ime_skk_t::input_key(ime_key_t key)
             result.changed = true;
             return result;
         }
+    }
+
+    if (s_abbrev_mode) {
+        switch (key) {
+        case ime_key_t::SPACE:
+            search_abbreviation_dictionary();
+            result.changed = true;
+            break;
+        case ime_key_t::ENTER:
+        case ime_key_t::COMMIT:
+            // Abbreviations are local SKK confirmations. Unlike direct kana
+            // Enter, neither Enter nor Ctrl+J appends a terminal CR.
+            result.commit = s_abbrev;
+            reset();
+            result.changed = true;
+            break;
+        case ime_key_t::ESCAPE:
+            reset();
+            result.changed = true;
+            break;
+        case ime_key_t::BACKSPACE:
+            erase_last_preedit();
+            result.changed = true;
+            break;
+        case ime_key_t::LEFT:
+        case ime_key_t::RIGHT:
+            break;
+        }
+        update_state();
+        return result;
     }
 
     if (s_conversion_active) {

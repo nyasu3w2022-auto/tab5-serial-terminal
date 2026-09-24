@@ -79,8 +79,19 @@ int main()
     assert(replaced_text.find("きt /来/\n") != std::string::npos);
     assert(replaced_text.find("みr") == std::string::npos);
 
+    // ASCII abbreviation keys use the same SKK exchange format and can be
+    // added through the documented SD Import Merge path.
+    write_file(sd_import, "myhost /MyHost/\nusr/bin /USR-BIN/\n");
+    dictionary_transfer_result_t abbrev_merged = dictionary_transfer_import(
+        sd_import, user, dictionary_transfer_mode_t::MERGE);
+    assert(abbrev_merged.status == dictionary_transfer_status_t::OK);
+    assert(abbrev_merged.resulting_entries == 3);
+    const std::string abbrev_merged_text = read_file(user);
+    assert(abbrev_merged_text.find("myhost /MyHost/\n") != std::string::npos);
+    assert(abbrev_merged_text.find("usr/bin /USR-BIN/\n") != std::string::npos);
+
     // Malformed input must be rejected without altering the current dictionary.
-    const std::string before_invalid = replaced_text;
+    const std::string before_invalid = abbrev_merged_text;
     write_file(invalid, "きt /来\n");
     dictionary_transfer_result_t bad = dictionary_transfer_import(
         invalid, user, dictionary_transfer_mode_t::MERGE);

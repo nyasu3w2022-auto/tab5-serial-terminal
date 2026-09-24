@@ -2,9 +2,16 @@
 ;;
 ;; This small dictionary is searched after the user dictionary and before
 ;; SKK-JISYO.S. It contains basic standard-SKK inflection keys that are absent
-;; from the bundled small dictionary.
+;; from the bundled small dictionary, plus a small set of common terminal
+;; abbreviations for slash-started ASCII SKK input.
 ;;
 ;; SPDX-License-Identifier: GPL-2.0-or-later
-;; Source key verified against skk-dev/dict SKK-JISYO.L.
+;; The きt inflection key is verified against skk-dev/dict SKK-JISYO.L.
+;; The ASCII abbreviation entries below are TAB5-specific additions.
 
 きt /来/
+git /Git/
+github /GitHub/
+ssh /SSH/
+url /URL/
+wifi /Wi-Fi/
