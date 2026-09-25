@@ -89,8 +89,9 @@ int main()
     type(ime, "za");
     assert(ime.input_key(ime_key_t::COMMIT).commit == "ざ");
 
-    // l at an empty direct-kana boundary enters temporary ASCII input. ASCII
-    // text is not consumed by the IME; Escape returns to kana input.
+    // l at an empty direct-kana boundary enters temporary ASCII input. This
+    // deliberately reserves l, so l-style small-kana aliases are not parsed.
+    // ASCII text is not consumed by the IME; Escape returns to kana input.
     ime_result_t ascii_enter = type(ime, "l");
     assert(ascii_enter.commit.empty());
     assert(ime.is_ascii_mode());
@@ -99,6 +100,18 @@ int main()
     assert(ime.input_key(ime_key_t::ESCAPE).consumed);
     assert(!ime.is_ascii_mode());
     assert(ime.state() == ime_state_t::IDLE);
+
+    // x-style spellings are the unambiguous way to enter all supported small
+    // kana. They remain local until an explicit confirmation.
+    type(ime, "xaxixuxexo");
+    assert(ime.preedit_text() == "ぁぃぅぇぉ");
+    assert(ime.input_key(ime_key_t::COMMIT).commit == "ぁぃぅぇぉ");
+    type(ime, "xyaxyuxyo");
+    assert(ime.preedit_text() == "ゃゅょ");
+    assert(ime.input_key(ime_key_t::COMMIT).commit == "ゃゅょ");
+    type(ime, "xtuxwa");
+    assert(ime.preedit_text() == "っゎ");
+    assert(ime.input_key(ime_key_t::COMMIT).commit == "っゎ");
 
     // / starts an ASCII SKK abbreviation. It remains local, searches the
     // ordinary dictionary chain, and commits a selected candidate without CR

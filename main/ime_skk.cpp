@@ -44,12 +44,12 @@ static const romaji_entry_t ROMAJI_TABLE[] = {
     {"tsa", "つぁ"}, {"tsi", "つぃ"}, {"tse", "つぇ"}, {"tso", "つぉ"},
     {"thi", "てぃ"}, {"dhi", "でぃ"}, {"twu", "とぅ"}, {"dwu", "どぅ"},
     {"she", "しぇ"}, {"je",  "じぇ"}, {"che", "ちぇ"},
+    // Keep x-style aliases as the sole small-kana spelling. The l-style
+    // aliases are intentionally absent: a lone l starts temporary ASCII mode.
     {"xya", "ゃ"}, {"xyu", "ゅ"}, {"xyo", "ょ"},
-    {"lya", "ゃ"}, {"lyu", "ゅ"}, {"lyo", "ょ"},
-    {"xtsu", "っ"}, {"ltsu", "っ"}, {"xtu", "っ"}, {"ltu", "っ"},
-    {"xwa", "ゎ"}, {"lwa", "ゎ"},
+    {"xtsu", "っ"}, {"xtu", "っ"},
+    {"xwa", "ゎ"},
     {"xa",  "ぁ"}, {"xi",  "ぃ"}, {"xu",  "ぅ"}, {"xe",  "ぇ"}, {"xo", "ぉ"},
-    {"la",  "ぁ"}, {"li",  "ぃ"}, {"lu",  "ぅ"}, {"le",  "ぇ"}, {"lo", "ぉ"},
     {"ka",  "か"}, {"ki",  "き"}, {"ku", "く"}, {"ke", "け"}, {"ko", "こ"},
     {"ga",  "が"}, {"gi",  "ぎ"}, {"gu", "ぐ"}, {"ge", "げ"}, {"go", "ご"},
     {"sa",  "さ"}, {"shi", "し"}, {"si", "し"}, {"su", "す"}, {"se", "せ"}, {"so", "そ"},
