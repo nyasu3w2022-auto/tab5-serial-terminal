@@ -66,9 +66,11 @@ enum class ime_learning_mode_t {
  *
  * Lowercase romaji creates direct hiragana or katakana text.  An uppercase
  * initial starts SKK conversion; a subsequent uppercase initial begins an
- * okurigana segment (`MiRu` -> dictionary key `みr` -> `見る`).  `/` at an
- * empty direct-kana boundary starts ASCII abbreviation input, which searches
- * the same dictionaries using an ASCII key. `q` toggles direct
+ * okurigana segment (`MiRu` -> dictionary key `みr` -> `見る`). Numeric runs
+ * in a reading can match `#` dictionary templates and expand `#0`, `#1`,
+ * `#2`, `#3`, and `#8` candidate macros locally. `/` at an empty direct-kana
+ * boundary starts ASCII abbreviation input, which searches the same
+ * dictionaries using an ASCII key. `q` toggles direct
  * hiragana/katakana input while there is no unfinished composition. The class
  * never accesses LVGL, ESP-IDF or serial transport directly.
  */
@@ -198,6 +200,9 @@ private:
     bool        s_z_prefix = false;
 
     std::array<std::string, MAX_CANDIDATES> s_candidates;
+    // Dynamic numeric-template candidates must not become learned dictionary
+    // entries: each distinct input number would otherwise consume Flash.
+    std::array<bool, MAX_CANDIDATES> s_candidate_learnable = {};
     size_t s_candidate_count = 0;
     size_t s_candidate_index = 0;
     ime_state_t s_state = ime_state_t::IDLE;
@@ -212,8 +217,10 @@ private:
     bool search_dictionary();
     bool search_abbreviation_dictionary();
     bool search_dictionary_key(const std::string &path, const std::string &key);
+    bool search_numeric_dictionary_key(const std::string &path, const std::string &template_key,
+                                       const std::vector<std::string> &numbers);
     bool search_dictionary_okuri_family(const std::string &path, const std::string &reading);
-    bool append_candidate(const char *candidate, size_t len);
+    bool append_candidate(const char *candidate, size_t len, bool learnable = true);
     bool learn_current_candidate();
     bool queue_learned_candidate(const std::string &key, const std::string &candidate);
     void apply_pending_learning(const std::string &key);

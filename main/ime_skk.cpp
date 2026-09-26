@@ -199,6 +199,141 @@ static const char *punctuation_text(ime_punctuation_style_t style, char input)
     }
 }
 
+constexpr size_t MAX_POSITIONAL_KANJI_DIGITS = 20;
+
+static bool is_ascii_digit(char value)
+{
+    return value >= '0' && value <= '9';
+}
+
+static bool make_numeric_template_key(const std::string &key, std::string *template_key,
+                                      std::vector<std::string> *numbers)
+{
+    if (template_key == nullptr || numbers == nullptr) return false;
+    template_key->clear();
+    numbers->clear();
+
+    for (size_t i = 0; i < key.size();) {
+        if (!is_ascii_digit(key[i])) {
+            template_key->push_back(key[i]);
+            ++i;
+            continue;
+        }
+
+        const size_t start = i;
+        while (i < key.size() && is_ascii_digit(key[i])) ++i;
+        template_key->push_back('#');
+        numbers->push_back(key.substr(start, i - start));
+    }
+    return !numbers->empty();
+}
+
+static std::string number_to_fullwidth(const std::string &number)
+{
+    std::string out;
+    out.reserve(number.size() * 3);
+    for (char value : number) append_utf8_codepoint(&out, 0xFF10U + (uint32_t)(value - '0'));
+    return out;
+}
+
+static std::string number_to_digit_kanji(const std::string &number)
+{
+    static const char *const DIGITS[] = {"〇", "一", "二", "三", "四", "五", "六", "七", "八", "九"};
+    std::string out;
+    for (char value : number) out += DIGITS[value - '0'];
+    return out;
+}
+
+static std::string four_digits_to_positional_kanji(const std::string &group)
+{
+    static const char *const DIGITS[] = {"零", "一", "二", "三", "四", "五", "六", "七", "八", "九"};
+    static const char *const UNITS[] = {"", "十", "百", "千"};
+    std::string out;
+    const size_t length = group.size();
+    for (size_t i = 0; i < length; ++i) {
+        const int digit = group[i] - '0';
+        if (digit == 0) continue;
+        const size_t place = length - i - 1;
+        if (digit != 1 || place == 0) out += DIGITS[digit];
+        out += UNITS[place];
+    }
+    return out;
+}
+
+static std::string number_to_positional_kanji(const std::string &number)
+{
+    static const char *const LARGE_UNITS[] = {"", "万", "億", "兆", "京"};
+    if (number.empty() || number.size() > MAX_POSITIONAL_KANJI_DIGITS) return EMPTY_STRING;
+
+    const size_t first_nonzero = number.find_first_not_of('0');
+    if (first_nonzero == std::string::npos) return "零";
+    const std::string significant = number.substr(first_nonzero);
+    const size_t group_count = (significant.size() + 3) / 4;
+    std::string out;
+
+    for (size_t group = 0; group < group_count; ++group) {
+        const size_t first_group_length = significant.size() - (group_count - 1) * 4;
+        const size_t start = group == 0 ? 0 : first_group_length + (group - 1) * 4;
+        const size_t length = group == 0 ? first_group_length : 4;
+        const std::string converted = four_digits_to_positional_kanji(significant.substr(start, length));
+        if (converted.empty()) continue;
+        out += converted;
+        out += LARGE_UNITS[group_count - group - 1];
+    }
+    return out;
+}
+
+static std::string number_to_grouped_ascii(const std::string &number)
+{
+    std::string out;
+    const size_t first_group_length = number.size() % 3 == 0 ? 3 : number.size() % 3;
+    for (size_t i = 0; i < number.size(); ++i) {
+        if (i > 0 && (i == first_group_length ||
+                      (i > first_group_length && (i - first_group_length) % 3 == 0))) {
+            out.push_back(',');
+        }
+        out.push_back(number[i]);
+    }
+    return out;
+}
+
+static bool expand_numeric_candidate(const char *candidate, const std::vector<std::string> &numbers,
+                                     std::string *expanded)
+{
+    if (candidate == nullptr || expanded == nullptr) return false;
+    expanded->clear();
+    size_t number_index = 0;
+
+    for (size_t i = 0; candidate[i] != '\0'; ++i) {
+        if (candidate[i] != '#' || candidate[i + 1] == '\0') {
+            expanded->push_back(candidate[i]);
+            continue;
+        }
+
+        const char style = candidate[i + 1];
+        if (style != '0' && style != '1' && style != '2' && style != '3' && style != '8') {
+            expanded->push_back(candidate[i]);
+            continue;
+        }
+        if (number_index >= numbers.size()) return false;
+
+        const std::string &number = numbers[number_index++];
+        std::string replacement;
+        switch (style) {
+        case '0': replacement = number; break;
+        case '1': replacement = number_to_fullwidth(number); break;
+        case '2': replacement = number_to_digit_kanji(number); break;
+        case '3': replacement = number_to_positional_kanji(number); break;
+        case '8': replacement = number_to_grouped_ascii(number); break;
+        default: break;
+        }
+        if (replacement.empty()) return false;
+        expanded->append(replacement);
+        ++i;
+    }
+    return true;
+}
+
 }  // namespace
 
 ime_skk_t::ime_skk_t()
@@ -373,7 +508,10 @@ const std::string &ime_skk_t::okuri_text() const
 
 void ime_skk_t::clear_candidates()
 {
-    for (auto &candidate : s_candidates) candidate.clear();
+    for (size_t i = 0; i < s_candidates.size(); ++i) {
+        s_candidates[i].clear();
+        s_candidate_learnable[i] = false;
+    }
     s_candidate_count = 0;
     s_candidate_index = 0;
 }
@@ -552,6 +690,32 @@ bool ime_skk_t::search_dictionary()
         if (!s_supplement_dictionary_path.empty()) search_dictionary_key(s_supplement_dictionary_path, s_kana);
         if (!s_dictionary_path.empty()) search_dictionary_key(s_dictionary_path, s_kana);
     }
+    if (s_candidate_count > 0) {
+        apply_pending_learning(key);
+        update_state();
+        return true;
+    }
+
+    // Standard SKK numeric conversion searches a # template only after all
+    // exact-key forms (including okuri fallback) have been exhausted. This
+    // preserves a user's explicit numeric-key registration as the priority.
+    std::string numeric_template_key;
+    std::vector<std::string> numbers;
+    if (make_numeric_template_key(key, &numeric_template_key, &numbers)) {
+        if (!s_user_dictionary_path.empty()) {
+            search_numeric_dictionary_key(s_user_dictionary_path, numeric_template_key, numbers);
+        }
+        if (!s_supplement_dictionary_path.empty()) {
+            search_numeric_dictionary_key(s_supplement_dictionary_path, numeric_template_key, numbers);
+        }
+        if (!s_dictionary_path.empty()) {
+            search_numeric_dictionary_key(s_dictionary_path, numeric_template_key, numbers);
+        }
+        if (s_candidate_count > 0) {
+            update_state();
+            return true;
+        }
+    }
 
     apply_pending_learning(key);
     update_state();
@@ -574,9 +738,23 @@ bool ime_skk_t::search_abbreviation_dictionary()
     if (!s_supplement_dictionary_path.empty()) search_dictionary_key(s_supplement_dictionary_path, s_abbrev);
     if (!s_dictionary_path.empty()) search_dictionary_key(s_dictionary_path, s_abbrev);
 
+    std::string numeric_template_key;
+    std::vector<std::string> numbers;
+    if (s_candidate_count == 0 && make_numeric_template_key(s_abbrev, &numeric_template_key, &numbers)) {
+        if (!s_user_dictionary_path.empty()) {
+            search_numeric_dictionary_key(s_user_dictionary_path, numeric_template_key, numbers);
+        }
+        if (!s_supplement_dictionary_path.empty()) {
+            search_numeric_dictionary_key(s_supplement_dictionary_path, numeric_template_key, numbers);
+        }
+        if (!s_dictionary_path.empty()) {
+            search_numeric_dictionary_key(s_dictionary_path, numeric_template_key, numbers);
+        }
+    }
+
     // A missing dictionary entry must still offer a deterministic, local
     // confirmation path for command fragments, paths, URLs, and identifiers.
-    if (s_candidate_count == 0) append_candidate(s_abbrev.c_str(), s_abbrev.size());
+    if (s_candidate_count == 0) append_candidate(s_abbrev.c_str(), s_abbrev.size(), false);
     update_state();
     return s_candidate_count > 0;
 }
@@ -664,15 +842,69 @@ bool ime_skk_t::search_dictionary_key(const std::string &path, const std::string
     return s_candidate_count > 0;
 }
 
-bool ime_skk_t::append_candidate(const char *candidate, size_t len)
+bool ime_skk_t::search_numeric_dictionary_key(const std::string &path,
+                                               const std::string &template_key,
+                                               const std::vector<std::string> &numbers)
+{
+    if (template_key.empty() || numbers.empty()) return false;
+    FILE *fp = fopen(path.c_str(), "rb");
+    if (fp == nullptr) return false;
+
+    char line[MAX_DICT_LINE_BYTES + 1] = {};
+    while (fgets(line, sizeof(line), fp) != nullptr && s_candidate_count < MAX_CANDIDATES) {
+        const size_t line_len = strlen(line);
+        if (line_len == MAX_DICT_LINE_BYTES && line[line_len - 1] != '\n') {
+            int ch = 0;
+            while ((ch = fgetc(fp)) != '\n' && ch != EOF) {}
+            continue;
+        }
+        if (line[0] == ';' || line[0] == '\r' || line[0] == '\n') continue;
+
+        char *separator = strchr(line, ' ');
+        if (separator == nullptr) continue;
+        const size_t key_len = (size_t)(separator - line);
+        if (key_len != template_key.size() ||
+            memcmp(line, template_key.data(), key_len) != 0) continue;
+
+        char *p = strchr(separator, '/');
+        if (p == nullptr) break;
+        ++p;
+        while (*p != '\0' && *p != '\r' && *p != '\n' && s_candidate_count < MAX_CANDIDATES) {
+            char *end = strchr(p, '/');
+            if (end == nullptr) break;
+            char *annotation = strchr(p, ';');
+            char *candidate_end = (annotation != nullptr && annotation < end) ? annotation : end;
+            if (candidate_end > p) {
+                const char saved = *candidate_end;
+                *candidate_end = '\0';
+                std::string expanded;
+                const bool valid = expand_numeric_candidate(p, numbers, &expanded);
+                *candidate_end = saved;
+                if (valid) append_candidate(expanded.c_str(), expanded.size(), false);
+            }
+            p = end + 1;
+        }
+        break;
+    }
+    fclose(fp);
+
+    update_state();
+    return s_candidate_count > 0;
+}
+
+bool ime_skk_t::append_candidate(const char *candidate, size_t len, bool learnable)
 {
     if (candidate == nullptr || len == 0 || s_candidate_count >= MAX_CANDIDATES) return false;
     for (size_t i = 0; i < s_candidate_count; ++i) {
         if (s_candidates[i].size() == len && s_candidates[i].compare(0, len, candidate, len) == 0) {
+            // A static dictionary entry may make an earlier nonlearnable
+            // generated candidate learnable, but never the reverse.
+            s_candidate_learnable[i] = s_candidate_learnable[i] || learnable;
             return false;
         }
     }
     s_candidates[s_candidate_count].assign(candidate, len);
+    s_candidate_learnable[s_candidate_count] = learnable;
     s_candidate_count++;
     return true;
 }
@@ -955,6 +1187,7 @@ bool ime_skk_t::remove_user_dictionary_candidate(const std::string &key,
 bool ime_skk_t::learn_current_candidate()
 {
     if (s_candidate_count == 0 || s_candidate_index >= s_candidate_count) return false;
+    if (!s_candidate_learnable[s_candidate_index]) return true;
     if (s_learning_mode == ime_learning_mode_t::OFF) return true;
     return queue_learned_candidate(current_dictionary_key(), s_candidates[s_candidate_index]);
 }

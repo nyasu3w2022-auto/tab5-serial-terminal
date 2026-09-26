@@ -8,6 +8,7 @@
 ;; SPDX-License-Identifier: GPL-2.0-or-later
 ;; The きt inflection key is verified against skk-dev/dict SKK-JISYO.L.
 ;; The ASCII abbreviation entries below are TAB5-specific additions.
+;; Numeric templates follow the standard SKK #0/#1/#2/#3/#8 expansion model.
 
 きt /来/
 git /Git/
@@ -15,3 +16,7 @@ github /GitHub/
 ssh /SSH/
 url /URL/
 wifi /Wi-Fi/
+# /#0/#1/#2/#3/#8/
+だい#かい /第#1回/第#0回/第#2回/第#3回/
+#がつ#にち /#1月#1日/#0月#0日/#2月#2日/#3月#3日/
+#ねん#がつ#にち /#1年#1月#1日/#0年#0月#0日/#2年#2月#2日/#3年#3月#3日/

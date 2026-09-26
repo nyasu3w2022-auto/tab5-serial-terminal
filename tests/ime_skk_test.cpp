@@ -37,6 +37,12 @@ int main()
     fputs("わん /腕/碗/湾/椀/\n", dict);
     fputs("git /Git/GitHub/\n", dict);
     fputs("is /インクリメンタル・サーチ/\n", dict);
+    fputs("# /#0/#1/#2/#3/#8/\n", dict);
+    fputs("だい#かい /第#1回/第#0回/第#2回/第#3回/\n", dict);
+    fputs("#がつ#にち /#1月#1日/#0月#0日/#2月#2日/#3月#3日/\n", dict);
+    fputs("#ねん#がつ#にち /#1年#1月#1日/#0年#0月#0日/#2年#2月#2日/#3年#3月#3日/\n", dict);
+    fputs("#m#d /#0月#0日/\n", dict);
+    fputs("だい13かい /個別/\n", dict);
     fclose(dict);
 
     ime_skk_t ime;
@@ -178,6 +184,7 @@ int main()
     assert(abbrev_user != nullptr);
     fputs("myhost /MyHost/\n", abbrev_user);
     fputs("usr/bin /USR-BIN/\n", abbrev_user);
+    fputs("ver# /v#0/v#1/\n", abbrev_user);
     fclose(abbrev_user);
     ime_skk_t user_abbrev_ime;
     user_abbrev_ime.set_dictionary_path(dict_path);
@@ -192,6 +199,106 @@ int main()
     assert(user_abbrev_ime.candidate_count() == 1);
     assert(user_abbrev_ime.candidate_at(0) == "USR-BIN");
     assert(user_abbrev_ime.input_key(ime_key_t::COMMIT).commit == "USR-BIN");
+    type(user_abbrev_ime, "/ver12");
+    user_abbrev_ime.input_key(ime_key_t::SPACE);
+    assert(user_abbrev_ime.candidate_count() == 2);
+    assert(user_abbrev_ime.candidate_at(0) == "v12");
+    assert(user_abbrev_ime.candidate_at(1) == "v１２");
+    assert(user_abbrev_ime.input_key(ime_key_t::COMMIT).commit == "v12");
+
+    // Numeric runs are normalized to # only after exact-key lookup. Candidate
+    // macros expand to raw, fullwidth, digit-by-digit kanji, positional kanji,
+    // and grouped ASCII, respectively. Generated candidates never learn.
+    const size_t learning_before_numbers = ime.pending_learning_count();
+    type(ime, "1234");
+    assert(ime.preedit_text() == "1234");
+    ime.input_key(ime_key_t::SPACE);
+    assert(ime.candidate_count() == 5);
+    assert(ime.candidate_at(0) == "1234");
+    assert(ime.candidate_at(1) == "１２３４");
+    assert(ime.candidate_at(2) == "一二三四");
+    assert(ime.candidate_at(3) == "千二百三十四");
+    assert(ime.candidate_at(4) == "1,234");
+    ime.input_key(ime_key_t::RIGHT);
+    assert(ime.input_key(ime_key_t::COMMIT).commit == "１２３４");
+    assert(ime.pending_learning_count() == learning_before_numbers);
+
+    // Leading zeros are retained by #0/#1/#2/#8 but omitted from positional
+    // kanji, where a zero-only value is represented by 零.
+    type(ime, "0012");
+    ime.input_key(ime_key_t::SPACE);
+    assert(ime.candidate_at(0) == "0012");
+    assert(ime.candidate_at(1) == "００１２");
+    assert(ime.candidate_at(2) == "〇〇一二");
+    assert(ime.candidate_at(3) == "十二");
+    assert(ime.candidate_at(4) == "0,012");
+    ime.input_key(ime_key_t::RIGHT);
+    ime.input_key(ime_key_t::RIGHT);
+    ime.input_key(ime_key_t::RIGHT);
+    assert(ime.input_key(ime_key_t::ENTER).commit == "十二");
+    assert(ime.pending_learning_count() == learning_before_numbers);
+
+    type(ime, "0000");
+    ime.input_key(ime_key_t::SPACE);
+    assert(ime.candidate_at(3) == "零");
+    assert(ime.input_key(ime_key_t::COMMIT).commit == "0000");
+    assert(ime.pending_learning_count() == learning_before_numbers);
+
+    // Positional notation deliberately has a 20-digit ceiling (through 京).
+    // Other lossless formats remain available for a longer numeric run.
+    type(ime, "123456789012345678901");
+    ime.input_key(ime_key_t::SPACE);
+    assert(ime.candidate_count() == 4);
+    assert(ime.candidate_at(0) == "123456789012345678901");
+    assert(ime.candidate_at(1) == "１２３４５６７８９０１２３４５６７８９０１");
+    assert(ime.candidate_at(2) == "一二三四五六七八九〇一二三四五六七八九〇一");
+    assert(ime.candidate_at(3) == "123,456,789,012,345,678,901");
+    assert(ime.input_key(ime_key_t::COMMIT).commit == "123456789012345678901");
+    assert(ime.pending_learning_count() == learning_before_numbers);
+
+    // Basic supplement templates cover ordinal, date, and multi-run numeric
+    // conversion. Exact numeric dictionary entries retain priority over a #
+    // template, which allows an intentionally registered special case.
+    type(ime, "dai12kai");
+    ime.input_key(ime_key_t::SPACE);
+    assert(ime.candidate_count() == 4);
+    assert(ime.candidate_at(0) == "第１２回");
+    assert(ime.candidate_at(1) == "第12回");
+    assert(ime.candidate_at(2) == "第一二回");
+    assert(ime.candidate_at(3) == "第十二回");
+    assert(ime.input_key(ime_key_t::COMMIT).commit == "第１２回");
+    assert(ime.pending_learning_count() == learning_before_numbers);
+    type(ime, "dai13kai");
+    ime.input_key(ime_key_t::SPACE);
+    assert(ime.candidate_count() == 1);
+    assert(ime.candidate_at(0) == "個別");
+    assert(ime.input_key(ime_key_t::COMMIT).commit == "個別");
+    assert(ime.pending_learning_count() == learning_before_numbers + 1);
+    type(ime, "2gatu25niti");
+    ime.input_key(ime_key_t::SPACE);
+    assert(ime.candidate_count() == 4);
+    assert(ime.candidate_at(0) == "２月２５日");
+    assert(ime.candidate_at(1) == "2月25日");
+    assert(ime.candidate_at(2) == "二月二五日");
+    assert(ime.candidate_at(3) == "二月二十五日");
+    assert(ime.input_key(ime_key_t::COMMIT).commit == "２月２５日");
+    assert(ime.pending_learning_count() == learning_before_numbers + 1);
+
+    // Abbreviation input shares numeric template lookup and confirms without
+    // CR. The existing #m#d form proves ASCII keys with several digit runs.
+    type(ime, "/2m25d");
+    ime.input_key(ime_key_t::SPACE);
+    assert(ime.candidate_count() == 1);
+    assert(ime.candidate_at(0) == "2月25日");
+    assert(ime.input_key(ime_key_t::COMMIT).commit == "2月25日");
+    assert(ime.pending_learning_count() == learning_before_numbers + 1);
+
+    type(ime, "100200300400500");
+    ime.input_key(ime_key_t::SPACE);
+    assert(ime.candidate_at(3) == "百兆二千三億四十万五百");
+    assert(ime.candidate_at(4) == "100,200,300,400,500");
+    assert(ime.input_key(ime_key_t::ESCAPE).consumed);
+    assert(ime.input_key(ime_key_t::ESCAPE).consumed);
 
     // Space starts candidate selection even when the reading was entered in
     // lowercase.  It must not transmit the raw hiragana plus a space.
@@ -298,10 +405,10 @@ int main()
     ime_result_t commit = ime.input_key(ime_key_t::ENTER);
     assert(commit.commit == "幹事");
     assert(ime.state() == ime_state_t::IDLE);
-    // Earlier 「頭」選択に加え、送り仮名キー「あたまk」と今回の
-    // 「幹事」が別のSKKキーとしてRAMに保留される。再選択は同一キー
-    // の保留を重複させない。
-    assert(ime.pending_learning_count() == 3);
+    // Earlier 「頭」選択、送り仮名キー「あたまk」、数値を含む完全一致
+    // キー「だい13かい」、今回の「幹事」が別のSKKキーとしてRAMに保留
+    // される。数値テンプレート由来の候補自体は保留を増やさない。
+    assert(ime.pending_learning_count() == 4);
     assert(!ime.user_dictionary_available());
 
     // Deferred learning changes candidate priority in RAM immediately, but a
@@ -477,6 +584,18 @@ int main()
     assert(ime.candidate_count() >= 1);
     assert(ime.candidate_at(0) == "GitHub");
     assert(ime.input_key(ime_key_t::ENTER).commit == "GitHub");
+    type(ime, "dai12kai");
+    ime.input_key(ime_key_t::SPACE);
+    assert(ime.candidate_count() >= 4);
+    assert(ime.candidate_at(0) == "第１２回");
+    assert(ime.candidate_at(3) == "第十二回");
+    assert(ime.input_key(ime_key_t::ENTER).commit == "第１２回");
+    type(ime, "2026nen9gatu26niti");
+    ime.input_key(ime_key_t::SPACE);
+    assert(ime.candidate_count() >= 4);
+    assert(ime.candidate_at(0) == "２０２６年９月２６日");
+    assert(ime.candidate_at(3) == "二千二十六年九月二十六日");
+    assert(ime.input_key(ime_key_t::ENTER).commit == "２０２６年９月２６日");
     type(ime, "MiRu");
     ime_result_t full_dict_search = ime.input_key(ime_key_t::SPACE);
     assert(full_dict_search.consumed && full_dict_search.changed);
