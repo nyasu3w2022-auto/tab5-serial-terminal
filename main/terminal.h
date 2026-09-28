@@ -36,6 +36,11 @@
 #define TERM_COLS_MAX   160
 #define TERM_ROWS_MAX   43
 
+// Fixed-size, volatile terminal history.  The backing store is allocated once
+// from PSRAM at boot; failure leaves the normal terminal usable without
+// scrollback.
+#define TERM_SCROLLBACK_MAX_LINES 512
+
 // Runtime font geometry — set by term_set_font_size(), read by display and VT100 parser.
 // These are the *active* dimensions used for all terminal operations.
 extern int g_term_font_w;   // half-width cell width in pixels
@@ -91,6 +96,64 @@ void term_mark_dirty(int row);
 
 /** Mark all rows as needing redraw (e.g. after Ctrl+L). */
 void term_mark_all_dirty(void);
+
+// ==============================================================
+// Volatile Scrollback API
+// ==============================================================
+
+/**
+ * @brief Allocate the fixed PSRAM history buffer.
+ *
+ * This is deliberately a one-time allocation.  If it fails, scrollback stays
+ * disabled while terminal parsing and rendering continue normally.
+ *
+ * @return true when the buffer is available (including a prior success).
+ */
+bool term_scrollback_init(void);
+
+/** Return true when the PSRAM history buffer is available. */
+bool term_scrollback_available(void);
+
+/** Remove all retained history and return the display to the live screen. */
+void term_scrollback_clear(void);
+
+/** Number of physical lines currently retained in the history buffer. */
+int term_scrollback_history_count(void);
+
+/**
+ * @brief Number of lines the visible top row is behind the live screen.
+ *
+ * Zero means the terminal is live.  A positive value means the display is
+ * reading from scrollback plus the current screen.
+ */
+int term_scrollback_view_offset(void);
+
+/** Return true while the display is viewing retained history rather than live output. */
+bool term_scrollback_is_viewing(void);
+
+/** Monotonically increases whenever the selected scrollback view changes. */
+uint32_t term_scrollback_view_generation(void);
+
+/**
+ * @brief Move the view by physical terminal lines.
+ *
+ * Positive values move toward older output; negative values move toward the
+ * live screen. The result is clamped to the retained history range.
+ *
+ * @return true when the visible position changed.
+ */
+bool term_scrollback_move(int line_delta);
+
+/** Return to the current live screen. @return true when the view changed. */
+bool term_scrollback_return_live(void);
+
+/**
+ * @brief Obtain one physical display row for the current view.
+ *
+ * The returned pointer is either a retained row or the current live
+ * term_buffer row.  display_row must be in [0, TERM_ROWS).
+ */
+const TermCell *term_scrollback_display_row(int display_row);
 
 /**
  * @brief Switch the active font size at runtime.

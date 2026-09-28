@@ -12,6 +12,7 @@
 #include <inttypes.h>
 #include <esp_log.h>
 #include <esp_heap_caps.h>
+#include <freertos/FreeRTOS.h>
 
 #include "lvgl_port.h"
 #include "lvgl_port_disp.h"
@@ -34,6 +35,19 @@ static bool s_katakana_input_active = false;
 static lv_obj_t   *row_canvases[TERM_ROWS_MAX]    = {};
 static uint8_t    *row_canvas_bufs[TERM_ROWS_MAX] = {};
 
+// LVGL invokes touch event callbacks from its own task.  They only accumulate
+// a compact request here; main.cpp owns the terminal state and applies the
+// request before calling the normal redraw path.
+static portMUX_TYPE s_scrollback_touch_mux = portMUX_INITIALIZER_UNLOCKED;
+static int s_scrollback_touch_pending_lines = 0;
+static bool s_scrollback_touch_pending_tap = false;
+static bool s_scrollback_touch_dragging = false;
+static bool s_scrollback_touch_moved = false;
+static int s_scrollback_touch_last_y = 0;
+static int s_scrollback_touch_accum_y = 0;
+static constexpr int TOUCH_TAP_SLOP_PX = 8;
+static constexpr int TOUCH_MAX_PENDING_LINES = TERM_SCROLLBACK_MAX_LINES;
+
 static constexpr uint32_t LCD_H_RES = 720;
 static constexpr uint32_t LCD_V_RES = 1280;
 static lv_display_t *s_lvgl_disp        = nullptr;
@@ -41,6 +55,80 @@ static lv_indev_t   *s_lvgl_touch_indev = nullptr;
 
 // Active font pointer — updated by ui_rebuild_for_font_size()
 static const lv_font_t *s_active_font = &lv_font_cjk_28;
+
+static int clamp_touch_pending_lines(int value)
+{
+    if (value > TOUCH_MAX_PENDING_LINES) return TOUCH_MAX_PENDING_LINES;
+    if (value < -TOUCH_MAX_PENDING_LINES) return -TOUCH_MAX_PENDING_LINES;
+    return value;
+}
+
+static void terminal_touch_event_cb(lv_event_t *event)
+{
+    lv_indev_t *indev = lv_indev_active();
+    if (indev == NULL) return;
+
+    const lv_event_code_t code = lv_event_get_code(event);
+    lv_point_t point = {};
+    lv_indev_get_point(indev, &point);
+
+    portENTER_CRITICAL(&s_scrollback_touch_mux);
+    if (code == LV_EVENT_PRESSED) {
+        s_scrollback_touch_dragging = true;
+        s_scrollback_touch_moved = false;
+        s_scrollback_touch_last_y = point.y;
+        s_scrollback_touch_accum_y = 0;
+    } else if (code == LV_EVENT_PRESSING && s_scrollback_touch_dragging) {
+        const int delta_y = point.y - s_scrollback_touch_last_y;
+        s_scrollback_touch_last_y = point.y;
+        s_scrollback_touch_accum_y += delta_y;
+
+        const int line_height = TERM_FONT_H > 0 ? TERM_FONT_H : 1;
+        int lines = 0;
+        while (s_scrollback_touch_accum_y >= line_height) {
+            ++lines;
+            s_scrollback_touch_accum_y -= line_height;
+        }
+        while (s_scrollback_touch_accum_y <= -line_height) {
+            --lines;
+            s_scrollback_touch_accum_y += line_height;
+        }
+        if (lines != 0) {
+            // Downward finger movement moves content down to reveal older
+            // rows, therefore positive line counts mean "older".
+            s_scrollback_touch_pending_lines = clamp_touch_pending_lines(
+                s_scrollback_touch_pending_lines + lines);
+            s_scrollback_touch_moved = true;
+        }
+    } else if (code == LV_EVENT_RELEASED) {
+        if (s_scrollback_touch_dragging && !s_scrollback_touch_moved &&
+            s_scrollback_touch_accum_y < TOUCH_TAP_SLOP_PX &&
+            s_scrollback_touch_accum_y > -TOUCH_TAP_SLOP_PX) {
+            s_scrollback_touch_pending_tap = true;
+        }
+        s_scrollback_touch_dragging = false;
+        s_scrollback_touch_moved = false;
+        s_scrollback_touch_accum_y = 0;
+    } else if (code == LV_EVENT_PRESS_LOST || code == LV_EVENT_INDEV_RESET) {
+        s_scrollback_touch_dragging = false;
+        s_scrollback_touch_moved = false;
+        s_scrollback_touch_accum_y = 0;
+    }
+    portEXIT_CRITICAL(&s_scrollback_touch_mux);
+}
+
+bool display_take_scrollback_touch_request(int *line_delta, bool *tap_to_live)
+{
+    if (line_delta == NULL || tap_to_live == NULL) return false;
+
+    portENTER_CRITICAL(&s_scrollback_touch_mux);
+    *line_delta = s_scrollback_touch_pending_lines;
+    *tap_to_live = s_scrollback_touch_pending_tap;
+    s_scrollback_touch_pending_lines = 0;
+    s_scrollback_touch_pending_tap = false;
+    portEXIT_CRITICAL(&s_scrollback_touch_mux);
+    return *line_delta != 0 || *tap_to_live;
+}
 
 // Draw a single glyph (1bpp fmt_txt) into the row pixel buffer at column offset cx_start.
 // cell_width: number of pixel columns to fill (TERM_FONT_W for half-width, TERM_FONT_W*2 for full-width)
@@ -95,14 +183,17 @@ static void term_rebuild_row(int r)
     if (buf == NULL) return;
 
     const lv_font_t *font = s_active_font;
+    const bool viewing_scrollback = term_scrollback_is_viewing();
+    const TermCell *source_row = term_scrollback_display_row(r);
+    if (source_row == NULL) return;
 
     for (int c = 0; c < TERM_COLS; c++) {
-        TermCell *cell = &term_buffer[r][c];
+        const TermCell *cell = &source_row[c];
 
         // Skip right-half cells of wide characters (already drawn by left half)
         if (cell->wide == 2) continue;
 
-        bool is_cursor = (r == cursor_row && c == cursor_col &&
+        bool is_cursor = (!viewing_scrollback && r == cursor_row && c == cursor_col &&
                           cursor_visible && cursor_blink_state);
 
         uint8_t fg_idx = cell->fg & 15;
@@ -135,15 +226,28 @@ void term_refresh_display(void)
 {
     if (term_canvas == NULL) return;
 
+    static uint32_t rendered_scrollback_generation = UINT32_MAX;
+    const bool viewing_scrollback = term_scrollback_is_viewing();
+    const uint32_t scrollback_generation = term_scrollback_view_generation();
+
+    // Remote output still updates the live buffer while history is viewed.
+    // Do not redraw the frozen transcript for those updates; a drag, clear,
+    // or return-to-live increments the view generation and requests a redraw.
+    if (viewing_scrollback && rendered_scrollback_generation == scrollback_generation) return;
+
     static int prev_cursor_row = -1;
     static int prev_cursor_col = -1;
-    if (prev_cursor_row != cursor_row || prev_cursor_col != cursor_col) {
-        term_mark_dirty(prev_cursor_row);
-        term_mark_dirty(cursor_row);
-        prev_cursor_row = cursor_row;
-        prev_cursor_col = cursor_col;
+    if (viewing_scrollback) {
+        term_mark_all_dirty();
     } else {
-        term_mark_dirty(cursor_row);
+        if (prev_cursor_row != cursor_row || prev_cursor_col != cursor_col) {
+            term_mark_dirty(prev_cursor_row);
+            term_mark_dirty(cursor_row);
+            prev_cursor_row = cursor_row;
+            prev_cursor_col = cursor_col;
+        } else {
+            term_mark_dirty(cursor_row);
+        }
     }
 
     lvgl_port_lock(0);
@@ -154,6 +258,8 @@ void term_refresh_display(void)
         }
     }
     lvgl_port_unlock();
+
+    rendered_scrollback_generation = viewing_scrollback ? scrollback_generation : UINT32_MAX;
 }
 
 static void term_update_status(const char *msg)
@@ -167,13 +273,24 @@ static void term_update_status(const char *msg)
 void update_status_bar(void)
 {
     char buf[200];
-    snprintf(buf, sizeof(buf),
-             " %s:%s  Baud:%"PRIu32"  Input:%s  ^C=Clear  ^Alt+S=Settings",
-             serial_transport_get_name(),
-             serial_transport_get_status(),
-             serial_transport_get_baud_rate(),
-             !s_japanese_input_active ? "Direct" :
-             (s_katakana_input_active ? "JP-KATA" : "JP-HIRA"));
+    if (term_scrollback_is_viewing()) {
+        snprintf(buf, sizeof(buf),
+                 " %s:%s  Baud:%" PRIu32 "  Input:%s  View:-%d/%d  Tap=Live",
+                 serial_transport_get_name(),
+                 serial_transport_get_status(),
+                 serial_transport_get_baud_rate(),
+                 !s_japanese_input_active ? "Direct" :
+                 (s_katakana_input_active ? "JP-KATA" : "JP-HIRA"),
+                 term_scrollback_view_offset(), term_scrollback_history_count());
+    } else {
+        snprintf(buf, sizeof(buf),
+                 " %s:%s  Baud:%" PRIu32 "  Input:%s  ^C=Clear  ^Alt+S=Settings",
+                 serial_transport_get_name(),
+                 serial_transport_get_status(),
+                 serial_transport_get_baud_rate(),
+                 !s_japanese_input_active ? "Direct" :
+                 (s_katakana_input_active ? "JP-KATA" : "JP-HIRA"));
+    }
     term_update_status(buf);
 }
 
@@ -206,6 +323,9 @@ void ui_create(void)
     lv_obj_t *scr = lv_scr_act();
     lv_obj_set_style_bg_color(scr, lv_color_black(), 0);
     lv_obj_set_style_bg_opa(scr, LV_OPA_COVER, 0);
+    // Terminal history is rendered from a selected row source; LVGL must not
+    // attempt to drag the screen or any terminal canvas itself.
+    lv_obj_clear_flag(scr, LV_OBJ_FLAG_SCROLLABLE);
 
     term_canvas = lv_obj_create(scr);
     lv_obj_set_pos(term_canvas, 0, 0);
@@ -215,6 +335,12 @@ void ui_create(void)
     lv_obj_set_style_border_width(term_canvas, 0, 0);
     lv_obj_set_style_pad_all(term_canvas, 0, 0);
     lv_obj_clear_flag(term_canvas, LV_OBJ_FLAG_SCROLLABLE);
+    lv_obj_add_flag(term_canvas, LV_OBJ_FLAG_CLICKABLE);
+    lv_obj_add_event_cb(term_canvas, terminal_touch_event_cb, LV_EVENT_PRESSED, NULL);
+    lv_obj_add_event_cb(term_canvas, terminal_touch_event_cb, LV_EVENT_PRESSING, NULL);
+    lv_obj_add_event_cb(term_canvas, terminal_touch_event_cb, LV_EVENT_RELEASED, NULL);
+    lv_obj_add_event_cb(term_canvas, terminal_touch_event_cb, LV_EVENT_PRESS_LOST, NULL);
+    lv_obj_add_event_cb(term_canvas, terminal_touch_event_cb, LV_EVENT_INDEV_RESET, NULL);
 
     for (int r = 0; r < TERM_ROWS; r++) {
         size_t buf_size = LV_CANVAS_BUF_SIZE(LVGL_W, TERM_FONT_H, 16, 4);
@@ -227,6 +353,10 @@ void ui_create(void)
         lv_canvas_set_buffer(row_canvases[r], row_canvas_bufs[r], LVGL_W, TERM_FONT_H, LV_COLOR_FORMAT_RGB565);
         lv_obj_set_pos(row_canvases[r], 0, r * TERM_FONT_H);
         lv_obj_set_size(row_canvases[r], LVGL_W, TERM_FONT_H);
+        // The parent terminal canvas owns the whole drag.  Individual row
+        // canvases deliberately do not become pointer targets while a finger
+        // crosses a row boundary.
+        lv_obj_clear_flag(row_canvases[r], LV_OBJ_FLAG_CLICKABLE);
         lv_canvas_fill_bg(row_canvases[r], lv_color_black(), LV_OPA_COVER);
         row_dirty[r] = true;
     }

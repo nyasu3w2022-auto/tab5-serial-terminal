@@ -338,6 +338,39 @@ static void ime_cancel_before_remote_input(void)
     refresh_ime_input_indicator();
 }
 
+/**
+ * Apply terminal-surface touch requests outside the LVGL task.
+ *
+ * A downward drag produces a positive delta and reveals older history. The
+ * display module only accumulates those requests; terminal state, IME state,
+ * and rendering remain serialized in this main task with RX processing.
+ */
+static bool service_scrollback_touch(void)
+{
+    int line_delta = 0;
+    bool tap_to_live = false;
+    if (!display_take_scrollback_touch_request(&line_delta, &tap_to_live)) return false;
+
+    // Full-screen local overlays own all touch interaction. Requests that
+    // arrived immediately before their creation are intentionally discarded.
+    if (settings_ui_is_open() || dictionary_ui_is_open()) return false;
+
+    bool changed = false;
+    if (line_delta > 0) {
+        // Starting a history drag discards a local preedit so it cannot remain
+        // over a frozen terminal transcript.
+        if (term_scrollback_history_count() > 0) ime_cancel_before_remote_input();
+        changed = term_scrollback_move(line_delta);
+    } else if (line_delta < 0) {
+        changed = term_scrollback_move(line_delta);
+    }
+
+    if (tap_to_live && term_scrollback_is_viewing()) {
+        changed = term_scrollback_return_live() || changed;
+    }
+    return changed;
+}
+
 static bool ime_commit_without_terminal_cr(void)
 {
     if (!s_japanese_input_active || s_ime.state() == ime_state_t::IDLE) return false;
@@ -441,6 +474,23 @@ static bool handle_key_event(const key_event_msg_t *msg)
     bool ctrl = (msg->modifier & 0x01) != 0;
     bool alt  = (msg->modifier & 0x04) != 0;
     const size_t text_len = strlen(msg->str);
+
+    // While reading history, Esc is a local return-to-live command. Every
+    // other key first returns to the live terminal, then follows its existing
+    // remote or local shortcut path so input is never rendered into history.
+    if (term_scrollback_is_viewing()) {
+        if (!ctrl && !alt &&
+            (strcasecmp(msg->str, "escape") == 0 || strcasecmp(msg->str, "esc") == 0)) {
+            return term_scrollback_return_live();
+        }
+        if (term_scrollback_return_live()) {
+            // Some remote key paths deliberately return false after a failed
+            // TX. Restore the live view before taking any such path so an
+            // input failure cannot leave the display frozen on history.
+            term_refresh_display();
+            update_status_bar();
+        }
+    }
 
     // ---- Ctrl+Alt combinations (local shortcuts, never sent to remote) ----
     if (ctrl && alt) {
@@ -689,6 +739,9 @@ extern "C" void app_main(void)
         ESP_LOGE(TAG, "LCD/LVGL init failed: %s", esp_err_to_name(ret));
         return;
     }
+    if (!term_scrollback_init()) {
+        ESP_LOGW(TAG, "Touch scrollback unavailable; terminal remains live-only");
+    }
     ui_create();
     term_clear_all();
 
@@ -772,6 +825,7 @@ extern "C" void app_main(void)
 
     while (1) {
         bool need_refresh = false;
+        bool scrollback_view_changed = false;
 
         // 1. Process screen log messages from other tasks
         screen_log_msg_t log_msg;
@@ -797,16 +851,27 @@ extern "C" void app_main(void)
             }
         }
 
+        // 3. Apply any terminal-surface drag after RX parsing. This keeps the
+        // LVGL task out of terminal mutation and gives a drag the latest live
+        // transcript when the user enters or returns from history.
+        scrollback_view_changed = service_scrollback_touch();
+        need_refresh = need_refresh || scrollback_view_changed;
+
         if (need_refresh) {
             term_refresh_display();
-            update_status_bar();
+            // Avoid invalidating the status label for every received packet
+            // while the history view is frozen. A local drag/tap refreshes it
+            // immediately so its View indicator remains useful.
+            if (!term_scrollback_is_viewing() || scrollback_view_changed) {
+                update_status_bar();
+            }
         }
 
-        // 3. Batch-save only in the configured deferred-learning mode. Manual
+        // 4. Batch-save only in the configured deferred-learning mode. Manual
         // mode is saved by Dictionary Editor actions; Off never learns.
         service_deferred_learning();
 
-        // 4. Process keyboard input (5 ms wait to keep USB RX responsive)
+        // 5. Process keyboard input (5 ms wait to keep USB RX responsive)
         key_event_msg_t key_msg;
         if (xQueueReceive(key_q, &key_msg, pdMS_TO_TICKS(5)) == pdTRUE) {
             bool kb_refresh = handle_key_event(&key_msg);

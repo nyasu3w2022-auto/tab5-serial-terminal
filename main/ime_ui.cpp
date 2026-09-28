@@ -44,11 +44,16 @@ static void ensure_overlay()
     lv_obj_set_style_radius(s_overlay, 0, 0);
     lv_obj_set_style_pad_all(s_overlay, 4, 0);
     lv_obj_clear_flag(s_overlay, LV_OBJ_FLAG_SCROLLABLE);
+    // The overlay has no touch controls. Let a terminal drag beginning in its
+    // lower-screen area reach the fixed terminal canvas, whose main-task
+    // handler cancels this preedit before entering scrollback.
+    lv_obj_clear_flag(s_overlay, LV_OBJ_FLAG_CLICKABLE);
 
     s_status_label = lv_label_create(s_overlay);
     lv_obj_set_pos(s_status_label, 8, 2);
     lv_obj_set_style_text_font(s_status_label, &lv_font_unscii_16, 0);
     lv_obj_set_style_text_color(s_status_label, lv_color_make(130, 210, 255), 0);
+    lv_obj_clear_flag(s_status_label, LV_OBJ_FLAG_CLICKABLE);
 
     s_preedit_label = lv_label_create(s_overlay);
     lv_obj_set_pos(s_preedit_label, 8, 22);
@@ -60,6 +65,7 @@ static void ensure_overlay()
     lv_obj_set_style_pad_right(s_preedit_label, 4, 0);
     lv_label_set_long_mode(s_preedit_label, LV_LABEL_LONG_CLIP);
     lv_obj_set_width(s_preedit_label, LVGL_W - 16);
+    lv_obj_clear_flag(s_preedit_label, LV_OBJ_FLAG_CLICKABLE);
 
     s_candidate_label = lv_label_create(s_overlay);
     lv_obj_set_pos(s_candidate_label, 8, 56);
@@ -67,6 +73,7 @@ static void ensure_overlay()
     lv_obj_set_style_text_color(s_candidate_label, lv_color_make(230, 230, 230), 0);
     lv_label_set_long_mode(s_candidate_label, LV_LABEL_LONG_CLIP);
     lv_obj_set_width(s_candidate_label, LVGL_W - 16);
+    lv_obj_clear_flag(s_candidate_label, LV_OBJ_FLAG_CLICKABLE);
 }
 
 static void build_candidate_text(const ime_skk_t &ime, char *out, size_t out_size)

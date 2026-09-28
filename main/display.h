@@ -61,3 +61,16 @@ void update_status_bar(void);
 
 /** Set the local keyboard input mode indicator shown in the status bar. */
 void display_set_japanese_input_mode(bool japanese_active, bool katakana_active);
+
+/**
+ * @brief Retrieve and clear accumulated terminal-touch scroll requests.
+ *
+ * The LVGL task only records a line delta or a short-tap request. The caller
+ * must apply the terminal state change from the main task, avoiding direct
+ * mutation of terminal buffers from LVGL event callbacks.
+ *
+ * @param line_delta  Positive means toward older output; negative means live.
+ * @param tap_to_live  True when a short terminal-area tap occurred.
+ * @return true when at least one request was pending.
+ */
+bool display_take_scrollback_touch_request(int *line_delta, bool *tap_to_live);

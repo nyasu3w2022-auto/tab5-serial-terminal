@@ -11,6 +11,7 @@
 #include <stdlib.h>
 #include <ctype.h>
 #include <esp_log.h>
+#include <esp_heap_caps.h>
 
 static const char *TAG = "terminal";
 
@@ -57,6 +58,19 @@ bool cursor_visible     = true;
 bool cursor_blink_state = true;
 bool row_dirty[TERM_ROWS_MAX] = {};
 
+// Scrollback is deliberately a fixed, once-allocated PSRAM ring.  Each entry
+// stores a physical display row at the maximum terminal width, so changing
+// between Small and Large fonts cannot reinterpret retained rows incorrectly.
+// It is volatile: power loss, RIS, Ctrl+C, and a font-size rebuild clear it.
+static TermCell *s_scrollback_rows = NULL;
+static int s_scrollback_oldest = 0;
+static int s_scrollback_count = 0;
+// Number of rows the displayed top edge is behind the live screen. Zero is
+// live. It is kept in terminal.cpp because incoming output can advance the
+// live screen while the user is reading older output.
+static int s_scrollback_view_offset = 0;
+static uint32_t s_scrollback_view_generation = 0;
+
 // Saved cursor position (ESC 7 / ESC[s)
 static int saved_row = 0;
 static int saved_col = 0;
@@ -92,6 +106,134 @@ static void term_cell_clear(TermCell *cell)
     cell->wide      = 0;
 }
 
+static int term_scrollback_max_view_offset(void)
+{
+    return s_scrollback_count;
+}
+
+bool term_scrollback_init(void)
+{
+    if (s_scrollback_rows != NULL) return true;
+
+    const size_t bytes = (size_t)TERM_SCROLLBACK_MAX_LINES * TERM_COLS_MAX * sizeof(TermCell);
+    s_scrollback_rows = (TermCell *)heap_caps_malloc(bytes, MALLOC_CAP_SPIRAM);
+    if (s_scrollback_rows == NULL) {
+        ESP_LOGW(TAG, "Scrollback disabled: PSRAM allocation failed (%u bytes)",
+                 (unsigned)bytes);
+        return false;
+    }
+
+    s_scrollback_oldest = 0;
+    s_scrollback_count = 0;
+    s_scrollback_view_offset = 0;
+    s_scrollback_view_generation++;
+    ESP_LOGI(TAG, "Scrollback ready: %d lines, %u bytes in PSRAM",
+             TERM_SCROLLBACK_MAX_LINES, (unsigned)bytes);
+    return true;
+}
+
+bool term_scrollback_available(void)
+{
+    return s_scrollback_rows != NULL;
+}
+
+void term_scrollback_clear(void)
+{
+    s_scrollback_oldest = 0;
+    s_scrollback_count = 0;
+    s_scrollback_view_offset = 0;
+    s_scrollback_view_generation++;
+    term_mark_all_dirty();
+}
+
+int term_scrollback_history_count(void)
+{
+    return s_scrollback_count;
+}
+
+int term_scrollback_view_offset(void)
+{
+    return s_scrollback_view_offset;
+}
+
+bool term_scrollback_is_viewing(void)
+{
+    return s_scrollback_view_offset > 0;
+}
+
+uint32_t term_scrollback_view_generation(void)
+{
+    return s_scrollback_view_generation;
+}
+
+bool term_scrollback_move(int line_delta)
+{
+    if (s_scrollback_rows == NULL || s_scrollback_count == 0 || line_delta == 0) return false;
+
+    int next = s_scrollback_view_offset + line_delta;
+    if (next < 0) next = 0;
+    const int max_offset = term_scrollback_max_view_offset();
+    if (next > max_offset) next = max_offset;
+    if (next == s_scrollback_view_offset) return false;
+
+    s_scrollback_view_offset = next;
+    s_scrollback_view_generation++;
+    term_mark_all_dirty();
+    return true;
+}
+
+bool term_scrollback_return_live(void)
+{
+    if (s_scrollback_view_offset == 0) return false;
+    s_scrollback_view_offset = 0;
+    s_scrollback_view_generation++;
+    term_mark_all_dirty();
+    return true;
+}
+
+const TermCell *term_scrollback_display_row(int display_row)
+{
+    if (display_row < 0 || display_row >= TERM_ROWS) return NULL;
+
+    // The logical transcript is [history][live screen].  Viewing K lines
+    // back selects the row at history_count - K as the top display row.
+    const int absolute_row = s_scrollback_count - s_scrollback_view_offset + display_row;
+    if (absolute_row < s_scrollback_count && s_scrollback_rows != NULL) {
+        const int physical_row = (s_scrollback_oldest + absolute_row) % TERM_SCROLLBACK_MAX_LINES;
+        return &s_scrollback_rows[(size_t)physical_row * TERM_COLS_MAX];
+    }
+
+    const int live_row = absolute_row - s_scrollback_count;
+    if (live_row >= 0 && live_row < TERM_ROWS) return term_buffer[live_row];
+    return NULL;
+}
+
+static void term_scrollback_append_row(const TermCell *row)
+{
+    if (s_scrollback_rows == NULL || row == NULL) return;
+
+    int write_row;
+    if (s_scrollback_count < TERM_SCROLLBACK_MAX_LINES) {
+        write_row = (s_scrollback_oldest + s_scrollback_count) % TERM_SCROLLBACK_MAX_LINES;
+        s_scrollback_count++;
+    } else {
+        write_row = s_scrollback_oldest;
+        s_scrollback_oldest = (s_scrollback_oldest + 1) % TERM_SCROLLBACK_MAX_LINES;
+    }
+
+    memcpy(&s_scrollback_rows[(size_t)write_row * TERM_COLS_MAX], row,
+           sizeof(TermCell) * TERM_COLS);
+
+    // New transcript output must not move the row a user is reading. Advancing
+    // the offset compensates for the appended line. At the oldest retained
+    // edge it clamps, because that overwritten line can no longer be shown.
+    if (s_scrollback_view_offset > 0) {
+        s_scrollback_view_offset++;
+        const int max_offset = term_scrollback_max_view_offset();
+        if (s_scrollback_view_offset > max_offset) s_scrollback_view_offset = max_offset;
+    }
+}
+
 void term_mark_dirty(int row)
 {
     if (row >= 0 && row < TERM_ROWS) row_dirty[row] = true;
@@ -104,6 +246,7 @@ void term_mark_all_dirty(void)
 
 void term_set_font_size(int font_w, int font_h)
 {
+    const bool changed = g_term_font_w != font_w || g_term_font_h != font_h;
     g_term_font_w = font_w;
     g_term_font_h = font_h;
     g_term_cols   = LVGL_W / font_w;
@@ -111,6 +254,7 @@ void term_set_font_size(int font_w, int font_h)
     // Clamp to maximum buffer dimensions
     if (g_term_cols > TERM_COLS_MAX) g_term_cols = TERM_COLS_MAX;
     if (g_term_rows > TERM_ROWS_MAX) g_term_rows = TERM_ROWS_MAX;
+    if (changed) term_scrollback_clear();
     ESP_LOGI("terminal", "Font size set to %dx%d, cols=%d rows=%d",
              font_w, font_h, g_term_cols, g_term_rows);
 }
@@ -130,6 +274,7 @@ static void term_clear_region(int row_start, int col_start, int row_end, int col
 void term_clear_all(void)
 {
     term_clear_region(0, 0, TERM_ROWS - 1, TERM_COLS - 1);
+    term_scrollback_clear();
     cursor_row   = 0;
     cursor_col   = 0;
     pending_wrap = false;
@@ -140,11 +285,22 @@ void term_clear_all(void)
     cur_bold     = 0;
 }
 
-// Scroll the scroll region up by n lines (content moves up, bottom fills with blank)
-static void term_scroll_up(int n)
+// Scroll the scroll region up by n lines (content moves up, bottom fills with blank).
+// capture_scrollback is false for screen-editing primitives such as CSI M.
+static void term_scroll_up(int n, bool capture_scrollback = true)
 {
     if (n <= 0) return;
     if (n > (scroll_bot - scroll_top + 1)) n = scroll_bot - scroll_top + 1;
+
+    // Only a whole-screen upward scroll represents transcript output. Partial
+    // margins and insert/delete-line operations are screen editing and must
+    // not pollute scrollback.
+    const bool captures_full_screen = capture_scrollback &&
+                                      scroll_top == 0 && scroll_bot == TERM_ROWS - 1;
+    if (captures_full_screen) {
+        for (int r = 0; r < n; r++) term_scrollback_append_row(term_buffer[r]);
+    }
+
     for (int r = scroll_top; r <= scroll_bot - n; r++) {
         memcpy(term_buffer[r], term_buffer[r + n], sizeof(TermCell) * TERM_COLS);
         term_mark_dirty(r);
@@ -394,7 +550,8 @@ static void vt_process_csi(char final_ch)
         int n = vt_param(0, 0);
         if (n == 0)      term_clear_region(cursor_row, cursor_col, TERM_ROWS - 1, TERM_COLS - 1);
         else if (n == 1) term_clear_region(0, 0, cursor_row, cursor_col);
-        else             term_clear_region(0, 0, TERM_ROWS - 1, TERM_COLS - 1);
+        else if (n == 2) term_clear_region(0, 0, TERM_ROWS - 1, TERM_COLS - 1);
+        else if (n == 3) term_scrollback_clear();
         break;
     }
     case 'K': {
@@ -428,7 +585,7 @@ static void vt_process_csi(char final_ch)
         int n = vt_param(0, 1); if (n < 1) n = 1;
         if (cursor_row >= scroll_top && cursor_row <= scroll_bot) {
             int old_top = scroll_top; scroll_top = cursor_row;
-            term_scroll_up(n); scroll_top = old_top;
+            term_scroll_up(n, false); scroll_top = old_top;
         }
         break;
     }
