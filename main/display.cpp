@@ -327,7 +327,7 @@ void update_status_bar(void)
                  term_scrollback_view_offset(), term_scrollback_history_count());
     } else {
         snprintf(buf, sizeof(buf),
-                 " %s:%s  Baud:%" PRIu32 "  Input:%s  ^C=Clear  ^Alt+S=Settings",
+                 " %s:%s  Baud:%" PRIu32 "  Input:%s  ^Alt+C=Clear  ^Alt+S=Settings",
                  serial_transport_get_name(),
                  serial_transport_get_status(),
                  serial_transport_get_baud_rate(),
