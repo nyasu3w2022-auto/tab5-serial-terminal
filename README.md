@@ -82,6 +82,20 @@ TAB5は、接続先から送られる**DEC Sixel**形式の画像をライブ端
 img2sixel -w 1280 -h 700 image.png
 ```
 
+#### 大きな画像を送る際の速度制限
+
+Sixelデータを`cat`などで一度に送ると、送信側の出力速度がTAB5のデコード処理を上回り、`USB RX ringbuf overflow`が起きる場合があります。この場合、接続先で[`pv`](https://www.ivarch.com/programs/pv.shtml)のレート制限を使うと、Sixelバイト列を変更せずに転送速度だけを下げられます。
+
+```sh
+# 既存のSixelファイルを約10 KiB/sで送る。-q は進捗表示を端末へ混ぜないため必須。
+pv -q -L 10k image.sixel
+
+# img2sixelの出力を直接制限して送る場合。
+img2sixel -w 1280 -h 700 image.png | pv -q -L 10k
+```
+
+最初は低めの値（例: `10k`）でオーバーフローログが出ないことを確認し、`20k`、`40k`のように段階的に上げてください。安定している最高速度の半分から75%程度を常用値にすると、シェルの通常出力などが重なっても余裕を確保できます。Debian/Raspberry Pi OSで`pv`が未導入なら、`sudo apt install pv`で導入できます。
+
 通常は空行から画像を出力してください。Sixel画像は現在のテキストカーソル位置を左上にして表示され、既定のDECSDM（`CSI ? 80 h`）では画像下の次のテキスト行へカーソルが移動します。`CSI ? 80 l`では画面外をクリップし、カーソルや端末行を動かしません。
 
 > **Sixelの制限:** 画像はライブ画面専用で、タッチ・バックスクロール、Flash、SDカード、alternate screenには保存しません。画像表示後に端末がスクロールすると、画像を消去して文字の履歴だけを保持します。新しい文字、`CSI 2 J`、行消去、フォント切替、RISも該当画像を消去します。1個のDCS本文は最大1 MiB、画像は1280×700 pxまでです。上限超過・不正なDCS・受信オーバーフローはその画像だけを破棄し、後続の端末出力を保護します。DCS終端が欠落した場合も、残った画像データを終端まで破棄するか、250msの無受信後に通常端末へ復帰します。`Ctrl+C`のローカル画面クリアは即時復帰操作にもなります。kitty graphics protocol、iTerm2 inline image、ReGIS、`XTSMGRAPHICS`の詳細問い合わせは未対応です。詳細は[`docs/sixel_basic_design.md`](docs/sixel_basic_design.md)を参照してください。
