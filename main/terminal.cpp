@@ -5,6 +5,7 @@
  */
 
 #include "terminal.h"
+#include "sixel_graphics.h"
 
 #include <stdio.h>
 #include <string.h>
@@ -104,6 +105,26 @@ static void term_cell_clear(TermCell *cell)
     cell->bg        = DEFAULT_BG;
     cell->bold      = 0;
     cell->wide      = 0;
+}
+
+// Sixel pixels sit behind the terminal's existing row canvases. Any terminal
+// text or explicit erase wins over graphics in the corresponding cell area.
+// Keeping this policy here also ensures local echo, VT100 output and erase
+// sequences cannot leave stale pixels behind their replacement text.
+static void term_clear_graphics_cell(int row, int column, int cell_count)
+{
+    if (row < 0 || row >= TERM_ROWS || column < 0 || column >= TERM_COLS ||
+        cell_count <= 0) return;
+    if (column + cell_count > TERM_COLS) cell_count = TERM_COLS - column;
+    sixel_graphics_clear_rect(column * TERM_FONT_W, row * TERM_FONT_H,
+                              cell_count * TERM_FONT_W, TERM_FONT_H);
+}
+
+static void term_clear_graphics_all(void)
+{
+    if (!sixel_graphics_has_displayed_pixels()) return;
+    sixel_graphics_clear_all();
+    term_mark_all_dirty();
 }
 
 static int term_scrollback_max_view_offset(void)
@@ -254,7 +275,12 @@ void term_set_font_size(int font_w, int font_h)
     // Clamp to maximum buffer dimensions
     if (g_term_cols > TERM_COLS_MAX) g_term_cols = TERM_COLS_MAX;
     if (g_term_rows > TERM_ROWS_MAX) g_term_rows = TERM_ROWS_MAX;
-    if (changed) term_scrollback_clear();
+    if (changed) {
+        term_scrollback_clear();
+        // A retained pixel image has the old cell geometry as its placement
+        // contract, so font changes intentionally discard it with history.
+        sixel_graphics_clear_all();
+    }
     ESP_LOGI("terminal", "Font size set to %dx%d, cols=%d rows=%d",
              font_w, font_h, g_term_cols, g_term_rows);
 }
@@ -267,6 +293,7 @@ static void term_clear_region(int row_start, int col_start, int row_end, int col
         for (int c = cs; c <= ce; c++) {
             term_cell_clear(&term_buffer[r][c]);
         }
+        term_clear_graphics_cell(r, cs, ce - cs + 1);
         term_mark_dirty(r);
     }
 }
@@ -292,6 +319,11 @@ static void term_scroll_up(int n, bool capture_scrollback = true)
     if (n <= 0) return;
     if (n > (scroll_bot - scroll_top + 1)) n = scroll_bot - scroll_top + 1;
 
+    // The Basic Sixel scope deliberately retains text-only scrollback. Moving
+    // terminal rows without an image history would otherwise show graphics at
+    // incorrect coordinates, so every VT100 scroll drops live graphics first.
+    term_clear_graphics_all();
+
     // Only a whole-screen upward scroll represents transcript output. Partial
     // margins and insert/delete-line operations are screen editing and must
     // not pollute scrollback.
@@ -316,6 +348,7 @@ static void term_scroll_down(int n)
 {
     if (n <= 0) return;
     if (n > (scroll_bot - scroll_top + 1)) n = scroll_bot - scroll_top + 1;
+    term_clear_graphics_all();
     for (int r = scroll_bot; r >= scroll_top + n; r--) {
         memcpy(term_buffer[r], term_buffer[r - n], sizeof(TermCell) * TERM_COLS);
         term_mark_dirty(r);
@@ -351,6 +384,7 @@ static void term_put_codepoint(uint32_t cp, bool is_wide)
     if (is_wide && cursor_col == TERM_COLS - 1) {
         // Fill the last cell with space and wrap
         term_cell_clear(&term_buffer[cursor_row][cursor_col]);
+        term_clear_graphics_cell(cursor_row, cursor_col, 1);
         cursor_col = 0;
         if (cursor_row == scroll_bot) {
             term_scroll_up(1);
@@ -361,6 +395,10 @@ static void term_put_codepoint(uint32_t cp, bool is_wide)
     }
 
     uint8_t effective_fg = cur_bold ? (cur_fg | 8) : cur_fg;
+
+    // Terminal text is intentionally above the Sixel plane. Clear the full
+    // logical cell before replacing it, including both halves of CJK glyphs.
+    term_clear_graphics_cell(cursor_row, cursor_col, is_wide ? 2 : 1);
 
     // Write the primary (left) cell
     term_buffer[cursor_row][cursor_col].codepoint = cp;
@@ -399,6 +437,11 @@ typedef enum {
     VT_STATE_ESC,           // received ESC
     VT_STATE_CSI,           // received ESC [
     VT_STATE_CSI_PRIV,      // received ESC [ ?
+    VT_STATE_DCS,           // received ESC P / 8-bit DCS; parse header
+    VT_STATE_DCS_IGNORE,    // discard another DCS safely through ST
+    VT_STATE_DCS_IGNORE_ESC,// ESC within ignored DCS; waiting for ST '\\'
+    VT_STATE_SIXEL,         // bounded Sixel body after final 'q'
+    VT_STATE_SIXEL_ESC,     // ESC within Sixel body; waiting for ST '\\'
     VT_STATE_ESC_HASH,      // received ESC #
     VT_STATE_ESC_CHARSET,   // received ESC ( or ESC ) - consume next byte
 } vt_state_t;
@@ -408,6 +451,17 @@ static vt_state_t vt_state       = VT_STATE_NORMAL;
 static int        vt_params[VT_MAX_PARAMS];
 static int        vt_num_params  = 0;
 static bool       vt_param_started = false;
+
+// DCS has an independent parameter prefix. Sharing CSI state would make an
+// interrupted DCS affect a later terminal control sequence, which is
+// especially undesirable with untrusted serial input.
+static int        dcs_params[VT_MAX_PARAMS];
+static int        dcs_num_params = 0;
+static bool       dcs_param_started = false;
+static int        dcs_sixel_start_row = 0;
+static int        dcs_sixel_start_col = 0;
+static bool       dec_sixel_scrolling = true;
+static size_t     dcs_discard_bytes = 0;
 
 // UTF-8 decoder state
 static int      utf8_bytes_left = 0;   // remaining continuation bytes expected
@@ -425,6 +479,103 @@ static int vt_param(int idx, int def)
     if (idx < 0 || idx >= vt_num_params) return def;
     if (vt_params[idx] < 0) return def;
     return vt_params[idx];
+}
+
+static void dcs_reset_params(void)
+{
+    for (int i = 0; i < VT_MAX_PARAMS; ++i) dcs_params[i] = -1;
+    dcs_num_params = 0;
+    dcs_param_started = false;
+}
+
+static int dcs_param(int index, int def)
+{
+    if (index < 0 || index >= dcs_num_params || dcs_params[index] < 0) return def;
+    return dcs_params[index];
+}
+
+static bool dcs_append_digit(uint8_t byte)
+{
+    if (!dcs_param_started) {
+        if (dcs_num_params >= VT_MAX_PARAMS) return true;
+        dcs_params[dcs_num_params++] = byte - (uint8_t)'0';
+        dcs_param_started = true;
+        return true;
+    }
+    const int index = dcs_num_params - 1;
+    if (index < 0 || index >= VT_MAX_PARAMS) return true;
+    // DCS parameters are only used for the small Sixel header. Bound the
+    // arithmetic so a hostile decimal stream cannot overflow an int.
+    if (dcs_params[index] > 1000000) return false;
+    dcs_params[index] = dcs_params[index] * 10 + (byte - (uint8_t)'0');
+    return true;
+}
+
+static void dcs_append_separator(void)
+{
+    if (!dcs_param_started && dcs_num_params < VT_MAX_PARAMS) dcs_params[dcs_num_params++] = -1;
+    dcs_param_started = false;
+}
+
+static void vt_enter_dcs_ignore(void)
+{
+    dcs_discard_bytes = 0;
+    vt_state = VT_STATE_DCS_IGNORE;
+}
+
+static void vt_discard_dcs_byte(uint8_t byte)
+{
+    if (byte == 0x9c) {
+        vt_state = VT_STATE_NORMAL;
+        return;
+    }
+    if (byte == 0x1b) {
+        vt_state = VT_STATE_DCS_IGNORE_ESC;
+        return;
+    }
+    if (++dcs_discard_bytes > SIXEL_MAX_STREAM_BYTES) {
+        // An unknown DCS without ST must not swallow the terminal forever.
+        // Resynchronise after the same bounded body size as Sixel itself.
+        ESP_LOGW(TAG, "Discarding unterminated DCS after %u bytes",
+                 (unsigned)SIXEL_MAX_STREAM_BYTES);
+        vt_state = VT_STATE_NORMAL;
+    }
+}
+
+static void vt_finish_sixel(void)
+{
+    sixel_graphics_image_t image = {};
+    if (!sixel_graphics_finish(&image)) return;
+
+    int origin_row = dcs_sixel_start_row;
+    int origin_x = dcs_sixel_start_col * TERM_FONT_W;
+    int origin_y = origin_row * TERM_FONT_H;
+
+    if (dec_sixel_scrolling && image.height > 0) {
+        // Preserve the complete image in the fixed live terminal viewport.
+        // Each scroll intentionally discards old graphics (the text-only
+        // history policy), then shifts this image's terminal anchor upward.
+        while (origin_y + image.height > SIXEL_GRAPHICS_HEIGHT && origin_row > 0) {
+            term_scroll_up(1);
+            --origin_row;
+            origin_y -= TERM_FONT_H;
+        }
+
+        const int occupied_rows = (image.height + TERM_FONT_H - 1) / TERM_FONT_H;
+        cursor_row = origin_row + occupied_rows;
+        if (cursor_row >= TERM_ROWS) cursor_row = TERM_ROWS - 1;
+        cursor_col = 0;
+        pending_wrap = false;
+    }
+
+    if (sixel_graphics_commit(&image, origin_x, origin_y)) {
+        // The image may span multiple terminal rows, so request a full redraw
+        // rather than attempting to infer an incomplete dirty-row range.
+        term_mark_all_dirty();
+        ESP_LOGD(TAG, "Sixel committed %dx%d at %d,%d scroll=%d",
+                 image.width, image.height, origin_x, origin_y,
+                 (int)dec_sixel_scrolling);
+    }
 }
 
 static void vt_clamp_cursor(void)
@@ -556,9 +707,16 @@ static void vt_process_csi(char final_ch)
     }
     case 'K': {
         int n = vt_param(0, 0);
-        if (n == 0)      for (int c = cursor_col; c < TERM_COLS; c++) term_cell_clear(&term_buffer[cursor_row][c]);
-        else if (n == 1) for (int c = 0; c <= cursor_col; c++) term_cell_clear(&term_buffer[cursor_row][c]);
-        else             for (int c = 0; c < TERM_COLS; c++) term_cell_clear(&term_buffer[cursor_row][c]);
+        if (n == 0) {
+            for (int c = cursor_col; c < TERM_COLS; c++) term_cell_clear(&term_buffer[cursor_row][c]);
+            term_clear_graphics_cell(cursor_row, cursor_col, TERM_COLS - cursor_col);
+        } else if (n == 1) {
+            for (int c = 0; c <= cursor_col; c++) term_cell_clear(&term_buffer[cursor_row][c]);
+            term_clear_graphics_cell(cursor_row, 0, cursor_col + 1);
+        } else {
+            for (int c = 0; c < TERM_COLS; c++) term_cell_clear(&term_buffer[cursor_row][c]);
+            term_clear_graphics_cell(cursor_row, 0, TERM_COLS);
+        }
         term_mark_dirty(cursor_row);
         break;
     }
@@ -596,6 +754,9 @@ static void vt_process_csi(char final_ch)
                 term_buffer[cursor_row][c] = term_buffer[cursor_row][c - n];
             for (int c = cursor_col; c < cursor_col + n && c < TERM_COLS; c++)
                 term_cell_clear(&term_buffer[cursor_row][c]);
+            // Character insertion shifts text but not graphics. Drop this
+            // row's image pixels instead of claiming an incorrect alignment.
+            term_clear_graphics_cell(cursor_row, 0, TERM_COLS);
             term_mark_dirty(cursor_row);
         }
         break;
@@ -607,6 +768,7 @@ static void vt_process_csi(char final_ch)
                 term_buffer[cursor_row][c] = term_buffer[cursor_row][c + n];
             for (int c = TERM_COLS - n; c < TERM_COLS; c++)
                 term_cell_clear(&term_buffer[cursor_row][c]);
+            term_clear_graphics_cell(cursor_row, 0, TERM_COLS);
             term_mark_dirty(cursor_row);
         }
         break;
@@ -615,6 +777,7 @@ static void vt_process_csi(char final_ch)
         int n = vt_param(0, 1); if (n < 1) n = 1;
         for (int c = cursor_col; c < cursor_col + n && c < TERM_COLS; c++)
             term_cell_clear(&term_buffer[cursor_row][c]);
+        term_clear_graphics_cell(cursor_row, cursor_col, n);
         term_mark_dirty(cursor_row);
         break;
     }
@@ -634,7 +797,9 @@ static void vt_process_csi(char final_ch)
     }
     case 'c': {
         if (vt_param(0, 0) == 0) {
-            const char *resp = "\x1b[?1;0c";
+            // DEC-style primary DA: advertise Sixel only when the fixed
+            // PSRAM surfaces actually allocated at this boot.
+            const char *resp = sixel_graphics_available() ? "\x1b[?1;4c" : "\x1b[?1;0c";
             if (s_tx_cb) s_tx_cb((const uint8_t *)resp, strlen(resp));
         }
         break;
@@ -651,11 +816,13 @@ static void vt_process_csi_priv(char final_ch)
     int n = vt_param(0, 0);
     if (final_ch == 'h') {
         if (n == 25) cursor_visible = true;
+        if (n == 80) dec_sixel_scrolling = true;
         // 1049: alternate screen buffer (ignore)
         // 1: application cursor keys (ignore)
         // 7: auto-wrap (always on, ignore)
     } else if (final_ch == 'l') {
         if (n == 25) cursor_visible = false;
+        if (n == 80) dec_sixel_scrolling = false;
     }
 }
 
@@ -786,6 +953,9 @@ void term_local_echo_delete(void)
     for (int c = TERM_COLS - count; c < TERM_COLS; c++) {
         term_cell_clear(&term_buffer[cursor_row][c]);
     }
+    // Local line editing shifts text horizontally while the graphics plane is
+    // pixel-addressed. Removing this row avoids stale image alignment.
+    term_clear_graphics_cell(cursor_row, 0, TERM_COLS);
     cursor_col = col;
     pending_wrap = false;
     term_mark_dirty(cursor_row);
@@ -831,7 +1001,17 @@ void vt100_process_byte(uint8_t byte)
 
     switch (vt_state) {
     case VT_STATE_NORMAL:
-        if (c == 0x1B) {
+        if (byte == 0x90) {
+            // 8-bit DCS. Treat it as a control before UTF-8 decoding; 0x90
+            // is otherwise a superficially valid continuation/lead pattern.
+            utf8_bytes_left = 0;
+            utf8_codepoint = 0;
+            dcs_reset_params();
+            vt_state = VT_STATE_DCS;
+        } else if (byte == 0x9c) {
+            // A stray 8-bit ST outside a control string is a C1 control, not
+            // the lead byte of a malformed UTF-8 sequence.
+        } else if (c == 0x1B) {
             // ESC: reset UTF-8 decoder and enter ESC state
             utf8_bytes_left = 0;
             utf8_codepoint  = 0;
@@ -900,6 +1080,11 @@ void vt100_process_byte(uint8_t byte)
         if (c == '[') {
             vt_state = VT_STATE_CSI;
             vt_reset_params();
+        } else if (c == 'P') {
+            // 7-bit DCS introducer. Header parameters are parsed separately
+            // until final 'q' identifies a Sixel body.
+            dcs_reset_params();
+            vt_state = VT_STATE_DCS;
         } else if (c == '7') {
             saved_row = cursor_row; saved_col = cursor_col;
             pending_wrap = false;
@@ -988,9 +1173,89 @@ void vt100_process_byte(uint8_t byte)
         }
         break;
 
+    case VT_STATE_DCS:
+        if (byte >= (uint8_t)'0' && byte <= (uint8_t)'9') {
+            if (!dcs_append_digit(byte)) {
+                sixel_graphics_abort();
+                vt_enter_dcs_ignore();
+            }
+        } else if (byte == (uint8_t)';') {
+            dcs_append_separator();
+        } else if (byte == (uint8_t)'q') {
+            // In DCS P1;P2;P3 q, P2=1 requests transparent background.
+            // All other values use the DEC default: clear the image rectangle
+            // before committing newly decoded opaque pixels.
+            dcs_sixel_start_row = cursor_row;
+            dcs_sixel_start_col = cursor_col;
+            pending_wrap = false;
+            if (sixel_graphics_begin(dcs_param(1, 0) == 1)) {
+                vt_state = VT_STATE_SIXEL;
+            } else {
+                vt_enter_dcs_ignore();
+            }
+        } else if (byte == 0x9c) {
+            // Empty/unknown DCS terminated by the 8-bit ST.
+            vt_state = VT_STATE_NORMAL;
+        } else if (byte == 0x1b) {
+            dcs_discard_bytes = 0;
+            vt_state = VT_STATE_DCS_IGNORE_ESC;
+        } else if (byte >= 0x40 && byte <= 0x7e) {
+            // Unsupported DCS final. Do not let its body leak into text.
+            vt_enter_dcs_ignore();
+        } else {
+            vt_enter_dcs_ignore();
+        }
+        break;
+
+    case VT_STATE_DCS_IGNORE:
+        vt_discard_dcs_byte(byte);
+        break;
+
+    case VT_STATE_DCS_IGNORE_ESC:
+        if (byte == (uint8_t)'\\' || byte == 0x9c) {
+            vt_state = VT_STATE_NORMAL;
+        } else {
+            if (++dcs_discard_bytes > SIXEL_MAX_STREAM_BYTES) {
+                ESP_LOGW(TAG, "Discarding unterminated DCS after %u bytes",
+                         (unsigned)SIXEL_MAX_STREAM_BYTES);
+                vt_state = VT_STATE_NORMAL;
+            } else if (byte != 0x1b) {
+                vt_state = VT_STATE_DCS_IGNORE;
+            }
+        }
+        break;
+
+    case VT_STATE_SIXEL:
+        if (byte == 0x9c) {
+            vt_finish_sixel();
+            vt_state = VT_STATE_NORMAL;
+        } else if (byte == 0x1b) {
+            vt_state = VT_STATE_SIXEL_ESC;
+        } else if (!sixel_graphics_feed(byte)) {
+            sixel_graphics_abort();
+            vt_enter_dcs_ignore();
+        }
+        break;
+
+    case VT_STATE_SIXEL_ESC:
+        if (byte == (uint8_t)'\\' || byte == 0x9c) {
+            vt_finish_sixel();
+            vt_state = VT_STATE_NORMAL;
+        } else if (byte == 0x1b) {
+            // Consecutive ESC bytes remain in the escape-pending state.
+        } else {
+            // ESC inside a DCS body is not image data in the Basic profile.
+            // Reject the body, then discard through the next ST to resync.
+            sixel_graphics_abort();
+            vt_enter_dcs_ignore();
+            vt_discard_dcs_byte(byte);
+        }
+        break;
+
     case VT_STATE_ESC_HASH:
         if (c == '8') {
             // DECALN: fill screen with 'E' (alignment test)
+            term_clear_graphics_all();
             for (int r = 0; r < TERM_ROWS; r++)
                 for (int col = 0; col < TERM_COLS; col++) {
                     term_buffer[r][col].codepoint = 'E';

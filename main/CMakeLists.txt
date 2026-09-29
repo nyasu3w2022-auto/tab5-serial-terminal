@@ -1,5 +1,6 @@
 idf_component_register(SRCS "main.cpp"
                             "terminal.cpp"
+                            "sixel_graphics.cpp"
                             "display.cpp"
                             "usb_serial.cpp"
                             "porta_uart.cpp"

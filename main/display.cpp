@@ -6,10 +6,12 @@
 
 #include "display.h"
 #include "terminal.h"
+#include "sixel_graphics.h"
 #include "serial_transport.h"
 #include "ime_ui.h"
 
 #include <inttypes.h>
+#include <string.h>
 #include <esp_log.h>
 #include <esp_heap_caps.h>
 #include <freertos/FreeRTOS.h>
@@ -34,6 +36,13 @@ static bool s_katakana_input_active = false;
 // Sized for the maximum row count (Small font: 43 rows)
 static lv_obj_t   *row_canvases[TERM_ROWS_MAX]    = {};
 static uint8_t    *row_canvas_bufs[TERM_ROWS_MAX] = {};
+// Small font uses 43*16 = 688 terminal pixels, leaving a 12-pixel strip
+// above the 20-pixel status bar. A dedicated graphics-only canvas keeps the
+// advertised 1280x700 Sixel surface visible in that strip.
+static lv_obj_t   *sixel_tail_canvas = NULL;
+static uint8_t    *sixel_tail_buf = NULL;
+static int         sixel_tail_height = 0;
+static bool        sixel_tail_was_visible = false;
 
 // LVGL invokes touch event callbacks from its own task.  They only accumulate
 // a compact request here; main.cpp owns the terminal state and applies the
@@ -134,15 +143,24 @@ bool display_take_scrollback_touch_request(int *line_delta, bool *tap_to_live)
 // cell_width: number of pixel columns to fill (TERM_FONT_W for half-width, TERM_FONT_W*2 for full-width)
 static void draw_glyph(uint16_t *buf, int cx_start, int cell_width,
                        const lv_font_t *font, uint32_t letter,
-                       uint16_t fg16, uint16_t bg16)
+                       uint16_t fg16, uint16_t bg16, int terminal_y,
+                       bool composite_sixel)
 {
     const lv_font_fmt_txt_dsc_t *fdsc = (const lv_font_fmt_txt_dsc_t *)font->dsc;
     const int stride = LVGL_W;
 
-    // Fill background for the entire cell width first
-    for (int y = 0; y < TERM_FONT_H; y++) {
-        uint16_t *row_ptr = buf + cx_start + y * stride;
-        for (int x = 0; x < cell_width; x++) row_ptr[x] = bg16;
+    // A live terminal image is composited beneath blank text cells. History
+    // deliberately has no image plane, and a cursor gets an opaque inverse
+    // cell so it remains visible above a graphic.
+    if (composite_sixel) {
+        sixel_graphics_composite_background(buf + cx_start, stride,
+                                            cx_start, terminal_y,
+                                            cell_width, TERM_FONT_H, bg16);
+    } else {
+        for (int y = 0; y < TERM_FONT_H; y++) {
+            uint16_t *row_ptr = buf + cx_start + y * stride;
+            for (int x = 0; x < cell_width; x++) row_ptr[x] = bg16;
+        }
     }
 
     lv_font_glyph_dsc_t g_dsc;
@@ -172,7 +190,7 @@ static void draw_glyph(uint16_t *buf, int cx_start, int cell_width,
             int byte_idx = bit_idx >> 3;
             int bit_pos  = 7 - (bit_idx & 7);
             uint8_t bit  = (bitmap[byte_idx] >> bit_pos) & 1;
-            row_ptr[cx] = bit ? fg16 : bg16;
+            if (bit) row_ptr[cx] = fg16;
         }
     }
 }
@@ -212,7 +230,9 @@ static void term_rebuild_row(int r)
         if (cx_start + cell_width > LVGL_W) cell_width = LVGL_W - cx_start;
         if (cx_start >= LVGL_W) continue;
 
-        draw_glyph(buf, cx_start, cell_width, font, cp, fg16, bg16);
+        draw_glyph(buf, cx_start, cell_width, font, cp, fg16, bg16,
+                   r * TERM_FONT_H,
+                   !viewing_scrollback && !is_cursor && sixel_graphics_has_displayed_pixels());
     }
 
     // Notify LVGL that the canvas pixel buffer has been updated
@@ -220,6 +240,21 @@ static void term_rebuild_row(int r)
         lv_canvas_set_buffer(row_canvases[r], row_canvas_bufs[r], LVGL_W, TERM_FONT_H, LV_COLOR_FORMAT_RGB565);
         lv_obj_invalidate(row_canvases[r]);
     }
+}
+
+static void sixel_rebuild_tail(bool show_graphics)
+{
+    if (sixel_tail_canvas == NULL || sixel_tail_buf == NULL || sixel_tail_height <= 0) return;
+    if (show_graphics) {
+        sixel_graphics_composite_background((uint16_t *)sixel_tail_buf, LVGL_W,
+                                            0, TERM_ROWS * TERM_FONT_H,
+                                            LVGL_W, sixel_tail_height, 0x0000);
+    } else {
+        memset(sixel_tail_buf, 0, (size_t)LVGL_W * (size_t)sixel_tail_height * sizeof(uint16_t));
+    }
+    lv_canvas_set_buffer(sixel_tail_canvas, sixel_tail_buf, LVGL_W,
+                         sixel_tail_height, LV_COLOR_FORMAT_RGB565);
+    lv_obj_invalidate(sixel_tail_canvas);
 }
 
 void term_refresh_display(void)
@@ -257,6 +292,14 @@ void term_refresh_display(void)
             row_dirty[r] = false;
         }
     }
+    // The tail has no terminal rows and therefore no row_dirty flag. Rebuild
+    // it while graphics are live, and once more when the last graphic is
+    // cleared, so Small font covers the complete 700-pixel terminal surface.
+    const bool sixel_visible = !viewing_scrollback && sixel_graphics_has_displayed_pixels();
+    if (sixel_tail_canvas != NULL && (sixel_visible || sixel_tail_was_visible)) {
+        sixel_rebuild_tail(sixel_visible);
+    }
+    sixel_tail_was_visible = sixel_visible;
     lvgl_port_unlock();
 
     rendered_scrollback_generation = viewing_scrollback ? scrollback_generation : UINT32_MAX;
@@ -361,6 +404,25 @@ void ui_create(void)
         row_dirty[r] = true;
     }
 
+    sixel_tail_height = LVGL_H - STATUS_BAR_H - TERM_ROWS * TERM_FONT_H;
+    sixel_tail_was_visible = false;
+    if (sixel_tail_height > 0) {
+        const size_t tail_buf_size = LV_CANVAS_BUF_SIZE(LVGL_W, sixel_tail_height, 16, 4);
+        sixel_tail_buf = (uint8_t *)heap_caps_malloc(tail_buf_size, MALLOC_CAP_SPIRAM);
+        if (sixel_tail_buf == NULL) {
+            ESP_LOGE(TAG, "Failed to allocate Sixel tail canvas (%d px)", sixel_tail_height);
+            sixel_tail_height = 0;
+        } else {
+            sixel_tail_canvas = lv_canvas_create(term_canvas);
+            lv_canvas_set_buffer(sixel_tail_canvas, sixel_tail_buf, LVGL_W,
+                                 sixel_tail_height, LV_COLOR_FORMAT_RGB565);
+            lv_obj_set_pos(sixel_tail_canvas, 0, TERM_ROWS * TERM_FONT_H);
+            lv_obj_set_size(sixel_tail_canvas, LVGL_W, sixel_tail_height);
+            lv_obj_clear_flag(sixel_tail_canvas, LV_OBJ_FLAG_CLICKABLE);
+            lv_canvas_fill_bg(sixel_tail_canvas, lv_color_black(), LV_OPA_COVER);
+        }
+    }
+
     // Status bar uses ASCII-only font (lv_font_unscii_16) for compact display
     status_label = lv_label_create(scr);
     lv_obj_set_style_text_font(status_label, &lv_font_unscii_16, 0);
@@ -394,6 +456,14 @@ void ui_destroy(void)
         }
         row_canvases[r] = NULL;  // deleted when term_canvas is deleted below
     }
+
+    if (sixel_tail_buf) {
+        heap_caps_free(sixel_tail_buf);
+        sixel_tail_buf = NULL;
+    }
+    sixel_tail_canvas = NULL;  // deleted with term_canvas
+    sixel_tail_height = 0;
+    sixel_tail_was_visible = false;
 
     // Delete terminal canvas container (also deletes all child row_canvases)
     if (term_canvas) {

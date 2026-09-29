@@ -35,6 +35,7 @@
 #include "m5tab5_pinmap.h"
 
 #include "terminal.h"
+#include "sixel_graphics.h"
 #include "display.h"
 #include "usb_serial.h"          // shared RX ring buffer, logs, keyboard queue
 #include "serial_transport.h"    // active USB / Port A / MBUS UART transport
@@ -741,6 +742,9 @@ extern "C" void app_main(void)
     }
     if (!term_scrollback_init()) {
         ESP_LOGW(TAG, "Touch scrollback unavailable; terminal remains live-only");
+    }
+    if (!sixel_graphics_init()) {
+        ESP_LOGW(TAG, "Sixel graphics unavailable; text terminal remains fully usable");
     }
     ui_create();
     term_clear_all();
