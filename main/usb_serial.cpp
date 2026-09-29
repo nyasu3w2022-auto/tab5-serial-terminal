@@ -13,6 +13,7 @@
 #include <inttypes.h>
 #include <esp_log.h>
 #include <esp_system.h>
+#include <esp_heap_caps.h>
 #include <freertos/FreeRTOS.h>
 #include <freertos/task.h>
 #include <freertos/semphr.h>
@@ -57,13 +58,22 @@ static bool          s_vcp_task_started = false;
 // Queues / Semaphores / Event Groups
 // ==============================================================
 
-// USB RX ring buffer: 16 KB to absorb bursts without dropping bytes
-#define USB_RX_RINGBUF_SIZE  16384
+// All transports feed this shared byte buffer.  A Sixel image can arrive as a
+// sustained USB stream much faster than the single main task can decode it.
+// Keep the large normal case in PSRAM, which is plentiful on TAB5 and avoids
+// competing with USB/LVGL internal RAM.  The internal-RAM fallback preserves
+// ordinary serial-terminal operation should PSRAM be unavailable.
+#define USB_RX_RINGBUF_SIZE_PSRAM     (256U * 1024U)
+#define USB_RX_RINGBUF_SIZE_FALLBACK  (16U * 1024U)
 static RingbufHandle_t   s_usb_rx_ringbuf   = NULL;
+static size_t            s_usb_rx_ringbuf_size = 0;
 static QueueHandle_t     s_screen_log_queue = NULL;
 static QueueHandle_t     s_key_queue        = NULL;
 static SemaphoreHandle_t s_dev_present_sem  = NULL;
 static SemaphoreHandle_t s_usb_ready_sem    = NULL;
+static size_t            s_usb_rx_dropped_since_report = 0;
+static TickType_t        s_usb_rx_last_drop_report_tick = 0;
+static bool              s_usb_rx_overflow_reported = false;
 
 // VID/PID of the most recently detected USB device (set by enum_filter_cb)
 static volatile uint16_t s_dev_vid = 0;
@@ -150,7 +160,20 @@ static bool usb_rx_cb(const uint8_t *data, size_t data_len, void *arg)
     // Timeout=0: never block in the USB host callback.
     BaseType_t sent = xRingbufferSend(s_usb_rx_ringbuf, data, data_len, 0);
     if (sent != pdTRUE) {
-        ESP_LOGW(TAG, "USB RX ringbuf full, dropped %zu bytes", data_len);
+        // Logging every rejected USB packet makes the receiver even slower and
+        // hides the useful diagnosis. Report a cumulative count at most once
+        // per second; the larger PSRAM buffer should make this exceptional.
+        s_usb_rx_dropped_since_report += data_len;
+        const TickType_t now = xTaskGetTickCount();
+        if (!s_usb_rx_overflow_reported ||
+            (TickType_t)(now - s_usb_rx_last_drop_report_tick) >= pdMS_TO_TICKS(1000)) {
+            ESP_LOGW(TAG, "USB RX ringbuf overflow: dropped %u bytes in the last interval (capacity=%u)",
+                     (unsigned)s_usb_rx_dropped_since_report,
+                     (unsigned)s_usb_rx_ringbuf_size);
+            s_usb_rx_dropped_since_report = 0;
+            s_usb_rx_last_drop_report_tick = now;
+            s_usb_rx_overflow_reported = true;
+        }
     }
     return true;
 }
@@ -425,9 +448,9 @@ static void vcp_task(void *arg)
 
         s_vcp_dev       = dev;
         s_usb_connected = true;
-        screen_log("[USB] Connected! Baud:%"PRIu32" %s\r\n",
+        screen_log("[USB] Connected! Baud:%" PRIu32 " %s\r\n",
                    s_baud_rate, is_vcp ? "(VCP)" : "(CDC)");
-        ESP_LOGI(TAG, "USB connected, baud=%"PRIu32" %s",
+        ESP_LOGI(TAG, "USB connected, baud=%" PRIu32 " %s",
                  s_baud_rate, is_vcp ? "(VCP)" : "(CDC)");
 
         // Notify the remote device of our terminal window size via xterm sequence:
@@ -470,7 +493,22 @@ static void vcp_task(void *arg)
 void usb_init(void)
 {
     s_key_queue        = xQueueCreate(32, sizeof(key_event_msg_t));
-    s_usb_rx_ringbuf   = xRingbufferCreate(USB_RX_RINGBUF_SIZE, RINGBUF_TYPE_BYTEBUF);
+    s_usb_rx_ringbuf = xRingbufferCreateWithCaps(USB_RX_RINGBUF_SIZE_PSRAM,
+                                                  RINGBUF_TYPE_BYTEBUF,
+                                                  MALLOC_CAP_SPIRAM);
+    if (s_usb_rx_ringbuf != NULL) {
+        s_usb_rx_ringbuf_size = USB_RX_RINGBUF_SIZE_PSRAM;
+        ESP_LOGI(TAG, "Shared RX ring buffer: %u bytes in PSRAM",
+                 (unsigned)s_usb_rx_ringbuf_size);
+    } else {
+        // Do not make Sixel's optional PSRAM feature prevent ordinary serial
+        // use on a board where PSRAM allocation unexpectedly fails.
+        s_usb_rx_ringbuf = xRingbufferCreate(USB_RX_RINGBUF_SIZE_FALLBACK,
+                                              RINGBUF_TYPE_BYTEBUF);
+        s_usb_rx_ringbuf_size = USB_RX_RINGBUF_SIZE_FALLBACK;
+        ESP_LOGW(TAG, "PSRAM RX ring allocation failed; using %u-byte internal fallback",
+                 (unsigned)s_usb_rx_ringbuf_size);
+    }
     if (s_usb_rx_ringbuf == NULL) {
         ESP_LOGE(TAG, "Failed to create shared RX ring buffer (OOM?), rebooting");
         vTaskDelay(pdMS_TO_TICKS(2000));

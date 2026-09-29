@@ -47,6 +47,11 @@
 
 static const char *TAG = "main";
 
+// The shared RX ring already separates the transport callbacks from terminal
+// processing. Pulling a larger contiguous byte-buffer segment per call reduces
+// ring-buffer bookkeeping while decoding a high-throughput Sixel DCS.
+static constexpr size_t RX_PROCESS_CHUNK_SIZE = 4096;
+
 static m5::tab5::m5tab5_component s_tab5_board;
 static m5::M5Tab5Keyboard         s_keyboard;
 
@@ -838,7 +843,7 @@ extern "C" void app_main(void)
             need_refresh = true;
         }
 
-        // 2. Process USB RX data through VT100 parser (drain ring buffer completely).
+        // 2. Process transport RX data through VT100 parser (drain ring buffer completely).
         //    While the settings screen is open, data is still parsed into term_buffer
         //    (keeping terminal state up to date) but term_refresh_display() is NOT
         //    called so the LVGL overlay remains visible undisturbed.
@@ -846,12 +851,14 @@ extern "C" void app_main(void)
         //    term_mark_all_dirty() + term_refresh_display() to show the updated screen.
         {
             size_t rx_len = 0;
-            uint8_t *rx_data = (uint8_t *)xRingbufferReceiveUpTo(rx_rb, &rx_len, 0, 512);
+            uint8_t *rx_data = (uint8_t *)xRingbufferReceiveUpTo(rx_rb, &rx_len, 0,
+                                                                   RX_PROCESS_CHUNK_SIZE);
             while (rx_data != NULL && rx_len > 0) {
                 for (size_t i = 0; i < rx_len; i++) vt100_process_byte(rx_data[i]);
                 vRingbufferReturnItem(rx_rb, rx_data);
                 if (!settings_ui_is_open()) need_refresh = true;
-                rx_data = (uint8_t *)xRingbufferReceiveUpTo(rx_rb, &rx_len, 0, 512);
+                rx_data = (uint8_t *)xRingbufferReceiveUpTo(rx_rb, &rx_len, 0,
+                                                              RX_PROCESS_CHUNK_SIZE);
             }
         }
 
