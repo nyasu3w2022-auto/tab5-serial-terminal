@@ -143,5 +143,28 @@ int main()
     term_clear_all();
     assert(!sixel_graphics_has_displayed_pixels());
 
+    // A transport overflow may remove the DCS ST. The recovery path discards
+    // queued body bytes through a later ST, then permits ordinary text again;
+    // the partial image must never be committed.
+    reset_terminal();
+    feed("\x1bP0;0;0q#1~");
+    assert(vt100_is_processing_control_string());
+    vt100_recover_from_rx_overflow();
+    assert(vt100_is_processing_control_string());
+    feed("ignored-image-body\x1b\\R");
+    assert(!vt100_is_processing_control_string());
+    assert(!sixel_graphics_has_displayed_pixels());
+    assert(term_buffer[0][0].codepoint == 'R');
+
+    // Ctrl+C uses the stronger abort path and therefore returns to ordinary
+    // parsing even when the terminating ST itself never arrives.
+    reset_terminal();
+    feed("\x1bP0;0;0q#1~");
+    assert(vt100_is_processing_control_string());
+    vt100_abort_control_sequence();
+    assert(!vt100_is_processing_control_string());
+    feed("C");
+    assert(term_buffer[0][0].codepoint == 'C');
+
     return 0;
 }

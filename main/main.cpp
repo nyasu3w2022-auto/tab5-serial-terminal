@@ -51,6 +51,11 @@ static const char *TAG = "main";
 // processing. Pulling a larger contiguous byte-buffer segment per call reduces
 // ring-buffer bookkeeping while decoding a high-throughput Sixel DCS.
 static constexpr size_t RX_PROCESS_CHUNK_SIZE = 4096;
+// Never let a sustained binary DCS monopolise the main task. This budget
+// leaves time for LVGL refreshes and keyboard events even when input remains
+// continuously readable; the PSRAM ring absorbs the short backlog.
+static constexpr size_t RX_PROCESS_MAX_BYTES_PER_TURN = 16U * 1024U;
+static constexpr uint32_t RX_CONTROL_STRING_IDLE_TIMEOUT_MS = 250;
 
 static m5::tab5::m5tab5_component s_tab5_board;
 static m5::M5Tab5Keyboard         s_keyboard;
@@ -608,7 +613,10 @@ static bool handle_key_event(const key_event_msg_t *msg)
         if (k == 'C') {
             // Ctrl+C: clear screen locally. Clear a local preedit first so it
             // cannot remain as an overlay over the newly cleared terminal.
+            // It also provides a local escape hatch for a damaged DCS whose
+            // terminating ST was lost before the normal timeout can fire.
             ime_cancel_before_remote_input();
+            vt100_abort_control_sequence();
             term_clear_all();
             const char *m = "\033[1;32m[Screen cleared]\033[0m\n";
             for (const char *p = m; *p; p++) vt100_process_byte((uint8_t)*p);
@@ -831,10 +839,12 @@ extern "C" void app_main(void)
     RingbufHandle_t rx_rb       = usb_get_rx_ringbuf();
     QueueHandle_t   screen_logq = usb_get_screen_log_queue();
     QueueHandle_t   key_q       = usb_get_key_queue();
+    TickType_t last_rx_activity_tick = xTaskGetTickCount();
 
     while (1) {
         bool need_refresh = false;
         bool scrollback_view_changed = false;
+        bool rx_processed_this_turn = false;
 
         // 1. Process screen log messages from other tasks
         screen_log_msg_t log_msg;
@@ -843,22 +853,58 @@ extern "C" void app_main(void)
             need_refresh = true;
         }
 
-        // 2. Process transport RX data through VT100 parser (drain ring buffer completely).
+        // 2. Process transport RX data through VT100 parser in bounded work
+        //    units. A continuous binary Sixel stream must not starve LVGL or
+        //    the keyboard queue just because the ring never becomes empty.
         //    While the settings screen is open, data is still parsed into term_buffer
         //    (keeping terminal state up to date) but term_refresh_display() is NOT
         //    called so the LVGL overlay remains visible undisturbed.
         //    When the settings screen closes, settings_ui_close() calls
         //    term_mark_all_dirty() + term_refresh_display() to show the updated screen.
         {
+            size_t rx_processed = 0;
             size_t rx_len = 0;
-            uint8_t *rx_data = (uint8_t *)xRingbufferReceiveUpTo(rx_rb, &rx_len, 0,
-                                                                   RX_PROCESS_CHUNK_SIZE);
-            while (rx_data != NULL && rx_len > 0) {
+            uint8_t *rx_data = NULL;
+            while (rx_processed < RX_PROCESS_MAX_BYTES_PER_TURN) {
+                const size_t bytes_left = RX_PROCESS_MAX_BYTES_PER_TURN - rx_processed;
+                const size_t receive_limit = bytes_left < RX_PROCESS_CHUNK_SIZE
+                                           ? bytes_left : RX_PROCESS_CHUNK_SIZE;
+                rx_data = (uint8_t *)xRingbufferReceiveUpTo(rx_rb, &rx_len, 0, receive_limit);
+                if (rx_data == NULL || rx_len == 0) break;
+
                 for (size_t i = 0; i < rx_len; i++) vt100_process_byte(rx_data[i]);
                 vRingbufferReturnItem(rx_rb, rx_data);
-                if (!settings_ui_is_open()) need_refresh = true;
-                rx_data = (uint8_t *)xRingbufferReceiveUpTo(rx_rb, &rx_len, 0,
-                                                              RX_PROCESS_CHUNK_SIZE);
+                rx_processed += rx_len;
+                rx_processed_this_turn = true;
+                last_rx_activity_tick = xTaskGetTickCount();
+                // A Sixel surface is committed only at ST. Refreshing LVGL
+                // for every intermediate binary chunk cannot show progress,
+                // yet it takes time away from RX decoding and can cause the
+                // very ring overflow this path is meant to avoid.
+                if (!settings_ui_is_open() && !vt100_is_processing_control_string()) {
+                    need_refresh = true;
+                }
+            }
+
+            // A rejected source packet can contain the Sixel ST. Once queued
+            // bytes have led the parser into DCS/Sixel state, discard the
+            // damaged body instead of allowing the parser to wait forever.
+            if (usb_take_rx_overflow_bytes() > 0) {
+                vt100_recover_from_rx_overflow();
+                need_refresh = true;
+            }
+
+            // This is the fallback for a truncated control string where the
+            // terminating ST was the only byte lost. It also bounds malformed
+            // remote DCS input independently of ring-buffer pressure.
+            const TickType_t now = xTaskGetTickCount();
+            if (vt100_is_processing_control_string() &&
+                (TickType_t)(now - last_rx_activity_tick) >=
+                    pdMS_TO_TICKS(RX_CONTROL_STRING_IDLE_TIMEOUT_MS)) {
+                ESP_LOGW(TAG, "Aborting incomplete DCS/Sixel after %u ms without RX",
+                         (unsigned)RX_CONTROL_STRING_IDLE_TIMEOUT_MS);
+                vt100_abort_control_sequence();
+                need_refresh = true;
             }
         }
 
@@ -882,9 +928,12 @@ extern "C" void app_main(void)
         // mode is saved by Dictionary Editor actions; Off never learns.
         service_deferred_learning();
 
-        // 5. Process keyboard input (5 ms wait to keep USB RX responsive)
+        // 5. Process keyboard input. Do not add the ordinary 5 ms idle wait
+        // after parsing RX data: when a binary stream is backlogged, that wait
+        // is pure lost receive time. The queue is still checked every turn.
         key_event_msg_t key_msg;
-        if (xQueueReceive(key_q, &key_msg, pdMS_TO_TICKS(5)) == pdTRUE) {
+        const TickType_t key_wait = rx_processed_this_turn ? 0 : pdMS_TO_TICKS(5);
+        if (xQueueReceive(key_q, &key_msg, key_wait) == pdTRUE) {
             bool kb_refresh = handle_key_event(&key_msg);
             if (kb_refresh) {
                 term_refresh_display();

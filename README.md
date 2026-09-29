@@ -84,7 +84,7 @@ img2sixel -w 1280 -h 700 image.png
 
 通常は空行から画像を出力してください。Sixel画像は現在のテキストカーソル位置を左上にして表示され、既定のDECSDM（`CSI ? 80 h`）では画像下の次のテキスト行へカーソルが移動します。`CSI ? 80 l`では画面外をクリップし、カーソルや端末行を動かしません。
 
-> **Sixelの制限:** 画像はライブ画面専用で、タッチ・バックスクロール、Flash、SDカード、alternate screenには保存しません。画像表示後に端末がスクロールすると、画像を消去して文字の履歴だけを保持します。新しい文字、`CSI 2 J`、行消去、フォント切替、RISも該当画像を消去します。1個のDCS本文は最大1 MiB、画像は1280×700 pxまでです。上限超過・不正なDCSはその画像だけを破棄し、後続の端末出力を保護します。kitty graphics protocol、iTerm2 inline image、ReGIS、`XTSMGRAPHICS`の詳細問い合わせは未対応です。詳細は[`docs/sixel_basic_design.md`](docs/sixel_basic_design.md)を参照してください。
+> **Sixelの制限:** 画像はライブ画面専用で、タッチ・バックスクロール、Flash、SDカード、alternate screenには保存しません。画像表示後に端末がスクロールすると、画像を消去して文字の履歴だけを保持します。新しい文字、`CSI 2 J`、行消去、フォント切替、RISも該当画像を消去します。1個のDCS本文は最大1 MiB、画像は1280×700 pxまでです。上限超過・不正なDCS・受信オーバーフローはその画像だけを破棄し、後続の端末出力を保護します。DCS終端が欠落した場合も、残った画像データを終端まで破棄するか、250msの無受信後に通常端末へ復帰します。`Ctrl+C`のローカル画面クリアは即時復帰操作にもなります。kitty graphics protocol、iTerm2 inline image、ReGIS、`XTSMGRAPHICS`の詳細問い合わせは未対応です。詳細は[`docs/sixel_basic_design.md`](docs/sixel_basic_design.md)を参照してください。
 
 ### ローカル Echo Back
 
@@ -398,7 +398,7 @@ stty rows 43 cols 160
 ```
 main_task (メインループ)
   ├── screen_log_queue  ← 内部メッセージ表示
-  ├── shared_rx_ringbuf ← USB / Port A / MBUS RXデータ（16 KBリングバッファ）
+  ├── shared_rx_ringbuf ← USB / Port A / MBUS RXデータ（256 KB PSRAMリング、16 KBフォールバック）
   │     └── vt100_process_byte() → term_buffer → term_refresh_display()
   └── key_queue         ← キーボード入力
         ├── Directモード → 選択中のUSB / Port A / MBUS UARTへTX

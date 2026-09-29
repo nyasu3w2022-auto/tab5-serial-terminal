@@ -72,8 +72,10 @@ static QueueHandle_t     s_key_queue        = NULL;
 static SemaphoreHandle_t s_dev_present_sem  = NULL;
 static SemaphoreHandle_t s_usb_ready_sem    = NULL;
 static size_t            s_usb_rx_dropped_since_report = 0;
+static size_t            s_usb_rx_overflow_pending = 0;
 static TickType_t        s_usb_rx_last_drop_report_tick = 0;
 static bool              s_usb_rx_overflow_reported = false;
+static portMUX_TYPE      s_usb_rx_overflow_mux = portMUX_INITIALIZER_UNLOCKED;
 
 // VID/PID of the most recently detected USB device (set by enum_filter_cb)
 static volatile uint16_t s_dev_vid = 0;
@@ -115,6 +117,15 @@ esp_err_t usb_tx(const uint8_t *data, size_t len)
 RingbufHandle_t usb_get_rx_ringbuf(void)        { return s_usb_rx_ringbuf; }
 QueueHandle_t   usb_get_screen_log_queue(void)  { return s_screen_log_queue; }
 QueueHandle_t   usb_get_key_queue(void)         { return s_key_queue; }
+
+size_t usb_take_rx_overflow_bytes(void)
+{
+    portENTER_CRITICAL(&s_usb_rx_overflow_mux);
+    const size_t dropped = s_usb_rx_overflow_pending;
+    s_usb_rx_overflow_pending = 0;
+    portEXIT_CRITICAL(&s_usb_rx_overflow_mux);
+    return dropped;
+}
 
 // ==============================================================
 // Screen Log Helper
@@ -163,7 +174,10 @@ static bool usb_rx_cb(const uint8_t *data, size_t data_len, void *arg)
         // Logging every rejected USB packet makes the receiver even slower and
         // hides the useful diagnosis. Report a cumulative count at most once
         // per second; the larger PSRAM buffer should make this exceptional.
+        portENTER_CRITICAL(&s_usb_rx_overflow_mux);
         s_usb_rx_dropped_since_report += data_len;
+        s_usb_rx_overflow_pending += data_len;
+        portEXIT_CRITICAL(&s_usb_rx_overflow_mux);
         const TickType_t now = xTaskGetTickCount();
         if (!s_usb_rx_overflow_reported ||
             (TickType_t)(now - s_usb_rx_last_drop_report_tick) >= pdMS_TO_TICKS(1000)) {

@@ -523,6 +523,44 @@ static void vt_enter_dcs_ignore(void)
     vt_state = VT_STATE_DCS_IGNORE;
 }
 
+bool vt100_is_processing_control_string(void)
+{
+    return vt_state == VT_STATE_DCS ||
+           vt_state == VT_STATE_DCS_IGNORE ||
+           vt_state == VT_STATE_DCS_IGNORE_ESC ||
+           vt_state == VT_STATE_SIXEL ||
+           vt_state == VT_STATE_SIXEL_ESC;
+}
+
+void vt100_abort_control_sequence(void)
+{
+    // A transport overflow can remove the ST (ESC \\ or 0x9C) that would
+    // normally finish a DCS.  Discard only the uncommitted decoder staging
+    // image; never clear a previously committed image or terminal text.
+    if (vt100_is_processing_control_string()) sixel_graphics_abort();
+
+    vt_state = VT_STATE_NORMAL;
+    vt_reset_params();
+    dcs_reset_params();
+    dcs_discard_bytes = 0;
+    utf8_bytes_left = 0;
+    utf8_codepoint = 0;
+    pending_wrap = false;
+}
+
+void vt100_recover_from_rx_overflow(void)
+{
+    if (!vt100_is_processing_control_string()) return;
+
+    // Preserve the terminal display but reject the incomplete staged image.
+    // Remaining bytes already accepted into the RX ring are still very likely
+    // image body bytes, so discard them through ST rather than treating them
+    // as ordinary terminal text. The existing one-mebibyte discard cap and the
+    // main-task idle timeout guarantee that this state cannot be permanent.
+    sixel_graphics_abort();
+    vt_enter_dcs_ignore();
+}
+
 static void vt_discard_dcs_byte(uint8_t byte)
 {
     if (byte == 0x9c) {

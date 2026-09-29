@@ -64,6 +64,15 @@ void screen_log(const char *fmt, ...) __attribute__((format(printf, 1, 2)));
 /** Returns the USB RX ring buffer handle (read by main loop). */
 RingbufHandle_t usb_get_rx_ringbuf(void);
 
+/**
+ * @brief Return and clear bytes rejected by the shared RX ring since the last call.
+ *
+ * An overflow can cut a DCS/Sixel terminator out of the stream. The main task
+ * uses this notification to discard the affected control string and restore
+ * normal terminal parsing; it must not be used from a transport callback.
+ */
+size_t usb_take_rx_overflow_bytes(void);
+
 // ==============================================================
 // Screen Log Queue (read by main loop)
 // ==============================================================

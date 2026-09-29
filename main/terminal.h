@@ -198,6 +198,27 @@ typedef void (*vt100_tx_cb_t)(const uint8_t *data, size_t len);
 void vt100_set_tx_cb(vt100_tx_cb_t cb);
 
 /**
+ * @brief Abandon any partial UTF-8, ESC/CSI/DCS, or Sixel sequence.
+ *
+ * Used after a transport overflow or a local screen clear, where a missing
+ * control-string terminator must not leave subsequent ordinary text hidden.
+ * Already committed screen content is preserved.
+ */
+void vt100_abort_control_sequence(void);
+
+/**
+ * @brief Recover terminal parsing after source bytes were lost.
+ *
+ * A partial DCS/Sixel is changed to a bounded discard state so remaining
+ * queued image bytes cannot be printed as text. Normal text parsing remains
+ * unchanged when the overflow occurred outside a control string.
+ */
+void vt100_recover_from_rx_overflow(void);
+
+/** Return true while the parser is consuming or discarding a DCS/Sixel string. */
+bool vt100_is_processing_control_string(void);
+
+/**
  * @brief Feed one byte to the VT100 parser.
  *
  * Call this for every byte received from the remote device.
