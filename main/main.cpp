@@ -10,7 +10,7 @@
  *   main.cpp        — app_main, main loop, keyboard dispatch
  *
  * Keyboard shortcuts (local, not sent to remote):
- *   Ctrl+C        — Clear terminal screen
+ *   Ctrl+Alt+C    — Clear terminal screen
  *   Ctrl+L        — Force full redisplay
  *   Ctrl+Alt+S    — Open / close settings screen
  *   Ctrl+Alt+D    — Open / close local SKK Dictionary Editor
@@ -528,6 +528,20 @@ static bool handle_key_event(const key_event_msg_t *msg)
             }
             return true;
         }
+        if (k == 'C') {
+            // Settings owns keyboard input until Save, Close, or Esc. Do not
+            // clear the terminal behind its modal overlay.
+            if (settings_ui_is_open()) return true;
+            // Ctrl+Alt+C: local screen clear. Ctrl+C itself intentionally
+            // reaches the generic Ctrl path below and is sent as 0x03 (SIGINT)
+            // to the selected serial peer.
+            ime_cancel_before_remote_input();
+            vt100_abort_control_sequence();
+            term_clear_all();
+            const char *m = "\033[1;32m[Screen cleared]\033[0m\n";
+            for (const char *p = m; *p; p++) vt100_process_byte((uint8_t)*p);
+            return true;
+        }
         if (k == 'J') {
             // Ctrl+Alt+J: temporary local input-mode toggle.  The setting
             // dropdown controls the mode used after the next reboot.
@@ -610,18 +624,6 @@ static bool handle_key_event(const key_event_msg_t *msg)
     if (ctrl) {
         char k = (char)toupper((unsigned char)msg->str[0]);
 
-        if (k == 'C') {
-            // Ctrl+C: clear screen locally. Clear a local preedit first so it
-            // cannot remain as an overlay over the newly cleared terminal.
-            // It also provides a local escape hatch for a damaged DCS whose
-            // terminating ST was lost before the normal timeout can fire.
-            ime_cancel_before_remote_input();
-            vt100_abort_control_sequence();
-            term_clear_all();
-            const char *m = "\033[1;32m[Screen cleared]\033[0m\n";
-            for (const char *p = m; *p; p++) vt100_process_byte((uint8_t)*p);
-            return true;
-        }
         if (k == 'L') {
             // Ctrl+L: force full redisplay. It must not leave an unrelated
             // local preedit active after the terminal is redrawn.

@@ -62,7 +62,7 @@ bool row_dirty[TERM_ROWS_MAX] = {};
 // Scrollback is deliberately a fixed, once-allocated PSRAM ring.  Each entry
 // stores a physical display row at the maximum terminal width, so changing
 // between Small and Large fonts cannot reinterpret retained rows incorrectly.
-// It is volatile: power loss, RIS, Ctrl+C, and a font-size rebuild clear it.
+// It is volatile: power loss, RIS, Ctrl+Alt+C, and a font-size rebuild clear it.
 static TermCell *s_scrollback_rows = NULL;
 static int s_scrollback_oldest = 0;
 static int s_scrollback_count = 0;
