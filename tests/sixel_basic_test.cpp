@@ -156,8 +156,9 @@ int main()
     assert(!sixel_graphics_has_displayed_pixels());
     assert(term_buffer[0][0].codepoint == 'R');
 
-    // Ctrl+C uses the stronger abort path and therefore returns to ordinary
-    // parsing even when the terminating ST itself never arrives.
+    // The local Ctrl+Alt+C recovery path uses the stronger abort operation and
+    // therefore returns to ordinary parsing even when the terminating ST itself
+    // never arrives.
     reset_terminal();
     feed("\x1bP0;0;0q#1~");
     assert(vt100_is_processing_control_string());

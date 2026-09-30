@@ -1,6 +1,6 @@
 # 「来た」変換の調査結果
 
-**対象:** `feature/local-japanese-ime` の同梱 `SKK-JISYO.S.txt` と現行IMEコア
+**対象:** `feature/sixel-basic` の同梱 `SKK-JISYO.S.txt` と現行IMEコア
 
 ## 訂正：一般的なSKKでの正しい入力
 

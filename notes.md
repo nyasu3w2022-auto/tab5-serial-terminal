@@ -44,4 +44,4 @@
 
 ## ウィンドウサイズ通知
 - ESC[8;<rows>;<cols>t でxterm window resizeシーケンスを送信
-- ラズパイ側でTIOCSWINSZが更新される
+- USB接続時と設定適用時に接続先へ通知する。接続先のTTY実装がTIOCSWINSZへ反映するかは保証されないため、`stty size`が合わない場合は接続先で明示設定する。

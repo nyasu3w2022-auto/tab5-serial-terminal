@@ -13,7 +13,7 @@ M5Stack TAB5 (ESP32-P4) 向けの VT100 互換スタンドアロンシリアル�
 - **共有 RX 256 KB PSRAMリングバッファ** — USB・Port A・MBUS UARTの大量出力やSixelの連続受信を吸収。PSRAM確保失敗時のみ16KB内部RAMへ安全にフォールバック
 - **GUI 設定画面** — `Ctrl+Alt+S` で設定画面を開き、接続・表示設定と**Japanese Input (SKK)**設定を分けて表示。二択項目はタッチで直接切替、多値項目は固定候補パネルから一度のタッチで選択し、Save & CloseでNVSへ保存。`Esc`は候補パネル、次の`Esc`は未保存の設定画面を取り消す
 - **ローカル Echo Back** — 接続先に設定コマンドを送らず、Tab5自身が送信済みキー入力を表示するON/OFF設定
-- **ローカルかな漢字変換** — TAB5上でローマ字をひらがなへ変換し、内蔵SKK-JISYO.S辞書から候補を選択。確定したUTF-8だけをシリアル接続へ送信
+- **ローカルかな漢字変換** — TAB5上でローマ字をかなへ変換し、ユーザー・補助・システムSKK辞書から候補を選択。確定したUTF-8だけをシリアル接続へ送信
 - **差分描画** — 変更行のみ再描画する行単位ダーティフラグで高速表示
 - **タッチ・バックスクロール** — PSRAM上に最大512物理行を揮発保持し、通常の端末画面を上下へドラッグして過去ログを行単位で確認
 - **Sixel Basic グラフィック** — `img2sixel`やSixel対応アプリが送るDEC Sixel画像を、PSRAM上の固定ライブ画面へ表示
@@ -100,7 +100,7 @@ img2sixel -w 1280 -h 700 image.png | pv -q -L 10k
 
 通常は空行から画像を出力してください。Sixel画像は現在のテキストカーソル位置を左上にして表示され、既定のDECSDM（`CSI ? 80 h`）では画像下の次のテキスト行へカーソルが移動します。`CSI ? 80 l`では画面外をクリップし、カーソルや端末行を動かしません。
 
-> **Sixelの制限:** 画像はライブ画面専用で、タッチ・バックスクロール、Flash、SDカード、alternate screenには保存しません。画像表示後に端末がスクロールすると、画像を消去して文字の履歴だけを保持します。新しい文字、`CSI 2 J`、行消去、フォント切替、RISも該当画像を消去します。1個のDCS本文は最大1 MiB、画像は1280×700 pxまでです。上限超過・不正なDCS・受信オーバーフローはその画像だけを破棄し、後続の端末出力を保護します。DCS終端が欠落した場合も、残った画像データを終端まで破棄するか、250msの無受信後に通常端末へ復帰します。`Ctrl+Alt+C`のローカル画面クリアは即時復帰操作にもなります。kitty graphics protocol、iTerm2 inline image、ReGIS、`XTSMGRAPHICS`の詳細問い合わせは未対応です。詳細は[`docs/sixel_basic_design.md`](docs/sixel_basic_design.md)を参照してください。
+> **Sixelの制限:** 画像はライブ画面専用で、タッチ・バックスクロール、Flash、SDカード、alternate screenには保存しません。画像表示後に端末がスクロールすると、画像を消去して文字の履歴だけを保持します。文字の描画・行消去では、そのセル範囲と重なる画像だけを消去します。`CSI 2 J`、フォント切替、RIS、`Ctrl+Alt+C`のローカル画面クリアではライブ画像全体を消去します。1個のDCS本文は最大1 MiB、画像は1280×700 pxまでです。上限超過・不正なDCS・受信オーバーフローはその画像だけを破棄し、後続の端末出力を保護します。DCS終端が欠落した場合も、残った画像データを終端まで破棄するか、250msの無受信後に通常端末へ復帰します。kitty graphics protocol、iTerm2 inline image、ReGIS、`XTSMGRAPHICS`の詳細問い合わせは未対応です。詳細は[`docs/sixel_basic_design.md`](docs/sixel_basic_design.md)を参照してください。
 
 ### ローカル Echo Back
 
@@ -112,6 +112,21 @@ img2sixel -w 1280 -h 700 image.png | pv -q -L 10k
 | ON | キー入力の送信成功後、通常文字列、Enter、Tab、Backspace、Delete/Del、左/右カーソルをTab5上でローカル描画します。送信内容自体は選択中の接続先へ従来どおり転送されます。 |
 
 > **注意:** 接続先も同じ入力をエコーする状態でONにすると、入力文字が二重に表示されます。接続先が入力を表示しない機器やアプリケーションで使用してください。上/下、Home/End、Page、Insert、ファンクション、Escape、Alt/Ctrl修飾キーは、接続先側の状態に依存するためローカルには描画しません。
+
+### 設定画面
+
+`Ctrl+Alt+S`で開く設定画面は、**Connection & Display**と**Japanese Input (SKK)**を分けて表示します。値をタッチしても、その時点ではNVS・接続方式・画面表示は変更されません。**Save & Close**で保存・適用し、Escは開いている候補パネル、次のEscは設定画面全体をキャンセルします。
+
+| 区分 | 項目 | 選択肢 | 操作 |
+|:---|:---|:---|:---|
+| Connection & Display | Baud Rate | 9600 / 19200 / 38400 / 57600 / 115200 / 230400 / 460800 / 921600 | 固定候補パネル |
+|  | Interface | USB Serial / PortA UART (GPIO53/54) / MBUS UART2 (GPIO6/7) | 固定候補パネル |
+|  | Log Level | NONE / ERROR / WARN / INFO / DEBUG / VERBOSE | 固定候補パネル |
+|  | Font Size | Small (160×43) / Large (91×25) | 直接トグル。実際に切り替えると端末、履歴、ライブSixel画像をクリア |
+|  | Echo Back | OFF / ON | 直接トグル |
+| Japanese Input (SKK) | Input Mode | Direct / Japanese (SKK) | 直接トグル |
+|  | Punctuation | Japanese (JP) / ASCII / Fullwidth | 固定候補パネル |
+|  | Learning | Off (no learning) / Deferred (batch) / Manual save | 固定候補パネル |
 
 ### ローカルかな漢字変換（Japanese / SKK）
 
@@ -399,7 +414,7 @@ export TERM=xterm-color
 
 ### ウィンドウサイズについて
 
-ターミナル側のフォントサイズに応じて、ラズパイ側でウィンドウサイズを手動設定する必要があります。
+Tab5はUSB接続時、および設定の適用時（フォントサイズ・接続方式を含む）に、現在の文字数を `ESC[8;<rows>;<cols>t` として接続先へ通知します。ただしTTLシリアルや`g_serial`を含む接続先がこの通知をカーネル端末サイズへ反映するかは、接続先側の実装に依存します。`stty size`が期待した値を示さない場合は、接続先で明示的に設定してください。
 
 ```bash
 # Large フォント (28px) の場合
@@ -443,7 +458,7 @@ keyboard_event_cb() → key_queueへの書き込み
 ## ライセンス
 
 ### プログラムコード
-MIT License
+プログラムコードは[MIT License](LICENSE)です。ライセンス全文はリポジトリ直下の[`LICENSE`](LICENSE)に収録しています。
 
 ### 組み込みフォント
 本ソフトウェアは [IPAフォント](https://moji.or.jp/ipafont/) (IPAゴシック) をビットマップデータとして組み込んで使用しています。`main/fonts/lv_font_cjk_16.c` および `main/fonts/lv_font_cjk_28.c` は、IPA Font License v1.0 における派生プログラムです。ライセンスの全文は `IPA_Font_License_Agreement_v1.0.txt` に収録しています。
@@ -461,7 +476,7 @@ npm install -g lv_font_conv
 
 ### かな漢字変換辞書
 
-ユーザー辞書は候補を確定した時点で自動更新されます。初期版では個別の登録・削除UIは持たず、確定候補を同じ読みの先頭候補として記録します。
+ユーザー辞書の候補学習は設定画面の**Learning**で制御します。Offは候補順を学習せず、DeferredはRAMへ保留して60秒の無操作または16件でまとめてFlashへ保存し、Manual saveは`Ctrl+W`またはDictionary EditorのSave Learningでのみ保存します。登録・削除・インポートは明示操作としてFlash保存後にmicroSDへバックアップを試みます。詳細は[`docs/user_dictionary_persistence_design.md`](docs/user_dictionary_persistence_design.md)を参照してください。
 
 `assets/SKK-JISYO.S.txt` はSKK Development Teamの `SKK-JISYO.S` をUTF-8/LFへ変換してSPIFFSに組み込む辞書データです。`SKK-JISYO.{SML}` には **GNU General Public License version 2以降**が適用されます。[3] 辞書データのライセンス本文は `assets/GPL-2.0.txt`、出典・変換手順は `assets/README.md` に収録しています。アプリ本体のMITライセンスおよびIPAフォントライセンスとは別に、この辞書データのライセンスを保持してください。
 

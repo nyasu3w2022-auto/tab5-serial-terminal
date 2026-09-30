@@ -1,7 +1,7 @@
 # 現在の未実装案件
 
 **対象ブランチ:** `feature/sixel-basic`
-**更新日:** 2026-09-29
+**更新日:** 2026-09-30
 
 ## 概要
 
@@ -43,8 +43,8 @@ USB CDC/VCP Host、Port A UART、MBUS UART2、VT100の基本表示、UTF-8/CJK�
 
 ## References
 
-[1]: https://github.com/nyasu3w2022-auto/tab5-serial-terminal/blob/feature/local-japanese-ime/docs/skk_feature_gap_analysis.md "TAB5 ローカルSKK：追加仕様と記号・句読点の調査"
+[1]: https://github.com/nyasu3w2022-auto/tab5-serial-terminal/blob/feature/sixel-basic/docs/skk_feature_gap_analysis.md "TAB5 ローカルSKK：追加仕様と記号・句読点の調査"
 
-[2]: https://github.com/nyasu3w2022-auto/tab5-serial-terminal/blob/feature/local-japanese-ime/docs/japanese_ime_design.md "TAB5ローカル日本語入力（ローマ字SKK）設計"
+[2]: https://github.com/nyasu3w2022-auto/tab5-serial-terminal/blob/feature/sixel-basic/docs/japanese_ime_design.md "TAB5ローカル日本語入力（ローマ字SKK）設計"
 
-[3]: https://github.com/nyasu3w2022-auto/tab5-serial-terminal/blob/feature/local-japanese-ime/main/terminal.cpp "TAB5 Serial Terminal VT100 parser"
+[3]: https://github.com/nyasu3w2022-auto/tab5-serial-terminal/blob/feature/sixel-basic/main/terminal.cpp "TAB5 Serial Terminal VT100 parser"

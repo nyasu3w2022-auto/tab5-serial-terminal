@@ -1,7 +1,7 @@
 # TAB5 SKK ユーザー辞書・補助辞書設計
 
 **作成者:** Manus AI
-**対象ブランチ:** `feature/local-japanese-ime`
+**対象ブランチ:** `feature/sixel-basic`
 
 ## 目的
 
