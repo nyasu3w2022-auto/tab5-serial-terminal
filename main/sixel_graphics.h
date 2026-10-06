@@ -40,6 +40,14 @@ bool sixel_graphics_has_displayed_pixels(void);
 /** Clear every displayed Sixel pixel. Staging state is left untouched. */
 void sixel_graphics_clear_all(void);
 
+/**
+ * Move the live Sixel plane upward by a logical pixel count without copying
+ * the full PSRAM surface. Newly exposed pixels at the bottom are cleared.
+ * This is for normal full-screen terminal output scrolling only; it does not
+ * create an image history for touch scrollback.
+ */
+void sixel_graphics_scroll_up(int pixels);
+
 /** Clear a clipped logical-pixel rectangle from the displayed graphics plane. */
 void sixel_graphics_clear_rect(int x, int y, int width, int height);
 

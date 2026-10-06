@@ -314,21 +314,29 @@ void term_clear_all(void)
 
 // Scroll the scroll region up by n lines (content moves up, bottom fills with blank).
 // capture_scrollback is false for screen-editing primitives such as CSI M.
-static void term_scroll_up(int n, bool capture_scrollback = true)
+// preserve_sixel is limited to ordinary full-screen LF progression (and the
+// equivalent local-Echo Enter), not wrapping or VT100 screen editing.
+static void term_scroll_up(int n, bool capture_scrollback = true, bool preserve_sixel = false)
 {
     if (n <= 0) return;
     if (n > (scroll_bot - scroll_top + 1)) n = scroll_bot - scroll_top + 1;
-
-    // The Basic Sixel scope deliberately retains text-only scrollback. Moving
-    // terminal rows without an image history would otherwise show graphics at
-    // incorrect coordinates, so every VT100 scroll drops live graphics first.
-    term_clear_graphics_all();
 
     // Only a whole-screen upward scroll represents transcript output. Partial
     // margins and insert/delete-line operations are screen editing and must
     // not pollute scrollback.
     const bool captures_full_screen = capture_scrollback &&
                                       scroll_top == 0 && scroll_bot == TERM_ROWS - 1;
+    if (preserve_sixel && captures_full_screen) {
+        // Keep the live image aligned with ordinary output scrolling. This is
+        // not an image scrollback: pixels clipped at the top are discarded and
+        // touch history still renders only terminal cells.
+        sixel_graphics_scroll_up(n * TERM_FONT_H);
+    } else {
+        // Partial margins, explicit scrolling commands and line editing have
+        // more complex semantics, so the Basic profile keeps its safe clear.
+        term_clear_graphics_all();
+    }
+
     if (captures_full_screen) {
         for (int r = 0; r < n; r++) term_scrollback_append_row(term_buffer[r]);
     }
@@ -591,8 +599,8 @@ static void vt_finish_sixel(void)
 
     if (dec_sixel_scrolling && image.height > 0) {
         // Preserve the complete image in the fixed live terminal viewport.
-        // Each scroll intentionally discards old graphics (the text-only
-        // history policy), then shifts this image's terminal anchor upward.
+        // This scroll is part of placement for a new image, so existing live
+        // pixels are deliberately cleared before its new anchor is chosen.
         while (origin_y + image.height > SIXEL_GRAPHICS_HEIGHT && origin_row > 0) {
             term_scroll_up(1);
             --origin_row;
@@ -945,7 +953,7 @@ void term_local_echo_enter(void)
     pending_wrap = false;
     cursor_col = 0;
     if (cursor_row == scroll_bot) {
-        term_scroll_up(1);
+        term_scroll_up(1, true, true);
     } else if (cursor_row < TERM_ROWS - 1) {
         cursor_row++;
     }
@@ -1073,7 +1081,7 @@ void vt100_process_byte(uint8_t byte)
         } else if (c == '\n') {
             pending_wrap = false;
             if (cursor_row == scroll_bot) {
-                term_scroll_up(1);
+                term_scroll_up(1, true, true);
             } else if (cursor_row < TERM_ROWS - 1) {
                 cursor_row++;
             }

@@ -125,6 +125,49 @@ int main()
     assert(pixel_at(0, 0) == default_palette_one);
     assert(term_buffer[1][0].codepoint == 'Q');
 
+    // Ordinary LF output scrolling moves live pixels upward with the terminal
+    // rows. This is still live-only: the top pixels are clipped and neither
+    // touch history nor explicit VT100 scrolling retains an image.
+    reset_terminal();
+    feed("\x1bP0;0;0q#1;2;100;0;0-----~\x1b\\");
+    assert(pixel_at(0, 30) == red);
+    feed("\x1b[25;1H\n");
+    assert(pixel_at(0, 2) == red);
+    assert(pixel_at(0, 30) == 0x39e7);
+    feed("\x1b[1S");
+    assert(!sixel_graphics_has_displayed_pixels());
+
+    // Local echo uses CR+LF semantics. Its Enter at the bottom therefore uses
+    // the same narrow image-preserving path as a received LF.
+    reset_terminal();
+    feed("\x1bP0;0;0q#1;2;100;0;0-----~\x1b\\");
+    feed("\x1b[25;1H");
+    term_local_echo_enter();
+    assert(pixel_at(0, 2) == red);
+
+    // The intentionally narrow Basic policy does not retain graphics across
+    // an automatic-wrap scroll, which is a distinct terminal edit path from
+    // a received LF at the bottom row.
+    reset_terminal();
+    feed("\x1bP0;0;0q#1;2;100;0;0-----~\x1b\\");
+    assert(sixel_graphics_has_displayed_pixels());
+    feed("\x1b[25;91HAB");
+    assert(!sixel_graphics_has_displayed_pixels());
+
+    // The image plane uses a logical row ring rather than copying the full
+    // RGB565 surface for each scroll. A large shift crosses the physical end
+    // of that ring while preserving the same logical pixel location.
+    reset_terminal();
+    feed("\x1bP0;0;0q#1;2;100;0;0");
+    for (int i = 0; i < 100; ++i) feed("-");
+    feed("~\x1b\\");
+    assert(pixel_at(0, 600) == red);
+    sixel_graphics_scroll_up(500);
+    assert(pixel_at(0, 100) == red);
+    assert(pixel_at(0, 600) == 0x39e7);
+    sixel_graphics_scroll_up(106);
+    assert(!sixel_graphics_has_displayed_pixels());
+
     // Explicit terminal clearing removes live pixels, while CSI 3 J clears
     // text history only and therefore deliberately leaves an image unchanged.
     reset_terminal();
@@ -136,8 +179,8 @@ int main()
     assert(!sixel_graphics_has_displayed_pixels());
     feed("\x1bP0;0;0q#1~\x1b\\");
     assert(sixel_graphics_has_displayed_pixels());
-    // Any VT100 scroll drops the live graphic by the documented text-only
-    // history policy.
+    // Explicit VT100 scrolling drops live graphics because it is not ordinary
+    // output progression and does not have an image-history representation.
     feed("\x1b[1S");
     assert(!sixel_graphics_has_displayed_pixels());
     term_clear_all();

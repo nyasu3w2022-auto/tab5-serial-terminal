@@ -21,6 +21,7 @@ static const char *TAG = "sixel";
 static constexpr size_t PIXEL_COUNT =
     (size_t)SIXEL_GRAPHICS_WIDTH * (size_t)SIXEL_GRAPHICS_HEIGHT;
 static constexpr size_t MASK_BYTES = (PIXEL_COUNT + 7U) / 8U;
+static constexpr size_t MASK_ROW_BYTES = (size_t)SIXEL_GRAPHICS_WIDTH / 8U;
 static constexpr int SIXEL_PALETTE_SIZE = 256;
 static constexpr int SIXEL_MAX_REPEAT = SIXEL_GRAPHICS_WIDTH;
 static constexpr int SIXEL_MAX_PARAM = 1000000;
@@ -43,6 +44,9 @@ static uint8_t  *s_display_mask = nullptr;
 static uint8_t *s_stage_indices = nullptr;
 static uint8_t *s_stage_mask = nullptr;
 static size_t s_display_opaque_pixels = 0;
+// Logical Y=0 is stored at this physical row. Advancing the origin makes the
+// image follow a terminal scroll without moving the 1.7 MiB RGB565 surface.
+static int s_display_row_origin = 0;
 
 static bool s_active = false;
 static bool s_finished = false;
@@ -76,6 +80,24 @@ static inline void bit_set(uint8_t *mask, size_t index)
 static inline void bit_clear(uint8_t *mask, size_t index)
 {
     mask[index >> 3U] &= (uint8_t)~(1U << (index & 7U));
+}
+
+static int display_physical_row(int logical_y)
+{
+    int row = s_display_row_origin + logical_y;
+    if (row >= SIXEL_GRAPHICS_HEIGHT) row %= SIXEL_GRAPHICS_HEIGHT;
+    return row;
+}
+
+static void clear_display_physical_row(int physical_y)
+{
+    if (physical_y < 0 || physical_y >= SIXEL_GRAPHICS_HEIGHT || !s_display_mask) return;
+
+    uint8_t *mask_row = s_display_mask + (size_t)physical_y * MASK_ROW_BYTES;
+    for (size_t i = 0; i < MASK_ROW_BYTES; ++i) {
+        s_display_opaque_pixels -= (size_t)__builtin_popcount((unsigned)mask_row[i]);
+    }
+    memset(mask_row, 0, MASK_ROW_BYTES);
 }
 
 static uint16_t rgb565(uint8_t red, uint8_t green, uint8_t blue)
@@ -348,6 +370,7 @@ static void release_surfaces()
     s_stage_indices = nullptr;
     s_stage_mask = nullptr;
     s_display_opaque_pixels = 0;
+    s_display_row_origin = 0;
 }
 
 }  // namespace
@@ -371,6 +394,7 @@ bool sixel_graphics_init(void)
     memset(s_display_mask, 0, MASK_BYTES);
     memset(s_stage_mask, 0, MASK_BYTES);
     s_display_opaque_pixels = 0;
+    s_display_row_origin = 0;
     ESP_LOGI(TAG, "Sixel surfaces ready: %dx%d, %u bytes PSRAM",
              SIXEL_GRAPHICS_WIDTH, SIXEL_GRAPHICS_HEIGHT,
              (unsigned)(PIXEL_COUNT * 3U + MASK_BYTES * 2U));
@@ -392,6 +416,25 @@ void sixel_graphics_clear_all(void)
     if (!s_display_mask) return;
     memset(s_display_mask, 0, MASK_BYTES);
     s_display_opaque_pixels = 0;
+    s_display_row_origin = 0;
+}
+
+void sixel_graphics_scroll_up(int pixels)
+{
+    if (!s_display_mask || s_display_opaque_pixels == 0 || pixels <= 0) return;
+    if (pixels >= SIXEL_GRAPHICS_HEIGHT) {
+        sixel_graphics_clear_all();
+        return;
+    }
+
+    s_display_row_origin = (s_display_row_origin + pixels) % SIXEL_GRAPHICS_HEIGHT;
+    // The rows that become visible at the logical bottom previously held the
+    // clipped-off logical top. Clear only those physical rows; RGB565 values
+    // need not be overwritten because their opacity bits are now zero.
+    for (int logical_y = SIXEL_GRAPHICS_HEIGHT - pixels;
+         logical_y < SIXEL_GRAPHICS_HEIGHT; ++logical_y) {
+        clear_display_physical_row(display_physical_row(logical_y));
+    }
 }
 
 void sixel_graphics_clear_rect(int x, int y, int width, int height)
@@ -406,7 +449,7 @@ void sixel_graphics_clear_rect(int x, int y, int width, int height)
     if (x0 >= x1 || y0 >= y1) return;
 
     for (int row = y0; row < y1; ++row) {
-        const size_t start = (size_t)row * SIXEL_GRAPHICS_WIDTH;
+        const size_t start = (size_t)display_physical_row(row) * SIXEL_GRAPHICS_WIDTH;
         for (int column = x0; column < x1; ++column) {
             const size_t pixel = start + (size_t)column;
             if (bit_get(s_display_mask, pixel)) {
@@ -503,7 +546,8 @@ bool sixel_graphics_commit(const sixel_graphics_image_t *image, int origin_x, in
         const int display_y = origin_y + y;
         if (display_y < 0 || display_y >= SIXEL_GRAPHICS_HEIGHT) continue;
         const size_t row = (size_t)y * SIXEL_GRAPHICS_WIDTH;
-        const size_t display_row = (size_t)display_y * SIXEL_GRAPHICS_WIDTH;
+        const size_t display_row =
+            (size_t)display_physical_row(display_y) * SIXEL_GRAPHICS_WIDTH;
         for (int x = 0; x < image->width; ++x) {
             const size_t source = row + (size_t)x;
             if (!bit_get(s_stage_mask, source)) continue;
@@ -532,7 +576,9 @@ void sixel_graphics_composite_background(uint16_t *destination, int stride,
             if (s_display_pixels && s_display_mask &&
                 source_x >= 0 && source_x < SIXEL_GRAPHICS_WIDTH &&
                 source_y >= 0 && source_y < SIXEL_GRAPHICS_HEIGHT) {
-                const size_t source = (size_t)source_y * SIXEL_GRAPHICS_WIDTH + (size_t)source_x;
+                const size_t source =
+                    (size_t)display_physical_row(source_y) * SIXEL_GRAPHICS_WIDTH +
+                    (size_t)source_x;
                 out[column] = bit_get(s_display_mask, source) ? s_display_pixels[source] : background;
             } else {
                 out[column] = background;

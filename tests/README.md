@@ -18,6 +18,6 @@ g++ -std=c++17 -Wall -Wextra -Werror -I. \
 
 `terminal_scrollback_test.cpp`は、PSRAMを模したアロケータの下で、全画面スクロールの履歴化、部分スクロール領域・`CSI M`の非履歴化、履歴閲覧中の受信補正、`CSI 3 J`、固定512行リング、フォント切替時の履歴破棄を確認します。
 
-`sixel_basic_test.cpp`は、固定面のDEC SixelデコーダとVT100統合を確認します。7/8-bit DCS、RGB/HLS、透明・不透明背景、repeat、異常DCSの破棄、Sixel capabilityを含むDA応答、`CSI 2 J`／`CSI 3 J`、スクロール、RXオーバーフロー後・DCS終端欠落後の復帰を対象にします。
+`sixel_basic_test.cpp`は、固定面のDEC SixelデコーダとVT100統合を確認します。7/8-bit DCS、RGB/HLS、透明・不透明背景、repeat、異常DCSの破棄、Sixel capabilityを含むDA応答、`CSI 2 J`／`CSI 3 J`、通常のLF改行による全画面上スクロールに伴う画像追従、自動折返し・明示的スクロール時の画像消去、PSRAM画像面の行リング、RXオーバーフロー後・DCS終端欠落後の復帰を対象にします。
 
 後者2件は`esp_heap_caps.h`、LVGL色型、ESPログを最小スタブ化してASan/UBSan付きで実行しています。スタブはESP-IDF本体の動作を置き換えるものではないため、PSRAM残量、MIPI-DSI描画、USB/UART連続受信、タッチ操作、SDMMCはTab5実機での`idf.py build`・フラッシュ後に確認してください。
