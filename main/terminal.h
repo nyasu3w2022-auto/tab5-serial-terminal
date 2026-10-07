@@ -219,6 +219,15 @@ void vt100_recover_from_rx_overflow(void);
 bool vt100_is_processing_control_string(void);
 
 /**
+ * @brief Retrieve and clear received BEL (0x07) events.
+ *
+ * BEL does not alter the terminal text buffer. This bounded event count lets
+ * the main task perform optional visible and audible notification outside the
+ * byte parser, so a burst of BELL bytes cannot block serial reception.
+ */
+uint8_t vt100_take_bell_events(void);
+
+/**
  * @brief Feed one byte to the VT100 parser.
  *
  * Call this for every byte received from the remote device.

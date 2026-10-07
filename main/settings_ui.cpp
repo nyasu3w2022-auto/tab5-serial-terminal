@@ -69,6 +69,9 @@ static const char *const PUNCTUATION_LABELS[] = {
 static const char *const LEARNING_LABELS[] = {
     "Off (no learning)", "Deferred (batch)", "Manual save"
 };
+static const char *const BELL_LABELS[] = {
+    "Off", "Visual", "Sound", "Visual + Sound"
+};
 
 enum class choice_id_t : uint8_t {
     BAUD = 0,
@@ -79,6 +82,7 @@ enum class choice_id_t : uint8_t {
     INPUT_MODE,
     PUNCTUATION,
     LEARNING,
+    BELL_NOTIFICATION,
     COUNT,
 };
 
@@ -140,6 +144,7 @@ static const char *choice_name(choice_id_t id)
     case choice_id_t::INPUT_MODE:  return "Input Mode";
     case choice_id_t::PUNCTUATION: return "Punctuation";
     case choice_id_t::LEARNING:    return "Learning";
+    case choice_id_t::BELL_NOTIFICATION: return "Bell";
     case choice_id_t::COUNT:       return "";
     }
     return "";
@@ -156,6 +161,7 @@ static size_t choice_count(choice_id_t id)
     case choice_id_t::INPUT_MODE:  return sizeof(INPUT_MODE_LABELS) / sizeof(INPUT_MODE_LABELS[0]);
     case choice_id_t::PUNCTUATION: return sizeof(PUNCTUATION_LABELS) / sizeof(PUNCTUATION_LABELS[0]);
     case choice_id_t::LEARNING:    return sizeof(LEARNING_LABELS) / sizeof(LEARNING_LABELS[0]);
+    case choice_id_t::BELL_NOTIFICATION: return sizeof(BELL_LABELS) / sizeof(BELL_LABELS[0]);
     case choice_id_t::COUNT:       return 0;
     }
     return 0;
@@ -172,6 +178,7 @@ static const char *choice_label(choice_id_t id, size_t selected)
     case choice_id_t::INPUT_MODE:  return INPUT_MODE_LABELS[selected];
     case choice_id_t::PUNCTUATION: return PUNCTUATION_LABELS[selected];
     case choice_id_t::LEARNING:    return LEARNING_LABELS[selected];
+    case choice_id_t::BELL_NOTIFICATION: return BELL_LABELS[selected];
     case choice_id_t::COUNT:       return "";
     }
     return "";
@@ -221,6 +228,9 @@ static void apply_choice_to_snapshot(const choice_control_t &control)
         break;
     case choice_id_t::LEARNING:
         s_current.learning_save_mode = (app_learning_save_mode_t)control.selected;
+        break;
+    case choice_id_t::BELL_NOTIFICATION:
+        s_current.bell_notification = (app_bell_notification_mode_t)control.selected;
         break;
     case choice_id_t::COUNT:
         break;
@@ -556,10 +566,11 @@ static void save_close_cb(lv_event_t *event)
         return;
     }
 
-    ESP_LOGI(TAG, "Settings saved: baud=%" PRIu32 " iface=%d log=%d font=%d local_echo=%d input_mode=%d punct=%d learn_save=%d",
+    ESP_LOGI(TAG, "Settings saved: baud=%" PRIu32 " iface=%d log=%d font=%d local_echo=%d input_mode=%d punct=%d learn_save=%d bell=%d",
              saved.baud_rate, (int)saved.serial_if, (int)saved.log_level,
              (int)saved.font_size, (int)saved.local_echo, (int)saved.input_mode,
-             (int)saved.punctuation_style, (int)saved.learning_save_mode);
+             (int)saved.punctuation_style, (int)saved.learning_save_mode,
+             (int)saved.bell_notification);
 
     // The overlay must be removed before a font-size apply can rebuild all
     // terminal LVGL objects.
@@ -629,6 +640,10 @@ void settings_ui_open(const app_settings_t *current)
                       validated_index((int)current->font_size, choice_count(choice_id_t::FONT_SIZE), 1));
     create_choice_row(terminal_section, 340, "Echo Back:", choice_id_t::ECHO_BACK,
                       validated_index((int)current->local_echo, choice_count(choice_id_t::ECHO_BACK), 0));
+    create_choice_row(terminal_section, 406, "Bell:", choice_id_t::BELL_NOTIFICATION,
+                      validated_index((int)current->bell_notification,
+                                      choice_count(choice_id_t::BELL_NOTIFICATION),
+                                      (uint8_t)SETTINGS_DEFAULT_BELL_NOTIFICATION));
 
     lv_obj_t *skk_section = create_section(
         s_overlay, SECTION_X_RIGHT, "Japanese Input (SKK)", true);

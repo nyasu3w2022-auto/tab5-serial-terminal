@@ -57,6 +57,12 @@ public:
     /// 默认关闭，必须在 begin() 成功后调用?
     esp_err_t usb5v_enable(bool enable);
 
+    /// Enable or disable the internal speaker power amplifier through the
+    /// low-address IO expander (ADDR_LOW 0x43, P1 = SPK_EN).  The amplifier
+    /// is off after begin(); callers should only enable it while audio is
+    /// actively being played.
+    esp_err_t speaker_enable(bool enable);
+
     // ── Charging Control / 充电控制 ───────────────────────────────────────────
 
     /// Select slow (standard) or fast (QC) charging current.
@@ -160,6 +166,11 @@ public:
     const m5tab5_component_config_t& config() const;
 
     const m5tab5_runtime_t& runtime() const;
+
+    /// Return the shared SYS I2C master bus for an on-board peripheral such
+    /// as the ES8388 audio codec, or nullptr when begin() has not completed.
+    /// The returned handle remains owned by this component.
+    void* sys_i2c_master_bus() const;
 
     /// Return the native LCD panel handle created by begin(), or nullptr.
     /// 返回 begin() 创建的原?LCD 面板句柄；若不存在则返回 nullptr?

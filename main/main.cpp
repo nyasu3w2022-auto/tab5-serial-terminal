@@ -37,6 +37,7 @@
 #include "terminal.h"
 #include "sixel_graphics.h"
 #include "display.h"
+#include "bell_notification.h"
 #include "usb_serial.h"          // shared RX ring buffer, logs, keyboard queue
 #include "serial_transport.h"    // active USB / Port A / MBUS UART transport
 #include "settings.h"
@@ -82,6 +83,29 @@ static void refresh_ime_input_indicator(void)
         s_japanese_input_active,
         s_japanese_input_active && s_ime.kana_mode() == ime_kana_mode_t::KATAKANA);
     update_status_bar();
+}
+
+/**
+ * Apply coalesced terminal BEL events after a parser batch has completed.
+ *
+ * The parser itself remains side-effect free with regard to LVGL and I2S.
+ * This keeps serial processing bounded even when a peer sends many 0x07
+ * bytes in one RX chunk.
+ */
+static void service_terminal_bell_events(void)
+{
+    const uint8_t events = vt100_take_bell_events();
+    if (events == 0) return;
+
+    const app_bell_notification_mode_t mode = s_settings.bell_notification;
+    if (mode == BELL_NOTIFICATION_VISUAL || mode == BELL_NOTIFICATION_BOTH) {
+        display_trigger_visual_bell();
+    }
+    if (mode == BELL_NOTIFICATION_SOUND || mode == BELL_NOTIFICATION_BOTH) {
+        bell_notification_request_sound();
+    }
+    ESP_LOGD(TAG, "Processed %u coalesced BEL event(s), mode=%d",
+             (unsigned)events, (int)mode);
 }
 
 static void apply_ime_punctuation_style(app_punctuation_style_t style)
@@ -762,6 +786,9 @@ extern "C" void app_main(void)
         ESP_LOGW(TAG, "Sixel graphics unavailable; text terminal remains fully usable");
     }
     ui_create();
+    if (!bell_notification_init(s_tab5_board)) {
+        ESP_LOGW(TAG, "Bell sound worker unavailable; visual Bell remains usable");
+    }
     term_clear_all();
 
     // Initial welcome message (through VT100 parser)
@@ -909,6 +936,11 @@ extern "C" void app_main(void)
                 need_refresh = true;
             }
         }
+
+        // BEL does not modify terminal cells, so it needs no terminal redraw.
+        // Its visual/audio work is deferred until all RX bytes in this turn
+        // have been parsed and is independently coalesced by both consumers.
+        service_terminal_bell_events();
 
         // 3. Apply any terminal-surface drag after RX parsing. This keeps the
         // LVGL task out of terminal mutation and gives a drag the latest live

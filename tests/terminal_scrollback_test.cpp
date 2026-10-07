@@ -24,6 +24,7 @@ static void reset_terminal()
     term_set_font_size(14, 28);
     assert(term_scrollback_init());
     term_clear_all();
+    (void)vt100_take_bell_events();
     assert(term_scrollback_available());
     assert(term_scrollback_history_count() == 0);
     assert(!term_scrollback_is_viewing());
@@ -32,6 +33,15 @@ static void reset_terminal()
 int main()
 {
     reset_terminal();
+
+    // BEL is a parser event, never a printable terminal cell. Events are
+    // consumed by the application loop and bounded under a noisy peer.
+    feed_byte(0x07);
+    feed_byte(0x07);
+    assert(vt100_take_bell_events() == 2);
+    assert(vt100_take_bell_events() == 0);
+    for (int i = 0; i < 300; ++i) feed_byte(0x07);
+    assert(vt100_take_bell_events() == UINT8_MAX);
 
     // Twenty-five visible rows plus six extra physical lines leave A..F in
     // history at the default 91x25 geometry.

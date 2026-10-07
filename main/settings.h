@@ -73,6 +73,14 @@ typedef enum {
     LEARNING_SAVE_MANUAL   = 2, /**< Learn in RAM; save only on explicit user action. */
 } app_learning_save_mode_t;
 
+/** Terminal BEL (0x07) notification. Visual flash and speaker output may be combined. */
+typedef enum {
+    BELL_NOTIFICATION_OFF    = 0, /**< Ignore BEL without user feedback. */
+    BELL_NOTIFICATION_VISUAL = 1, /**< Brief visible flash only. */
+    BELL_NOTIFICATION_SOUND  = 2, /**< Short Tab5 speaker tone only. */
+    BELL_NOTIFICATION_BOTH   = 3, /**< Visible flash and speaker tone. */
+} app_bell_notification_mode_t;
+
 // ==============================================================
 // Settings Structure
 // ==============================================================
@@ -86,6 +94,7 @@ typedef struct {
     app_input_mode_t input_mode; /**< Default local keyboard input mode       */
     app_punctuation_style_t punctuation_style; /**< Japanese input punctuation style */
     app_learning_save_mode_t learning_save_mode; /**< SKK candidate learning persistence */
+    app_bell_notification_mode_t bell_notification; /**< BEL (0x07) notification mode */
 } app_settings_t;
 
 // ==============================================================
@@ -100,6 +109,7 @@ typedef struct {
 #define SETTINGS_DEFAULT_INPUT_MODE INPUT_MODE_DIRECT
 #define SETTINGS_DEFAULT_PUNCTUATION_STYLE PUNCTUATION_JAPANESE
 #define SETTINGS_DEFAULT_LEARNING_SAVE_MODE LEARNING_SAVE_DEFERRED
+#define SETTINGS_DEFAULT_BELL_NOTIFICATION BELL_NOTIFICATION_VISUAL
 
 // ==============================================================
 // API

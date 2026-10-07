@@ -13,6 +13,7 @@ M5Stack TAB5 (ESP32-P4) 向けの VT100 互換スタンドアロンシリアル�
 - **共有 RX 256 KB PSRAMリングバッファ** — USB・Port A・MBUS UARTの大量出力やSixelの連続受信を吸収。PSRAM確保失敗時のみ16KB内部RAMへ安全にフォールバック
 - **GUI 設定画面** — `Ctrl+Alt+S` で設定画面を開き、接続・表示設定と**Japanese Input (SKK)**設定を分けて表示。二択項目はタッチで直接切替、多値項目は固定候補パネルから一度のタッチで選択し、Save & CloseでNVSへ保存。`Esc`は候補パネル、次の`Esc`は未保存の設定画面を取り消す
 - **ローカル Echo Back** — 接続先に設定コマンドを送らず、Tab5自身が送信済みキー入力を表示するON/OFF設定
+- **BEL通知** — 接続先からのBELL文字（`0x07`）に対して、画面フラッシュ、内蔵スピーカー、両方、または無効を設定可能
 - **ローカルかな漢字変換** — TAB5上でローマ字をかなへ変換し、ユーザー・補助・システムSKK辞書から候補を選択。確定したUTF-8だけをシリアル接続へ送信
 - **差分描画** — 変更行のみ再描画する行単位ダーティフラグで高速表示
 - **タッチ・バックスクロール** — PSRAM上に最大512物理行を揮発保持し、通常の端末画面を上下へドラッグして過去ログを行単位で確認
@@ -124,9 +125,23 @@ img2sixel -w 1280 -h 700 image.png | pv -q -L 10k
 |  | Log Level | NONE / ERROR / WARN / INFO / DEBUG / VERBOSE | 固定候補パネル |
 |  | Font Size | Small (160×43) / Large (91×25) | 直接トグル。実際に切り替えると端末、履歴、ライブSixel画像をクリア |
 |  | Echo Back | OFF / ON | 直接トグル |
+|  | Bell | Off / Visual / Sound / Visual + Sound | 固定候補パネル |
 | Japanese Input (SKK) | Input Mode | Direct / Japanese (SKK) | 直接トグル |
 |  | Punctuation | Japanese (JP) / ASCII / Fullwidth | 固定候補パネル |
 |  | Learning | Off (no learning) / Deferred (batch) / Manual save | 固定候補パネル |
+
+### BELL（`0x07`）通知
+
+接続先がBELL文字（`0x07`、一般に`BEL`または`\a`）を送ると、TAB5は設定画面の**Bell**に従ってローカル通知を行います。BEL自体は表示文字にならず、接続先へも返信しません。既定値は**Visual**です。
+
+| Bell設定 | 動作 |
+|:---|:---|
+| Off | 通知しない |
+| Visual（既定） | 端末表示領域を約85 msだけ白くフラッシュする |
+| Sound | 内蔵ES8388スピーカーから短い音を鳴らす |
+| Visual + Sound | 画面フラッシュと音を同時に行う |
+
+音声出力のI2S/ES8388初期化とスピーカー電源は、**Sound**または**Visual + Sound**で最初のBELを受信した時点まで行いません。音は約80 ms、2 kHz、控えめな音量で鳴ります。連続したBELは画面・音声ともにまとめて扱い、音声は最短250 ms間隔に制限するため、受信処理や画面操作を停止させません。オーディオ初期化に失敗した場合も、端末およびVisual通知は継続して利用できます。
 
 ### ローカルかな漢字変換（Japanese / SKK）
 
@@ -431,6 +446,7 @@ main_task (メインループ)
   ├── screen_log_queue  ← 内部メッセージ表示
   ├── shared_rx_ringbuf ← USB / Port A / MBUS RXデータ（256 KB PSRAMリング、16 KBフォールバック）
   │     └── vt100_process_byte() → term_buffer → term_refresh_display()
+  │          └── BEL（0x07）保留イベント → Visual Bell / bell_audio_task
   └── key_queue         ← キーボード入力
         ├── Directモード → 選択中のUSB / Port A / MBUS UARTへTX
         └── Japanese (SKK)モード → ime_skk（未確定表示・候補選択）
@@ -446,6 +462,9 @@ porta_uart_rx_task / mbus_uart_rx_task
   └── uart_read_bytes() → shared_rx_ringbufへの書き込み
 
 keyboard_event_cb() → key_queueへの書き込み
+
+bell_audio_task（Sound時のみ初回にES8388/I2S初期化）
+  └── 1件キューで短いBell音を再生 → SPK_ENを再びOFF
 ```
 
 ## 既知の制限・今後の予定

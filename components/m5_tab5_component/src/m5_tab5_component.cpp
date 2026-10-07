@@ -183,6 +183,12 @@ const m5tab5_runtime_t& m5tab5_component::runtime() const
     return runtime_;
 }
 
+void* m5tab5_component::sys_i2c_master_bus() const
+{
+    if (active_variant_ == nullptr) return nullptr;
+    return m5tab5_get_sys_i2c_master_bus_handle();
+}
+
 esp_lcd_panel_handle_t m5tab5_component::lcd_panel() const
 {
     if (runtime_.display_handle == nullptr || active_variant_ == nullptr) {
@@ -282,6 +288,31 @@ esp_err_t m5tab5_component::usb5v_enable(bool enable)
     esp_err_t ret = m5tab5_extio_pi4ioe5v6408_write_pin(
         dev, static_cast<M5TAB5_ExtIo_PI4IOE5V6408_Pin>(M5TAB5_EXTIO_ADDR_HIGH_USB5V_EN), enable);
     if (ret == ESP_OK) ESP_LOGI(TAG, "USB5V_EN -> %s", enable ? "ON" : "OFF");
+    return ret;
+}
+
+esp_err_t m5tab5_component::speaker_enable(bool enable)
+{
+    static const char* TAG = "m5tab5.speaker";
+
+    if (runtime_.ioexpander_handle == nullptr) {
+        ESP_LOGE(TAG, "ioexpander_handle not available -- call begin() first");
+        return ESP_ERR_INVALID_STATE;
+    }
+
+    auto* dev = static_cast<m5tab5_extio_pi4ioe5v6408_t*>(runtime_.ioexpander_handle);
+    const auto pin = static_cast<M5TAB5_ExtIo_PI4IOE5V6408_Pin>(M5TAB5_EXTIO_ADDR_LOW_SPK_EN);
+    esp_err_t ret = m5tab5_extio_pi4ioe5v6408_set_pin_mode(
+        dev, pin, M5TAB5_EXTIO_PI4IOE5V6408_PIN_OUTPUT);
+    if (ret != ESP_OK) {
+        ESP_LOGE(TAG, "set_pin_mode SPK_EN failed: %s", esp_err_to_name(ret));
+        return ret;
+    }
+
+    ret = m5tab5_extio_pi4ioe5v6408_write_pin(dev, pin, enable);
+    if (ret != ESP_OK) {
+        ESP_LOGE(TAG, "write SPK_EN failed: %s", esp_err_to_name(ret));
+    }
     return ret;
 }
 

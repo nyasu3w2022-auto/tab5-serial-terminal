@@ -62,6 +62,9 @@ void update_status_bar(void);
 /** Set the local keyboard input mode indicator shown in the status bar. */
 void display_set_japanese_input_mode(bool japanese_active, bool katakana_active);
 
+/** Trigger a brief full-terminal visible Bell flash without changing terminal content. */
+void display_trigger_visual_bell(void);
+
 /**
  * @brief Retrieve and clear accumulated terminal-touch scroll requests.
  *

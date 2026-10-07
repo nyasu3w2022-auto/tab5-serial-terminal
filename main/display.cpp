@@ -31,6 +31,8 @@ static const char *TAG = "display";
 static lv_obj_t   *term_canvas  = NULL;
 static lv_obj_t   *status_label = NULL;
 static lv_timer_t *cursor_timer = NULL;
+static lv_obj_t   *s_visual_bell_overlay = NULL;
+static lv_timer_t *s_visual_bell_timer = NULL;
 static bool s_japanese_input_active = false;
 static bool s_katakana_input_active = false;
 // Sized for the maximum row count (Small font: 43 rows)
@@ -64,6 +66,17 @@ static lv_indev_t   *s_lvgl_touch_indev = nullptr;
 
 // Active font pointer — updated by ui_rebuild_for_font_size()
 static const lv_font_t *s_active_font = &lv_font_cjk_28;
+
+static constexpr uint32_t VISUAL_BELL_FLASH_MS = 85;
+
+static void visual_bell_timer_cb(lv_timer_t *timer)
+{
+    if (s_visual_bell_overlay == NULL) return;
+    lv_obj_add_flag(s_visual_bell_overlay, LV_OBJ_FLAG_HIDDEN);
+    // LVGL timers are periodic. Pausing here makes this an explicit one-shot
+    // pulse and avoids waking the display task while no Bell is active.
+    lv_timer_pause(timer);
+}
 
 static int clamp_touch_pending_lines(int value)
 {
@@ -343,6 +356,22 @@ void display_set_japanese_input_mode(bool japanese_active, bool katakana_active)
     s_katakana_input_active = japanese_active && katakana_active;
 }
 
+void display_trigger_visual_bell(void)
+{
+    if (s_visual_bell_overlay == NULL || s_visual_bell_timer == NULL) return;
+
+    lvgl_port_lock(0);
+    // The overlay is non-clickable, so it cannot steal touch or keyboard
+    // routing from an open settings panel or Dictionary Editor. Moving it to
+    // the foreground lets BEL remain visible even while such a modal overlay
+    // is displayed.
+    lv_obj_move_foreground(s_visual_bell_overlay);
+    lv_obj_remove_flag(s_visual_bell_overlay, LV_OBJ_FLAG_HIDDEN);
+    lv_timer_resume(s_visual_bell_timer);
+    lv_timer_reset(s_visual_bell_timer);
+    lvgl_port_unlock();
+}
+
 static void cursor_blink_cb(lv_timer_t *timer)
 {
     (void)timer;
@@ -433,7 +462,22 @@ void ui_create(void)
     lv_obj_set_size(status_label, LVGL_W, STATUS_BAR_H);
     lv_label_set_text(status_label, " TAB5 Serial Terminal - Initializing...");
 
+    // Keep visual Bell independent of the terminal canvases. It neither
+    // touches terminal state nor causes a full redraw of the MIPI-DSI surface.
+    s_visual_bell_overlay = lv_obj_create(scr);
+    lv_obj_set_size(s_visual_bell_overlay, LVGL_W, LVGL_H - STATUS_BAR_H);
+    lv_obj_set_pos(s_visual_bell_overlay, 0, 0);
+    lv_obj_set_style_bg_color(s_visual_bell_overlay, lv_color_white(), 0);
+    lv_obj_set_style_bg_opa(s_visual_bell_overlay, LV_OPA_70, 0);
+    lv_obj_set_style_border_width(s_visual_bell_overlay, 0, 0);
+    lv_obj_set_style_pad_all(s_visual_bell_overlay, 0, 0);
+    lv_obj_clear_flag(s_visual_bell_overlay, LV_OBJ_FLAG_CLICKABLE);
+    lv_obj_clear_flag(s_visual_bell_overlay, LV_OBJ_FLAG_SCROLLABLE);
+    lv_obj_add_flag(s_visual_bell_overlay, LV_OBJ_FLAG_HIDDEN);
+
     cursor_timer = lv_timer_create(cursor_blink_cb, 500, NULL);
+    s_visual_bell_timer = lv_timer_create(visual_bell_timer_cb, VISUAL_BELL_FLASH_MS, NULL);
+    lv_timer_pause(s_visual_bell_timer);
 
     lvgl_port_unlock();
 }
@@ -446,6 +490,10 @@ void ui_destroy(void)
     if (cursor_timer) {
         lv_timer_delete(cursor_timer);
         cursor_timer = NULL;
+    }
+    if (s_visual_bell_timer) {
+        lv_timer_delete(s_visual_bell_timer);
+        s_visual_bell_timer = NULL;
     }
 
     // Free row canvas pixel buffers
@@ -475,6 +523,10 @@ void ui_destroy(void)
     if (status_label) {
         lv_obj_delete(status_label);
         status_label = NULL;
+    }
+    if (s_visual_bell_overlay) {
+        lv_obj_delete(s_visual_bell_overlay);
+        s_visual_bell_overlay = NULL;
     }
 
     lvgl_port_unlock();

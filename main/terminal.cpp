@@ -475,6 +475,11 @@ static size_t     dcs_discard_bytes = 0;
 static int      utf8_bytes_left = 0;   // remaining continuation bytes expected
 static uint32_t utf8_codepoint  = 0;   // codepoint being assembled
 
+// BEL is handled by the main task after the parser batch completes. The
+// bounded counter deliberately coalesces noisy peers instead of creating an
+// unbounded notification backlog while serial bytes are arriving.
+static uint8_t  s_pending_bell_events = 0;
+
 static void vt_reset_params(void)
 {
     for (int i = 0; i < VT_MAX_PARAMS; i++) vt_params[i] = -1;
@@ -1037,6 +1042,13 @@ void vt100_set_tx_cb(vt100_tx_cb_t cb)
     s_tx_cb = cb;
 }
 
+uint8_t vt100_take_bell_events(void)
+{
+    const uint8_t events = s_pending_bell_events;
+    s_pending_bell_events = 0;
+    return events;
+}
+
 // ==============================================================
 // Main byte processor
 // ==============================================================
@@ -1100,7 +1112,9 @@ void vt100_process_byte(uint8_t byte)
             int next_tab = (cursor_col + 8) & ~7;
             cursor_col = (next_tab >= TERM_COLS) ? TERM_COLS - 1 : next_tab;
         } else if (c == '\a') {
-            // Bell - ignore
+            // BEL never occupies a cell. The main task turns this bounded
+            // event into optional visible/audio feedback after RX parsing.
+            if (s_pending_bell_events != UINT8_MAX) ++s_pending_bell_events;
         } else if (c == 0x0E || c == 0x0F) {
             // SO/SI (charset shift) - ignore
         } else if ((uint8_t)c >= 0x20 && (uint8_t)c < 0x7F) {
