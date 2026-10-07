@@ -32,20 +32,20 @@ static const char *TAG = "bell_audio";
 // A short, modestly amplified 2 kHz sine-like tone. The wave is generated
 // locally so no audio asset occupies flash or SPIFFS space.
 static constexpr int BELL_SAMPLE_RATE = 48000;
-static constexpr int BELL_DURATION_MS = 80;
+static constexpr int BELL_DURATION_MS = 200;
 static constexpr int BELL_FADE_MS = 5;
-static constexpr int BELL_AMP_SETTLE_MS = 10;
+static constexpr int BELL_AMP_SETTLE_MS = 100;
 // esp_codec_dev maps 0..100 to approximately -50..0 dB.  A 30 percent
 // setting combined with the former low-amplitude waveform was roughly -50 dB
 // at the speaker and could not serve as an audible terminal Bell.
 static constexpr int BELL_OUTPUT_VOLUME = 70;
 static constexpr int BELL_FRAMES = BELL_SAMPLE_RATE * BELL_DURATION_MS / 1000;
 static constexpr int BELL_FADE_FRAMES = BELL_SAMPLE_RATE * BELL_FADE_MS / 1000;
-// Tab5's official BSP routes the ES8388 speaker through I2S1 in mono mode.
-// Keep this identical to the board route rather than merely relying on GPIO
-// matrix routing on I2S0.
+// The Tab5 codec's esp_codec_dev adapter normalizes one-channel requests to
+// two I2S slots. Generate and declare a stereo stream explicitly so each
+// 16-bit sample pair is one complete left/right PCM frame.
 static constexpr i2s_port_t BELL_I2S_PORT = I2S_NUM_1;
-static constexpr int BELL_CHANNELS = 1;
+static constexpr int BELL_CHANNELS = 2;
 static constexpr int BELL_PCM_SAMPLES = BELL_FRAMES * BELL_CHANNELS;
 static constexpr TickType_t BELL_MIN_INTERVAL = pdMS_TO_TICKS(250);
 
@@ -84,6 +84,7 @@ static void bell_make_pcm(void)
 
         const int16_t sample = (int16_t)((int32_t)BELL_WAVE[frame % BELL_WAVE_SAMPLES] * gain / 1000);
         s_bell_pcm[frame * BELL_CHANNELS] = sample;
+        s_bell_pcm[frame * BELL_CHANNELS + 1] = sample;
     }
     s_bell_pcm_ready = true;
 }
@@ -101,6 +102,16 @@ static bool bell_audio_prepare(void)
     if (s_audio_failed || s_board == nullptr) return false;
     if (s_audio_ready) return true;
 
+    // The official Tab5 audio implementation enables SPK_EN before bringing
+    // the ES8388 online and keeps it enabled for playback. This makes the
+    // external NS4150B amplifier stable before its first PCM frame.
+    if (s_board->speaker_enable(true) != ESP_OK) {
+        ESP_LOGE(TAG, "Could not enable Tab5 speaker amplifier for audio initialization");
+        s_audio_failed = true;
+        return false;
+    }
+    vTaskDelay(pdMS_TO_TICKS(BELL_AMP_SETTLE_MS));
+
     // I2S is isolated from the terminal transport. The I2S channel stays
     // disabled until esp_codec_dev_open() establishes the fixed playback
     // format below.
@@ -116,7 +127,7 @@ static bool bell_audio_prepare(void)
     i2s_std_config_t i2s_cfg = {};
     i2s_cfg.clk_cfg = I2S_STD_CLK_DEFAULT_CONFIG(BELL_SAMPLE_RATE);
     i2s_cfg.slot_cfg = I2S_STD_PHILIPS_SLOT_DEFAULT_CONFIG(
-        I2S_DATA_BIT_WIDTH_16BIT, I2S_SLOT_MODE_MONO);
+        I2S_DATA_BIT_WIDTH_16BIT, I2S_SLOT_MODE_STEREO);
     i2s_cfg.gpio_cfg.mclk = m5::tab5::M5TAB5_PIN_I2S_MCLK;
     i2s_cfg.gpio_cfg.bclk = m5::tab5::M5TAB5_PIN_I2S_SCLK;
     i2s_cfg.gpio_cfg.ws = m5::tab5::M5TAB5_PIN_I2S_LCLK;
@@ -179,8 +190,8 @@ static bool bell_audio_prepare(void)
     es8388_cfg.gpio_if = audio_codec_new_gpio();
     es8388_cfg.codec_mode = ESP_CODEC_DEV_WORK_MODE_DAC;
     // SPK_EN is an I/O-expander bit, not a direct GPIO. speaker_enable()
-    // controls it around every beep, so the codec driver must not attempt
-    // to operate a nonexistent GPIO itself.
+    // controls it, so the codec driver must not attempt to operate a
+    // nonexistent GPIO itself.
     es8388_cfg.pa_pin = -1;
     es8388_cfg.pa_reverted = false;
     es8388_cfg.master_mode = false;
@@ -217,7 +228,7 @@ static bool bell_audio_prepare(void)
 
     bell_make_pcm();
     s_audio_ready = true;
-    ESP_LOGI(TAG, "ES8388 Bell audio ready: I2S%d mono, %d Hz, %d ms, volume=%d",
+    ESP_LOGI(TAG, "ES8388 Bell audio ready: I2S%d stereo, %d Hz, %d ms, volume=%d",
              (int)BELL_I2S_PORT, BELL_SAMPLE_RATE, BELL_DURATION_MS, BELL_OUTPUT_VOLUME);
     return true;
 }
@@ -225,17 +236,6 @@ static bool bell_audio_prepare(void)
 static void bell_audio_play_once(void)
 {
     if (!bell_audio_prepare()) return;
-
-    if (s_board->speaker_enable(true) != ESP_OK) {
-        ESP_LOGW(TAG, "Could not enable Tab5 speaker amplifier");
-        s_audio_failed = true;
-        return;
-    }
-
-    // Give the IO-expander-controlled power amplifier a conservative settle
-    // time before unmuting. This follows the official BSP's enable-before-
-    // codec order while still turning SPK_EN off after each short Bell.
-    vTaskDelay(pdMS_TO_TICKS(BELL_AMP_SETTLE_MS));
     const int unmute_result = esp_codec_dev_set_out_mute(s_playback, false);
     const int write_result = (unmute_result == ESP_CODEC_DEV_OK)
                              ? esp_codec_dev_write(s_playback, s_bell_pcm, sizeof(s_bell_pcm))
@@ -244,15 +244,15 @@ static void bell_audio_play_once(void)
         ESP_LOGW(TAG, "ES8388 Bell playback failed: unmute=%d write=%d", unmute_result, write_result);
         s_audio_failed = true;
     } else {
-        ESP_LOGI(TAG, "Bell playback started: I2S%d mono, %d bytes", (int)BELL_I2S_PORT,
+        ESP_LOGI(TAG, "Bell playback started: I2S%d stereo, %d bytes", (int)BELL_I2S_PORT,
                  (int)sizeof(s_bell_pcm));
     }
 
     // I2S writes may finish when DMA has accepted the final block. Keep the
-    // amplifier alive through the whole waveform, then mute before power-off.
+    // codec and amplifier available for following Bell requests; the startup
+    // sequence is deliberately not repeated for every short alert.
     vTaskDelay(pdMS_TO_TICKS(BELL_DURATION_MS + 12));
     (void)esp_codec_dev_set_out_mute(s_playback, true);
-    (void)s_board->speaker_enable(false);
 }
 
 static void bell_audio_task(void *arg)
