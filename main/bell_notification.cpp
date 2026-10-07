@@ -34,19 +34,28 @@ static const char *TAG = "bell_audio";
 static constexpr int BELL_SAMPLE_RATE = 48000;
 static constexpr int BELL_DURATION_MS = 80;
 static constexpr int BELL_FADE_MS = 5;
+static constexpr int BELL_AMP_SETTLE_MS = 10;
+// esp_codec_dev maps 0..100 to approximately -50..0 dB.  A 30 percent
+// setting combined with the former low-amplitude waveform was roughly -50 dB
+// at the speaker and could not serve as an audible terminal Bell.
+static constexpr int BELL_OUTPUT_VOLUME = 70;
 static constexpr int BELL_FRAMES = BELL_SAMPLE_RATE * BELL_DURATION_MS / 1000;
 static constexpr int BELL_FADE_FRAMES = BELL_SAMPLE_RATE * BELL_FADE_MS / 1000;
-static constexpr int BELL_CHANNELS = 2;
+// Tab5's official BSP routes the ES8388 speaker through I2S1 in mono mode.
+// Keep this identical to the board route rather than merely relying on GPIO
+// matrix routing on I2S0.
+static constexpr i2s_port_t BELL_I2S_PORT = I2S_NUM_1;
+static constexpr int BELL_CHANNELS = 1;
 static constexpr int BELL_PCM_SAMPLES = BELL_FRAMES * BELL_CHANNELS;
 static constexpr TickType_t BELL_MIN_INTERVAL = pdMS_TO_TICKS(250);
 
-// One complete 2 kHz cycle at 48 kHz. Peak amplitude is intentionally below
-// full scale because the ES8388 output volume is also set to 30 percent.
+// One complete 2 kHz cycle at 48 kHz. Peak amplitude remains below full scale
+// so the raised ES8388 output volume is audible without clipping this tone.
 static const int16_t BELL_WAVE[] = {
-     0,  1553,  3000,  4243,  5196,  5796,
-  6000,  5796,  5196,  4243,  3000,  1553,
-     0, -1553, -3000, -4243, -5196, -5796,
- -6000, -5796, -5196, -4243, -3000, -1553,
+     0,  3106,  6000,  8486, 10392, 11592,
+ 12000, 11592, 10392,  8486,  6000,  3106,
+     0, -3106, -6000, -8486, -10392, -11592,
+-12000, -11592, -10392, -8486, -6000, -3106,
 };
 static constexpr int BELL_WAVE_SAMPLES = sizeof(BELL_WAVE) / sizeof(BELL_WAVE[0]);
 
@@ -75,7 +84,6 @@ static void bell_make_pcm(void)
 
         const int16_t sample = (int16_t)((int32_t)BELL_WAVE[frame % BELL_WAVE_SAMPLES] * gain / 1000);
         s_bell_pcm[frame * BELL_CHANNELS] = sample;
-        s_bell_pcm[frame * BELL_CHANNELS + 1] = sample;
     }
     s_bell_pcm_ready = true;
 }
@@ -96,7 +104,7 @@ static bool bell_audio_prepare(void)
     // I2S is isolated from the terminal transport. The I2S channel stays
     // disabled until esp_codec_dev_open() establishes the fixed playback
     // format below.
-    i2s_chan_config_t channel_cfg = I2S_CHANNEL_DEFAULT_CONFIG(I2S_NUM_0, I2S_ROLE_MASTER);
+    i2s_chan_config_t channel_cfg = I2S_CHANNEL_DEFAULT_CONFIG(BELL_I2S_PORT, I2S_ROLE_MASTER);
     channel_cfg.auto_clear = true;
     esp_err_t err = i2s_new_channel(&channel_cfg, &s_i2s_tx, nullptr);
     if (err != ESP_OK) {
@@ -108,7 +116,7 @@ static bool bell_audio_prepare(void)
     i2s_std_config_t i2s_cfg = {};
     i2s_cfg.clk_cfg = I2S_STD_CLK_DEFAULT_CONFIG(BELL_SAMPLE_RATE);
     i2s_cfg.slot_cfg = I2S_STD_PHILIPS_SLOT_DEFAULT_CONFIG(
-        I2S_DATA_BIT_WIDTH_16BIT, I2S_SLOT_MODE_STEREO);
+        I2S_DATA_BIT_WIDTH_16BIT, I2S_SLOT_MODE_MONO);
     i2s_cfg.gpio_cfg.mclk = m5::tab5::M5TAB5_PIN_I2S_MCLK;
     i2s_cfg.gpio_cfg.bclk = m5::tab5::M5TAB5_PIN_I2S_SCLK;
     i2s_cfg.gpio_cfg.ws = m5::tab5::M5TAB5_PIN_I2S_LCLK;
@@ -137,7 +145,7 @@ static bool bell_audio_prepare(void)
 
     const i2s_chan_handle_t tx_handle = s_i2s_tx;
     audio_codec_i2s_cfg_t codec_i2s_cfg = {};
-    codec_i2s_cfg.port = I2S_NUM_0;
+    codec_i2s_cfg.port = BELL_I2S_PORT;
     codec_i2s_cfg.tx_handle = tx_handle;
     const audio_codec_data_if_t *data_if = audio_codec_new_i2s_data(&codec_i2s_cfg);
     if (data_if == nullptr) {
@@ -200,7 +208,7 @@ static bool bell_audio_prepare(void)
     sample_info.channel = BELL_CHANNELS;
     sample_info.bits_per_sample = 16;
     if (esp_codec_dev_open(s_playback, &sample_info) != ESP_CODEC_DEV_OK ||
-        esp_codec_dev_set_out_vol(s_playback, 30) != ESP_CODEC_DEV_OK ||
+        esp_codec_dev_set_out_vol(s_playback, BELL_OUTPUT_VOLUME) != ESP_CODEC_DEV_OK ||
         esp_codec_dev_set_out_mute(s_playback, true) != ESP_CODEC_DEV_OK) {
         ESP_LOGE(TAG, "ES8388 playback open or configuration failed");
         bell_release_failed_audio();
@@ -209,7 +217,8 @@ static bool bell_audio_prepare(void)
 
     bell_make_pcm();
     s_audio_ready = true;
-    ESP_LOGI(TAG, "ES8388 Bell audio ready: %d Hz, %d ms", BELL_SAMPLE_RATE, BELL_DURATION_MS);
+    ESP_LOGI(TAG, "ES8388 Bell audio ready: I2S%d mono, %d Hz, %d ms, volume=%d",
+             (int)BELL_I2S_PORT, BELL_SAMPLE_RATE, BELL_DURATION_MS, BELL_OUTPUT_VOLUME);
     return true;
 }
 
@@ -223,13 +232,20 @@ static void bell_audio_play_once(void)
         return;
     }
 
-    // Let the amplifier settle before unmuting; this removes the startup click
-    // on the short notification waveform.
-    vTaskDelay(pdMS_TO_TICKS(2));
-    if (esp_codec_dev_set_out_mute(s_playback, false) != ESP_CODEC_DEV_OK ||
-        esp_codec_dev_write(s_playback, s_bell_pcm, sizeof(s_bell_pcm)) != ESP_CODEC_DEV_OK) {
-        ESP_LOGW(TAG, "ES8388 Bell PCM write failed");
+    // Give the IO-expander-controlled power amplifier a conservative settle
+    // time before unmuting. This follows the official BSP's enable-before-
+    // codec order while still turning SPK_EN off after each short Bell.
+    vTaskDelay(pdMS_TO_TICKS(BELL_AMP_SETTLE_MS));
+    const int unmute_result = esp_codec_dev_set_out_mute(s_playback, false);
+    const int write_result = (unmute_result == ESP_CODEC_DEV_OK)
+                             ? esp_codec_dev_write(s_playback, s_bell_pcm, sizeof(s_bell_pcm))
+                             : ESP_CODEC_DEV_WRONG_STATE;
+    if (unmute_result != ESP_CODEC_DEV_OK || write_result != ESP_CODEC_DEV_OK) {
+        ESP_LOGW(TAG, "ES8388 Bell playback failed: unmute=%d write=%d", unmute_result, write_result);
         s_audio_failed = true;
+    } else {
+        ESP_LOGI(TAG, "Bell playback started: I2S%d mono, %d bytes", (int)BELL_I2S_PORT,
+                 (int)sizeof(s_bell_pcm));
     }
 
     // I2S writes may finish when DMA has accepted the final block. Keep the

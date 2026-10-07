@@ -312,6 +312,8 @@ esp_err_t m5tab5_component::speaker_enable(bool enable)
     ret = m5tab5_extio_pi4ioe5v6408_write_pin(dev, pin, enable);
     if (ret != ESP_OK) {
         ESP_LOGE(TAG, "write SPK_EN failed: %s", esp_err_to_name(ret));
+    } else {
+        ESP_LOGI(TAG, "SPK_EN -> %s", enable ? "ON" : "OFF");
     }
     return ret;
 }
