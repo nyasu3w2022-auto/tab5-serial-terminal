@@ -124,6 +124,17 @@ static bool bell_audio_prepare(void)
         return false;
     }
 
+    // esp_codec_dev's I2S adapter deliberately disables the supplied channel
+    // before it reconfigures the runtime sample format in esp_codec_dev_open().
+    // The channel must therefore have entered ENABLED state first.  This is
+    // also the ordering used by the official Tab5 BSP audio initializer.
+    err = i2s_channel_enable(s_i2s_tx);
+    if (err != ESP_OK) {
+        ESP_LOGE(TAG, "I2S TX channel enable failed: %s", esp_err_to_name(err));
+        bell_release_failed_audio();
+        return false;
+    }
+
     const i2s_chan_handle_t tx_handle = s_i2s_tx;
     audio_codec_i2s_cfg_t codec_i2s_cfg = {};
     codec_i2s_cfg.port = I2S_NUM_0;
