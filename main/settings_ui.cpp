@@ -119,6 +119,18 @@ static constexpr int SECTION_BUTTON_X = 196;
 static constexpr int SECTION_BUTTON_W = 374;
 static constexpr int SECTION_ROW_H = 56;
 
+// Seven Connection & Display rows must fit below the title separator (Y=50)
+// and above the fixed section bottom. Keep the existing 56 px touch target,
+// use a 4 px visual gap, and retain 10 px of bottom padding.
+static constexpr int CONNECTION_FIRST_ROW_Y = 64;
+static constexpr int CONNECTION_ROW_GAP = 4;
+static constexpr int CONNECTION_ROW_STEP = SECTION_ROW_H + CONNECTION_ROW_GAP;
+static constexpr int CONNECTION_ROW_COUNT = 7;
+static_assert(CONNECTION_FIRST_ROW_Y +
+                  (CONNECTION_ROW_COUNT - 1) * CONNECTION_ROW_STEP + SECTION_ROW_H <=
+                  SECTION_H,
+              "Connection & Display rows must remain inside their section");
+
 // A fixed picker avoids the standard LVGL dropdown popup path.
 static constexpr int PICKER_PANEL_W = 1040;
 static constexpr int PICKER_PANEL_H = 520;
@@ -641,21 +653,28 @@ void settings_ui_open(const app_settings_t *current)
 
     lv_obj_t *terminal_section = create_section(
         s_overlay, SECTION_X_LEFT, "Connection & Display", false);
-    create_choice_row(terminal_section, 76,  "Baud Rate:", choice_id_t::BAUD,
+    create_choice_row(terminal_section, CONNECTION_FIRST_ROW_Y + 0 * CONNECTION_ROW_STEP,
+                      "Baud Rate:", choice_id_t::BAUD,
                       baud_to_index(current->baud_rate));
-    create_choice_row(terminal_section, 142, "Interface:", choice_id_t::INTERFACE,
+    create_choice_row(terminal_section, CONNECTION_FIRST_ROW_Y + 1 * CONNECTION_ROW_STEP,
+                      "Interface:", choice_id_t::INTERFACE,
                       validated_index((int)current->serial_if, choice_count(choice_id_t::INTERFACE), 0));
-    create_choice_row(terminal_section, 208, "Log Level:", choice_id_t::LOG_LEVEL,
+    create_choice_row(terminal_section, CONNECTION_FIRST_ROW_Y + 2 * CONNECTION_ROW_STEP,
+                      "Log Level:", choice_id_t::LOG_LEVEL,
                       validated_index((int)current->log_level, choice_count(choice_id_t::LOG_LEVEL), 3));
-    create_choice_row(terminal_section, 274, "Font Size:", choice_id_t::FONT_SIZE,
+    create_choice_row(terminal_section, CONNECTION_FIRST_ROW_Y + 3 * CONNECTION_ROW_STEP,
+                      "Font Size:", choice_id_t::FONT_SIZE,
                       validated_index((int)current->font_size, choice_count(choice_id_t::FONT_SIZE), 1));
-    create_choice_row(terminal_section, 340, "Echo Back:", choice_id_t::ECHO_BACK,
+    create_choice_row(terminal_section, CONNECTION_FIRST_ROW_Y + 4 * CONNECTION_ROW_STEP,
+                      "Echo Back:", choice_id_t::ECHO_BACK,
                       validated_index((int)current->local_echo, choice_count(choice_id_t::ECHO_BACK), 0));
-    create_choice_row(terminal_section, 406, "Bell:", choice_id_t::BELL_NOTIFICATION,
+    create_choice_row(terminal_section, CONNECTION_FIRST_ROW_Y + 5 * CONNECTION_ROW_STEP,
+                      "Bell:", choice_id_t::BELL_NOTIFICATION,
                       validated_index((int)current->bell_notification,
                                       choice_count(choice_id_t::BELL_NOTIFICATION),
                                       (uint8_t)SETTINGS_DEFAULT_BELL_NOTIFICATION));
-    create_choice_row(terminal_section, 472, "Serial Log:", choice_id_t::SERIAL_LOG,
+    create_choice_row(terminal_section, CONNECTION_FIRST_ROW_Y + 6 * CONNECTION_ROW_STEP,
+                      "Serial Log:", choice_id_t::SERIAL_LOG,
                       validated_index((int)current->serial_log,
                                       choice_count(choice_id_t::SERIAL_LOG),
                                       (uint8_t)SETTINGS_DEFAULT_SERIAL_LOG));
