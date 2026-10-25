@@ -12,6 +12,8 @@ g++ -std=c++17 -Wall -Wextra -Werror -I. \
 /tmp/test_dictionary_transfer
 ```
 
+`sd_serial_log_state_test.cpp`は、ESP-IDFのFreeRTOS/SDMMC/FatFsを最小スタブ化した構文・状態遷移テストです。初期OFF、ON要求時の`NoSD`、生バイト入力API、OFFへの復帰、ステータス変更通知を確認します。実行には開発時に用意するスタブヘッダが必要です。実機APIを置換するものではありません。
+
 `ime_skk_test.cpp`は、ローマ字からひらがなへの変換、カタカナ切替、促音、`ん`、SKK大文字開始、送り仮名付き候補（`MiRu` → 「見る」）、候補の検索・移動・確定・取消を確認します。さらに、補助辞書`assets/SKK-JISYO.TAB5.txt`の`KiTa`→「来た」、ユーザー辞書の手動登録・先頭優先化・完全一致削除、辞書間の候補重複除去、および同梱の `assets/SKK-JISYO.S.txt` を使った実辞書検索も検証します。学習保存については、学習しない・保留保存・手動保存の各モード、RAM保留中の候補優先化、明示フラッシュを確認します。
 
 `dictionary_transfer_test.cpp`は、UTF-8/LF SKKユーザー辞書の原子的エクスポート、候補重複を除くマージ、明示的置換、不正形式の拒否と既存辞書非破壊、入力ファイル不在を確認します。microSDの物理マウントはESP-IDF実機依存のため、このホストテストの対象外です。
@@ -19,5 +21,7 @@ g++ -std=c++17 -Wall -Wextra -Werror -I. \
 `terminal_scrollback_test.cpp`は、PSRAMを模したアロケータの下で、全画面スクロールの履歴化、部分スクロール領域・`CSI M`の非履歴化、履歴閲覧中の受信補正、`CSI 3 J`、固定512行リング、フォント切替時の履歴破棄を確認します。加えて、BELL（`0x07`）が文字セルを変更せず、主タスクが取得する保留イベントとして集約・飽和することを確認します。
 
 `sixel_basic_test.cpp`は、固定面のDEC SixelデコーダとVT100統合を確認します。7/8-bit DCS、RGB/HLS、透明・不透明背景、repeat、異常DCSの破棄、Sixel capabilityを含むDA応答、`CSI 2 J`／`CSI 3 J`、通常のLF改行による全画面上スクロールに伴う画像追従、自動折返し・明示的スクロール時の画像消去、PSRAM画像面の行リング、RXオーバーフロー後・DCS終端欠落後の復帰を対象にします。
+
+SD受信ログの実装は、ESP-IDF v5.5.4の`xRingbufferCreateWithCaps`、FreeRTOSタスク、FatFs VFS、SDMMCを使うため、ホストでは構文検査のみを行います。ロガーの状態遷移、実カード容量、`fflush`/`fsync`、カード抜去、書込み禁止、Dictionary Editorとの排他、USB／Port A／MBUSの連続受信は実機確認対象です。詳細な確認表は[`docs/sd_serial_log_design.md`](../docs/sd_serial_log_design.md)にあります。
 
 後者2件は`esp_heap_caps.h`、LVGL色型、ESPログを最小スタブ化してASan/UBSan付きで実行しています。スタブはESP-IDF本体の動作を置き換えるものではないため、PSRAM残量、MIPI-DSI描画、USB/UART連続受信、タッチ操作、SDMMCはTab5実機での`idf.py build`・フラッシュ後に確認してください。

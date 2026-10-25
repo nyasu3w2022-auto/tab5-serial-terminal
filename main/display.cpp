@@ -8,6 +8,7 @@
 #include "terminal.h"
 #include "sixel_graphics.h"
 #include "serial_transport.h"
+#include "sd_serial_log.h"
 #include "ime_ui.h"
 
 #include <inttypes.h>
@@ -331,21 +332,23 @@ void update_status_bar(void)
     char buf[200];
     if (term_scrollback_is_viewing()) {
         snprintf(buf, sizeof(buf),
-                 " %s:%s  Baud:%" PRIu32 "  Input:%s  View:-%d/%d  Tap=Live",
+                 " %s:%s Baud:%" PRIu32 " Input:%s Log:%s View:-%d/%d Tap=Live",
                  serial_transport_get_name(),
                  serial_transport_get_status(),
                  serial_transport_get_baud_rate(),
                  !s_japanese_input_active ? "Direct" :
                  (s_katakana_input_active ? "JP-KATA" : "JP-HIRA"),
+                 sd_serial_log_status_text(),
                  term_scrollback_view_offset(), term_scrollback_history_count());
     } else {
         snprintf(buf, sizeof(buf),
-                 " %s:%s  Baud:%" PRIu32 "  Input:%s  ^Alt+C=Clear  ^Alt+S=Settings",
+                 " %s:%s Baud:%" PRIu32 " Input:%s Log:%s ^Alt+C=Clear ^Alt+S=Settings",
                  serial_transport_get_name(),
                  serial_transport_get_status(),
                  serial_transport_get_baud_rate(),
                  !s_japanese_input_active ? "Direct" :
-                 (s_katakana_input_active ? "JP-KATA" : "JP-HIRA"));
+                 (s_katakana_input_active ? "JP-KATA" : "JP-HIRA"),
+                 sd_serial_log_status_text());
     }
     term_update_status(buf);
 }

@@ -81,6 +81,12 @@ typedef enum {
     BELL_NOTIFICATION_BOTH   = 3, /**< Visible flash and speaker tone. */
 } app_bell_notification_mode_t;
 
+/** Whether raw received serial bytes are appended to the microSD log file. */
+typedef enum {
+    SERIAL_LOG_OFF = 0,  /**< Do not access microSD for communication logging. */
+    SERIAL_LOG_ON  = 1,  /**< Append received bytes to /TAB5-LOG/TERMLOG.TXT. */
+} app_serial_log_mode_t;
+
 // ==============================================================
 // Settings Structure
 // ==============================================================
@@ -95,6 +101,7 @@ typedef struct {
     app_punctuation_style_t punctuation_style; /**< Japanese input punctuation style */
     app_learning_save_mode_t learning_save_mode; /**< SKK candidate learning persistence */
     app_bell_notification_mode_t bell_notification; /**< BEL (0x07) notification mode */
+    app_serial_log_mode_t serial_log; /**< Raw received serial logging to microSD */
 } app_settings_t;
 
 // ==============================================================
@@ -110,6 +117,7 @@ typedef struct {
 #define SETTINGS_DEFAULT_PUNCTUATION_STYLE PUNCTUATION_JAPANESE
 #define SETTINGS_DEFAULT_LEARNING_SAVE_MODE LEARNING_SAVE_DEFERRED
 #define SETTINGS_DEFAULT_BELL_NOTIFICATION BELL_NOTIFICATION_VISUAL
+#define SETTINGS_DEFAULT_SERIAL_LOG SERIAL_LOG_OFF
 
 // ==============================================================
 // API

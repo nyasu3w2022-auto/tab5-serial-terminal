@@ -72,6 +72,9 @@ static const char *const LEARNING_LABELS[] = {
 static const char *const BELL_LABELS[] = {
     "Off", "Visual", "Sound", "Visual + Sound"
 };
+static const char *const SERIAL_LOG_LABELS[] = {
+    "OFF", "ON"
+};
 
 enum class choice_id_t : uint8_t {
     BAUD = 0,
@@ -83,6 +86,7 @@ enum class choice_id_t : uint8_t {
     PUNCTUATION,
     LEARNING,
     BELL_NOTIFICATION,
+    SERIAL_LOG,
     COUNT,
 };
 
@@ -145,6 +149,7 @@ static const char *choice_name(choice_id_t id)
     case choice_id_t::PUNCTUATION: return "Punctuation";
     case choice_id_t::LEARNING:    return "Learning";
     case choice_id_t::BELL_NOTIFICATION: return "Bell";
+    case choice_id_t::SERIAL_LOG:   return "Serial Log";
     case choice_id_t::COUNT:       return "";
     }
     return "";
@@ -162,6 +167,7 @@ static size_t choice_count(choice_id_t id)
     case choice_id_t::PUNCTUATION: return sizeof(PUNCTUATION_LABELS) / sizeof(PUNCTUATION_LABELS[0]);
     case choice_id_t::LEARNING:    return sizeof(LEARNING_LABELS) / sizeof(LEARNING_LABELS[0]);
     case choice_id_t::BELL_NOTIFICATION: return sizeof(BELL_LABELS) / sizeof(BELL_LABELS[0]);
+    case choice_id_t::SERIAL_LOG:   return sizeof(SERIAL_LOG_LABELS) / sizeof(SERIAL_LOG_LABELS[0]);
     case choice_id_t::COUNT:       return 0;
     }
     return 0;
@@ -179,6 +185,7 @@ static const char *choice_label(choice_id_t id, size_t selected)
     case choice_id_t::PUNCTUATION: return PUNCTUATION_LABELS[selected];
     case choice_id_t::LEARNING:    return LEARNING_LABELS[selected];
     case choice_id_t::BELL_NOTIFICATION: return BELL_LABELS[selected];
+    case choice_id_t::SERIAL_LOG:   return SERIAL_LOG_LABELS[selected];
     case choice_id_t::COUNT:       return "";
     }
     return "";
@@ -232,6 +239,9 @@ static void apply_choice_to_snapshot(const choice_control_t &control)
     case choice_id_t::BELL_NOTIFICATION:
         s_current.bell_notification = (app_bell_notification_mode_t)control.selected;
         break;
+    case choice_id_t::SERIAL_LOG:
+        s_current.serial_log = (app_serial_log_mode_t)control.selected;
+        break;
     case choice_id_t::COUNT:
         break;
     }
@@ -243,6 +253,7 @@ static lv_color_t active_toggle_color(choice_id_t id)
     case choice_id_t::ECHO_BACK:  return lv_color_make(0, 122, 72);
     case choice_id_t::INPUT_MODE: return lv_color_make(88, 58, 152);
     case choice_id_t::FONT_SIZE:  return lv_color_make(0, 102, 145);
+    case choice_id_t::SERIAL_LOG: return lv_color_make(115, 85, 12);
     default:                       return lv_color_make(0, 105, 165);
     }
 }
@@ -566,11 +577,11 @@ static void save_close_cb(lv_event_t *event)
         return;
     }
 
-    ESP_LOGI(TAG, "Settings saved: baud=%" PRIu32 " iface=%d log=%d font=%d local_echo=%d input_mode=%d punct=%d learn_save=%d bell=%d",
+    ESP_LOGI(TAG, "Settings saved: baud=%" PRIu32 " iface=%d log=%d font=%d local_echo=%d input_mode=%d punct=%d learn_save=%d bell=%d serial_log=%d",
              saved.baud_rate, (int)saved.serial_if, (int)saved.log_level,
              (int)saved.font_size, (int)saved.local_echo, (int)saved.input_mode,
              (int)saved.punctuation_style, (int)saved.learning_save_mode,
-             (int)saved.bell_notification);
+             (int)saved.bell_notification, (int)saved.serial_log);
 
     // The overlay must be removed before a font-size apply can rebuild all
     // terminal LVGL objects.
@@ -644,6 +655,10 @@ void settings_ui_open(const app_settings_t *current)
                       validated_index((int)current->bell_notification,
                                       choice_count(choice_id_t::BELL_NOTIFICATION),
                                       (uint8_t)SETTINGS_DEFAULT_BELL_NOTIFICATION));
+    create_choice_row(terminal_section, 472, "Serial Log:", choice_id_t::SERIAL_LOG,
+                      validated_index((int)current->serial_log,
+                                      choice_count(choice_id_t::SERIAL_LOG),
+                                      (uint8_t)SETTINGS_DEFAULT_SERIAL_LOG));
 
     lv_obj_t *skk_section = create_section(
         s_overlay, SECTION_X_RIGHT, "Japanese Input (SKK)", true);

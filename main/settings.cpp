@@ -7,6 +7,7 @@
 #include "settings.h"
 #include "serial_transport.h"
 #include "display.h"
+#include "sd_serial_log.h"
 #include "terminal.h"
 
 #include <string.h>
@@ -26,6 +27,7 @@ static const char *KEY_INPUT_MODE = "input_mode";
 static const char *KEY_PUNCTUATION = "punct";
 static const char *KEY_LEARNING_SAVE = "learn_save";
 static const char *KEY_BELL_NOTIFICATION = "bell";
+static const char *KEY_SERIAL_LOG = "serial_log";
 
 // ==============================================================
 // Load
@@ -43,6 +45,7 @@ void settings_load(app_settings_t *out)
     out->punctuation_style = SETTINGS_DEFAULT_PUNCTUATION_STYLE;
     out->learning_save_mode = SETTINGS_DEFAULT_LEARNING_SAVE_MODE;
     out->bell_notification = SETTINGS_DEFAULT_BELL_NOTIFICATION;
+    out->serial_log = SETTINGS_DEFAULT_SERIAL_LOG;
 
     nvs_handle_t h;
     esp_err_t err = nvs_open(NVS_NS, NVS_READONLY, &h);
@@ -95,13 +98,17 @@ void settings_load(app_settings_t *out)
                                ? (app_bell_notification_mode_t)v8
                                : SETTINGS_DEFAULT_BELL_NOTIFICATION;
     }
+    if (nvs_get_u8(h, KEY_SERIAL_LOG, &v8) == ESP_OK) {
+        out->serial_log = (v8 == (uint8_t)SERIAL_LOG_ON)
+                        ? SERIAL_LOG_ON : SERIAL_LOG_OFF;
+    }
 
     nvs_close(h);
-    ESP_LOGI(TAG, "Settings loaded: baud=%"PRIu32" iface=%d log=%d font=%d local_echo=%d input_mode=%d punct=%d learn_save=%d bell=%d",
+    ESP_LOGI(TAG, "Settings loaded: baud=%"PRIu32" iface=%d log=%d font=%d local_echo=%d input_mode=%d punct=%d learn_save=%d bell=%d serial_log=%d",
              out->baud_rate, (int)out->serial_if, (int)out->log_level,
              (int)out->font_size, (int)out->local_echo, (int)out->input_mode,
              (int)out->punctuation_style, (int)out->learning_save_mode,
-             (int)out->bell_notification);
+             (int)out->bell_notification, (int)out->serial_log);
 }
 
 // ==============================================================
@@ -127,15 +134,16 @@ bool settings_save(const app_settings_t *s)
     ok &= (nvs_set_u8 (h, KEY_PUNCTUATION, (uint8_t)s->punctuation_style) == ESP_OK);
     ok &= (nvs_set_u8 (h, KEY_LEARNING_SAVE, (uint8_t)s->learning_save_mode) == ESP_OK);
     ok &= (nvs_set_u8 (h, KEY_BELL_NOTIFICATION, (uint8_t)s->bell_notification) == ESP_OK);
+    ok &= (nvs_set_u8 (h, KEY_SERIAL_LOG, (uint8_t)s->serial_log) == ESP_OK);
     ok &= (nvs_commit(h) == ESP_OK);
 
     nvs_close(h);
     if (ok) {
-        ESP_LOGI(TAG, "Settings saved: baud=%"PRIu32" iface=%d log=%d font=%d local_echo=%d input_mode=%d punct=%d learn_save=%d bell=%d",
+        ESP_LOGI(TAG, "Settings saved: baud=%"PRIu32" iface=%d log=%d font=%d local_echo=%d input_mode=%d punct=%d learn_save=%d bell=%d serial_log=%d",
                  s->baud_rate, (int)s->serial_if, (int)s->log_level,
                  (int)s->font_size, (int)s->local_echo, (int)s->input_mode,
                  (int)s->punctuation_style, (int)s->learning_save_mode,
-                 (int)s->bell_notification);
+                 (int)s->bell_notification, (int)s->serial_log);
     } else {
         ESP_LOGE(TAG, "Settings save failed (partial write)");
     }
@@ -186,6 +194,10 @@ void settings_apply(const app_settings_t *s)
     if (transport_err == ESP_OK) {
         serial_transport_send_window_size();
     }
+
+    // This only requests a background state change. Mounting, file opening,
+    // synchronization, and failures stay out of the settings/LVGL task.
+    sd_serial_log_configure(s->serial_log == SERIAL_LOG_ON);
 
     // Refresh the status bar after a baud-rate or interface change.
     update_status_bar();

@@ -45,6 +45,8 @@
 #include "ime_skk.h"
 #include "ime_ui.h"
 #include "dictionary_ui.h"
+#include "sd_dictionary.h"
+#include "sd_serial_log.h"
 
 static const char *TAG = "main";
 
@@ -802,6 +804,12 @@ extern "C" void app_main(void)
 
     // ---- Shared serial infrastructure (queues, RX ring buffer, logs) ----
     usb_init();
+    if (!sd_dictionary_init()) {
+        ESP_LOGW(TAG, "Shared SD session unavailable; SD dictionary and serial logging will fail safely");
+    }
+    if (!sd_serial_log_init()) {
+        ESP_LOGW(TAG, "SD serial logging worker unavailable; terminal operation continues");
+    }
     init_ime_dictionary_storage();
     apply_ime_learning_save_mode(s_settings.learning_save_mode);
     serial_transport_init();
@@ -901,6 +909,10 @@ extern "C" void app_main(void)
                 rx_data = (uint8_t *)xRingbufferReceiveUpTo(rx_rb, &rx_len, 0, receive_limit);
                 if (rx_data == NULL || rx_len == 0) break;
 
+                // Copy raw received bytes before VT100 interpretation. The
+                // logger never waits here; a slow, full, removed, or read-only
+                // SD card must not make the terminal receiver fall behind.
+                sd_serial_log_enqueue_rx(rx_data, rx_len);
                 for (size_t i = 0; i < rx_len; i++) vt100_process_byte(rx_data[i]);
                 vRingbufferReturnItem(rx_rb, rx_data);
                 rx_processed += rx_len;
@@ -941,6 +953,10 @@ extern "C" void app_main(void)
         // Its visual/audio work is deferred until all RX bytes in this turn
         // have been parsed and is independently coalesced by both consumers.
         service_terminal_bell_events();
+
+        // The SD worker never touches LVGL. Reflect asynchronous state changes
+        // (mount, full card, removal, queue drop, retry) from this main task.
+        if (sd_serial_log_take_status_changed()) update_status_bar();
 
         // 3. Apply any terminal-surface drag after RX parsing. This keeps the
         // LVGL task out of terminal mutation and gives a drag the latest live
