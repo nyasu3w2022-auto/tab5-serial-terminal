@@ -11,7 +11,7 @@ M5Stack TAB5 (ESP32-P4) 向けの VT100 互換スタンドアロンシリアル�
 - **pending wrap（遅延折り返し）** — VT100 仕様に準拠した行末処理。余分なスクロールを防止
 - **DSR / DA 応答** — `ESC[6n`（カーソル位置報告要求）および `ESC[c`（デバイス属性要求）に応答。bash/readline がブロックしない
 - **共有 RX 256 KB PSRAMリングバッファ** — USB・Port A・MBUS UARTの大量出力やSixelの連続受信を吸収。PSRAM確保失敗時のみ16KB内部RAMへ安全にフォールバック
-- **GUI 設定画面** — `Ctrl+Alt+S` で設定画面を開き、接続・表示設定と**Japanese Input (SKK)**設定を分けて表示。二択項目はタッチで直接切替、多値項目は固定候補パネルから一度のタッチで選択し、Save & CloseでNVSへ保存。`Esc`は候補パネル、次の`Esc`は未保存の設定画面を取り消す
+- **GUI 設定画面** — `Ctrl+Alt+S` で設定画面を開き、接続・表示設定と**Japanese Input (SKK)**設定を分けて表示。Connection & Displayの7項目は固定パネル内に収め、二択項目はタッチで直接切替、多値項目は固定候補パネルから一度のタッチで選択し、Save & CloseでNVSへ保存。`Esc`は候補パネル、次の`Esc`は未保存の設定画面を取り消す
 - **ローカル Echo Back** — 接続先に設定コマンドを送らず、Tab5自身が送信済みキー入力を表示するON/OFF設定
 - **BEL通知** — 接続先からのBELL文字（`0x07`）に対して、画面フラッシュ、内蔵スピーカー、両方、または無効を設定可能
 - **SD受信ログ** — 選択中の接続から受信した生バイト列をmicroSDの単一ファイルへ非同期追記。カード障害時も端末表示・通信を優先して継続
@@ -118,6 +118,8 @@ img2sixel -w 1280 -h 700 image.png | pv -q -L 10k
 ### 設定画面
 
 `Ctrl+Alt+S`で開く設定画面は、**Connection & Display**と**Japanese Input (SKK)**を分けて表示します。値をタッチしても、その時点ではNVS・接続方式・画面表示は変更されません。**Save & Close**で保存・適用し、Escは開いている候補パネル、次のEscは設定画面全体をキャンセルします。
+
+左側のConnection & Displayは、下表の7項目を高さ56 px・行間4 pxの固定行として縦に並べます。末尾の**Serial Log**も同じパネル内に収め、パネル下端との間に10 pxの余白を確保しています。下部の**Save & Close**の拡張タッチ領域とも重なりません。
 
 | 区分 | 項目 | 選択肢 | 操作 |
 |:---|:---|:---|:---|
@@ -471,6 +473,7 @@ stty rows 43 cols 160
 main_task (メインループ)
   ├── screen_log_queue  ← 内部メッセージ表示
   ├── shared_rx_ringbuf ← USB / Port A / MBUS RXデータ（256 KB PSRAMリング、16 KBフォールバック）
+  │     ├── sd_serial_log_enqueue_rx() → SDログ用PSRAMキュー（Serial Log=ON時）
   │     └── vt100_process_byte() → term_buffer → term_refresh_display()
   │          └── BEL（0x07）保留イベント → Visual Bell / bell_audio_task
   └── key_queue         ← キーボード入力
@@ -489,8 +492,11 @@ porta_uart_rx_task / mbus_uart_rx_task
 
 keyboard_event_cb() → key_queueへの書き込み
 
+sd_serial_log_task（Serial Log=ON時）
+  └── SDログ用PSRAMキュー → sd_dictionary共有SDセッション → /TAB5-LOG/TERMLOG.TXTへ追記
+
 bell_audio_task（Sound時のみ初回にES8388/I2S初期化）
-  └── 1件キューで短いBell音を再生 → SPK_ENを再びOFF
+  └── 1件キューで短いBell音を再生。初期化成功後はSPK_ENをONのまま維持
 ```
 
 ## 既知の制限・今後の予定

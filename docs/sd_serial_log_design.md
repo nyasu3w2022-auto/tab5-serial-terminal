@@ -1,7 +1,7 @@
 # SDカード通信ログ設計
 
 **対象ブランチ:** `feature/sd-serial-log`
-**更新日:** 2026-10-25
+**更新日:** 2026-10-26
 
 ## 目的と範囲
 
@@ -19,6 +19,12 @@
 | 耐障害同期 | 64 KiBごと、または2秒ごとの早い方で`fflush`→`fsync` |
 | 最低空き容量 | 2 MiB（以下で`LOW`停止） |
 | NoSD/IO再試行 | 30秒間隔 |
+
+## 設定UI
+
+`Ctrl+Alt+S`で開くSettings画面の**Connection & Display**セクションでは、`Serial Log`を既存の接続・表示項目と同じ固定行として表示する。`Serial Log`は二択の直接トグルであり、値をタッチすると`OFF`と`ON`を切り替える。固定候補パネルは開かない。ほかの設定と同様に、NVSへの保存と実際のロガー開始・停止は**Save & Close**を押した時点で行う。Escによるキャンセルでは設定変更を破棄する。
+
+Connection & Displayは7行（Baud Rate、Interface、Log Level、Font Size、Echo Back、Bell、Serial Log）である。各操作ボタンは高さ56 px、行間は4 pxで、Serial Logを含む全行をパネル内へ収める。最終行の下には10 pxの余白を残し、画面下部のSave & Closeの拡張タッチ領域と重ならない。実装では行数・高さ・間隔に対するコンパイル時境界検査を置き、将来項目を追加してもパネル外への配置を防ぐ。
 
 ## 実行経路と優先順位
 
