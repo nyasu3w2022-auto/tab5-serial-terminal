@@ -343,7 +343,7 @@ Dictionary Editorの**Add / Promote**、**Delete Exact**、**Save Learning**、�
 
 ### 前提条件
 
-- **ESP-IDF v5.5.4**（検証済み）。本プロジェクトは`driver/sdmmc_host.h`と`esp_driver_sdmmc`を使用するため、v5.5.4未満はサポート対象外です。v5.5.4より新しい版は未検証です。
+- **ESP-IDF v5.5.4**（アプリケーションのビルド・実機検証済み）。本プロジェクトは`driver/sdmmc_host.h`と`esp_driver_sdmmc`を使用するため、v5.5.4未満はサポート対象外です。v5.5.6では後述のUSB構成選択パッチの適用・逆適用は確認済みですが、アプリケーション全体のビルド・実機動作は未検証です。
 - ESP32-P4 ターゲットのサポート
 
 ### ビルド手順
@@ -375,30 +375,42 @@ idf.py -p /dev/ttyACM0 flash monitor
 | `espressif/usb_host_cp210x_vcp` | ^2.2 |
 | `espressif/usb_host_ftdi_vcp` | ^2.1 |
 
-## ESP-IDF ライブラリへのパッチ
+## USB構成 #2 選択のためのESP-IDFパッチ
 
-Raspberry Pi の `g_serial` ガジェットは USB コンフィギュレーション #2 を使用します。ESP-IDF の USB ホストライブラリはデフォルトでコンフィギュレーション #1 を選択するため、そのままでは認識されません。リポジトリに含まれる `enum.c.diff` を適用する必要があります。
+Raspberry Piの`g_serial`ガジェットは、構成記述子が1個でも`bConfigurationValue=2`を使用します。USB仕様上、構成値は記述子の添字とは別の値です。しかしESP-IDF v5.5.4およびv5.5.6のUSB列挙コードは、構成値を記述子添字へ単純に変換し、構成数を超える値を不正として扱います。そのため、アプリケーション側の列挙フィルタで構成値2を選択しても、そのままでは`g_serial`を列挙できません。
+
+リポジトリの`enum.c.diff`は、構成数を保持して要求する記述子添字を範囲内へ収めた上で、`SET_CONFIGURATION(2)`を送れるようにする回避策です。一般的なUSBシリアルデバイス（CH34x、CP210x、FTDI等）は構成値1を使用するため、影響を受けません。
 
 ### パッチ対象ファイル
 
 ```
-{ESP-IDF インストールディレクトリ}/components/usb/host/enum.c
+{ESP-IDF インストールディレクトリ}/components/usb/enum.c
 ```
 
 Windows（ESP-IDF Tools Installer）の場合の典型的なパス：
 ```
-C:\Espressif\frameworks\esp-idf-v5.x.x\components\usb\host\enum.c
+C:\Espressif\frameworks\esp-idf-v5.x.x\components\usb\enum.c
 ```
 
 ### 適用方法
 
 ```bash
-# ESP-IDF のソースディレクトリに移動して適用
-cd C:\Espressif\frameworks\esp-idf-v5.x.x
-patch -p0 < path/to/tab5-serial-terminal/enum.c.diff
+# GNU patchを利用できるシェル（例: Git Bash）で、ESP-IDFのルートへ移動する
+cd /c/Espressif/frameworks/esp-idf-v5.x.x
+
+# まず適用可能であることを確認する。失敗した場合は強制適用しない
+patch --dry-run -p1 < /path/to/tab5-serial-terminal/enum.c.diff
+
+# ドライランが成功した場合だけ適用する
+patch -p1 < /path/to/tab5-serial-terminal/enum.c.diff
+
+# 変更対象がこの1ファイルであることを確認する
+git diff -- components/usb/enum.c
 ```
 
-**注意:** このパッチは ESP-IDF のシステムファイルを変更します。ESP-IDF をアップデートした場合は再度適用が必要です。なお、一般的な USB シリアルデバイス（CH34x、CP210x、FTDI 等）はコンフィギュレーション #1 を使用するため、このパッチの影響を受けません。
+**確認済みの適用対象:** 上記の`enum.c.diff`は、公式ESP-IDF **v5.5.4**および**v5.5.6**のクリーンな`components/usb/enum.c`に対して、ESP-IDFルートから`patch --dry-run -p1`、実適用、`patch --dry-run -R -p1`の順に成功することを確認しています。これはパッチの文脈と適用手順の確認であり、v5.5.6での本アプリケーション全体のビルド・実機検証を意味しません。
+
+**注意:** このパッチはESP-IDFのシステムファイルを変更します。将来のESP-IDFへ更新した場合は、必ず上記のドライランを先に実行してください。ドライランが失敗した版には、強制適用せず、対象版の`components/usb/enum.c`との差分を確認してから対応します。
 
 ## Port A UART 接続
 
