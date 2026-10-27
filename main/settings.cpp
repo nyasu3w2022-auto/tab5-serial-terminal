@@ -182,11 +182,16 @@ void settings_apply(const app_settings_t *s)
     // Apply font size only when it differs from the active geometry.
     // A real size change clears the terminal and rebuilds the display.
     // Small: 16px font (8px half-width)  → 160 cols × 43 rows
-    // Large: 28px font (14px half-width) →  91 cols × 25 rows
+    // Large: 28px font (14px half-width) →  80 cols × 25 rows
     const int wanted_font_w = (s->font_size == FONT_SIZE_SMALL) ? 8 : 14;
     const int wanted_font_h = (s->font_size == FONT_SIZE_SMALL) ? 16 : 28;
     if (TERM_FONT_W != wanted_font_w || TERM_FONT_H != wanted_font_h) {
         ui_rebuild_for_font_size(wanted_font_w, wanted_font_h);
+    } else {
+        // Besides the cell dimensions, term_set_font_size() owns the logical
+        // terminal viewport. Run it even when the selected font has not
+        // changed so boot-time Large (80x25) also installs its Sixel clip.
+        term_set_font_size(wanted_font_w, wanted_font_h);
     }
 
     // Notify a connected peer about the active terminal geometry. For USB

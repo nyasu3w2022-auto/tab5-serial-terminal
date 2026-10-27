@@ -60,6 +60,12 @@ static int s_scrollback_touch_accum_y = 0;
 static constexpr int TOUCH_TAP_SLOP_PX = 8;
 static constexpr int TOUCH_MAX_PENDING_LINES = TERM_SCROLLBACK_MAX_LINES;
 
+// Large (80x25) reserves 80 logical pixels at both sides of its 1120px text
+// viewport. This deliberately subdued blue-gray distinguishes the unused
+// physical screen area from an ANSI black terminal background without
+// competing with terminal content or the status bar.
+static constexpr uint16_t TERM_SIDE_MARGIN_RGB565 = 0x10A2;
+
 static constexpr uint32_t LCD_H_RES = 720;
 static constexpr uint32_t LCD_V_RES = 1280;
 static lv_display_t *s_lvgl_disp        = nullptr;
@@ -219,6 +225,21 @@ static void term_rebuild_row(int r)
     const TermCell *source_row = term_scrollback_display_row(r);
     if (source_row == NULL) return;
 
+    // Row canvases remain full LCD width so touch handling and canvas lifetime
+    // do not change between fonts. Paint only the physical area outside the
+    // active terminal viewport as a subdued side margin. For Small, the
+    // viewport is the complete row, so both loops are naturally empty.
+    const int viewport_right = TERM_VIEWPORT_X + TERM_VIEWPORT_WIDTH;
+    for (int y = 0; y < TERM_FONT_H; ++y) {
+        uint16_t *row = buf + (size_t)y * LVGL_W;
+        for (int x = 0; x < TERM_VIEWPORT_X; ++x) {
+            row[x] = TERM_SIDE_MARGIN_RGB565;
+        }
+        for (int x = viewport_right; x < LVGL_W; ++x) {
+            row[x] = TERM_SIDE_MARGIN_RGB565;
+        }
+    }
+
     for (int c = 0; c < TERM_COLS; c++) {
         const TermCell *cell = &source_row[c];
 
@@ -238,11 +259,12 @@ static void term_rebuild_row(int r)
         uint32_t cp = cell->codepoint;
         bool is_wide = (cell->wide == 1);
         int cell_width = is_wide ? (TERM_FONT_W * 2) : TERM_FONT_W;
-        int cx_start = c * TERM_FONT_W;
+        int cx_start = TERM_VIEWPORT_X + c * TERM_FONT_W;
 
-        // Clamp to buffer width
-        if (cx_start + cell_width > LVGL_W) cell_width = LVGL_W - cx_start;
-        if (cx_start >= LVGL_W) continue;
+        // Clamp to the terminal viewport rather than the whole LCD. This
+        // keeps a wide character at the right edge from entering the margin.
+        if (cx_start + cell_width > viewport_right) cell_width = viewport_right - cx_start;
+        if (cx_start >= viewport_right) continue;
 
         draw_glyph(buf, cx_start, cell_width, font, cp, fg16, bg16,
                    r * TERM_FONT_H,

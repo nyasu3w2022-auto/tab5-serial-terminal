@@ -30,9 +30,16 @@
 #define LVGL_H          720    // LVGL logical height (after 90-degree rotation)
 #define STATUS_BAR_H    20
 
-// Maximum terminal buffer dimensions (sized for the smallest font: 8px wide, 16px tall)
-// Small (16px): 160 cols x 43 rows
-// Large (28px):  91 cols x 25 rows
+// Fixed logical terminal geometries. The Small font uses the complete logical
+// display width. The Large font deliberately reserves side margins so common
+// serial peers can use the conventional 80 x 25 geometry without shrinking
+// the readable 28px font.
+#define TERM_SMALL_COLS  160
+#define TERM_SMALL_ROWS  43
+#define TERM_LARGE_COLS   80
+#define TERM_LARGE_ROWS   25
+
+// Maximum terminal buffer dimensions (sized for the Small font).
 #define TERM_COLS_MAX   160
 #define TERM_ROWS_MAX   43
 
@@ -41,18 +48,24 @@
 // scrollback.
 #define TERM_SCROLLBACK_MAX_LINES 512
 
-// Runtime font geometry — set by term_set_font_size(), read by display and VT100 parser.
-// These are the *active* dimensions used for all terminal operations.
+// Runtime font and viewport geometry — set by term_set_font_size(), read by
+// display and the VT100 parser. These are the active dimensions used for all
+// terminal operations. The viewport is in LVGL logical pixels; Large has an
+// 80px margin on each side, while Small starts at x=0 and fills the display.
 extern int g_term_font_w;   // half-width cell width in pixels
 extern int g_term_font_h;   // cell height in pixels
-extern int g_term_cols;     // active number of columns  (LVGL_W / g_term_font_w)
+extern int g_term_cols;     // active logical number of columns
 extern int g_term_rows;     // active number of rows     ((LVGL_H - STATUS_BAR_H) / g_term_font_h)
+extern int g_term_viewport_x;      // active terminal viewport left edge in pixels
+extern int g_term_viewport_width;  // active terminal viewport width in pixels
 
 // Convenience macros that resolve to the runtime variables
 #define TERM_FONT_W  g_term_font_w
 #define TERM_FONT_H  g_term_font_h
 #define TERM_COLS    g_term_cols
 #define TERM_ROWS    g_term_rows
+#define TERM_VIEWPORT_X      g_term_viewport_x
+#define TERM_VIEWPORT_WIDTH  g_term_viewport_width
 
 // ==============================================================
 // Terminal Cell and Color Definitions

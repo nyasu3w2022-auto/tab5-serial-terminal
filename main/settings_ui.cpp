@@ -55,7 +55,7 @@ static const char *const LOG_LABELS[] = {
     "NONE", "ERROR", "WARN", "INFO", "DEBUG", "VERBOSE"
 };
 static const char *const FONT_LABELS[] = {
-    "Small (160x43)", "Large (91x25)"
+    "Small (160x43)", "Large (80x25)"
 };
 static const char *const ECHO_LABELS[] = {
     "OFF", "ON"
