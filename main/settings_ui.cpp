@@ -161,7 +161,7 @@ static const char *choice_name(choice_id_t id)
     case choice_id_t::PUNCTUATION: return "Punctuation";
     case choice_id_t::LEARNING:    return "Learning";
     case choice_id_t::BELL_NOTIFICATION: return "Bell";
-    case choice_id_t::SERIAL_LOG:   return "Serial Log";
+    case choice_id_t::SERIAL_LOG:   return "RX Log (SD)";
     case choice_id_t::COUNT:       return "";
     }
     return "";
@@ -674,7 +674,7 @@ void settings_ui_open(const app_settings_t *current)
                                       choice_count(choice_id_t::BELL_NOTIFICATION),
                                       (uint8_t)SETTINGS_DEFAULT_BELL_NOTIFICATION));
     create_choice_row(terminal_section, CONNECTION_FIRST_ROW_Y + 6 * CONNECTION_ROW_STEP,
-                      "Serial Log:", choice_id_t::SERIAL_LOG,
+                      "RX Log (SD):", choice_id_t::SERIAL_LOG,
                       validated_index((int)current->serial_log,
                                       choice_count(choice_id_t::SERIAL_LOG),
                                       (uint8_t)SETTINGS_DEFAULT_SERIAL_LOG));

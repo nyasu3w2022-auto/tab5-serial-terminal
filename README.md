@@ -126,7 +126,7 @@ img2sixel -w 1120 -h 700 image.png | pv -q -L 10k
 
 `Ctrl+Alt+S`で開く設定画面は、**Connection & Display**と**Japanese Input (SKK)**を分けて表示します。値をタッチしても、その時点ではNVS・接続方式・画面表示は変更されません。**Save & Close**で保存・適用し、Escは開いている候補パネル、次のEscは設定画面全体をキャンセルします。
 
-左側のConnection & Displayは、下表の7項目を高さ56 px・行間4 pxの固定行として縦に並べます。末尾の**Serial Log**も同じパネル内に収め、パネル下端との間に10 pxの余白を確保しています。下部の**Save & Close**の拡張タッチ領域とも重なりません。
+左側のConnection & Displayは、下表の7項目を高さ56 px・行間4 pxの固定行として縦に並べます。末尾の**RX Log (SD)**も同じパネル内に収め、パネル下端との間に10 pxの余白を確保しています。下部の**Save & Close**の拡張タッチ領域とも重なりません。
 
 | 区分 | 項目 | 選択肢 | 操作 |
 |:---|:---|:---|:---|
@@ -136,14 +136,14 @@ img2sixel -w 1120 -h 700 image.png | pv -q -L 10k
 |  | Font Size | Small (160×43) / Large (91×25) / Large (80×25) | 固定候補パネル。実際に切り替えると端末、履歴、ライブSixel画像をクリア |
 |  | Echo Back | OFF / ON | 直接トグル |
 |  | Bell | Off / Visual / Sound / Visual + Sound | 固定候補パネル |
-|  | Serial Log | OFF / ON | 直接トグル |
+|  | RX Log (SD) | OFF / ON | 直接トグル |
 | Japanese Input (SKK) | Input Mode | Direct / Japanese (SKK) | 直接トグル |
 |  | Punctuation | Japanese (JP) / ASCII / Fullwidth | 固定候補パネル |
 |  | Learning | Off (no learning) / Deferred (batch) / Manual save | 固定候補パネル |
 
 ### SDカード通信ログ
 
-設定画面の **Serial Log** を **ON** にして **Save & Close** を押すと、選択中のUSB Serial／Port A UART／MBUS UARTから**受信**した生のバイト列を、FAT32形式のmicroSDカード上の`/TAB5-LOG/TERMLOG.TXT`へ追記します。初期値は**OFF**で、設定はNVSへ保存されます。送信キー、Tab5が返すVT100応答、日時ヘッダは記録しません。したがってUTF-8、VT100制御列、Sixel本体を含め、端末が解析した入力を文字列化せずに保存します。
+設定画面の **RX Log (SD)** を **ON** にして **Save & Close** を押すと、選択中のUSB Serial／Port A UART／MBUS UARTから**受信**した生のバイト列を、FAT32形式のmicroSDカード上の`/TAB5-LOG/TERMLOG.TXT`へ追記します。初期値は**OFF**で、設定はNVSへ保存されます。送信キー、Tab5が返すVT100応答、日時ヘッダは記録しません。したがってUTF-8、VT100制御列、Sixel本体を含め、端末が解析した入力を文字列化せずに保存します。
 
 ファイル名はFATFSの長いファイル名設定に依存しない8.3形式です。ON/OFFや再起動をまたいでも同じファイルへ追記し、自動ローテーション・上書き・古いログの削除は行いません。PCへ取り出して退避または削除してください。ログが有効な間、SDライターは64 KiBごと、または2秒ごとの早い方で`fflush`と`fsync`を実行します。電源断時に失われ得る範囲は原則として最後の同期以降です。
 
@@ -495,7 +495,7 @@ stty rows 43 cols 160
 main_task (メインループ)
   ├── screen_log_queue  ← 内部メッセージ表示
   ├── shared_rx_ringbuf ← USB / Port A / MBUS RXデータ（256 KB PSRAMリング、16 KBフォールバック）
-  │     ├── sd_serial_log_enqueue_rx() → SDログ用PSRAMキュー（Serial Log=ON時）
+  │     ├── sd_serial_log_enqueue_rx() → SDログ用PSRAMキュー（RX Log (SD)=ON時）
   │     └── vt100_process_byte() → term_buffer → term_refresh_display()
   │          └── BEL（0x07）保留イベント → Visual Bell / bell_audio_task
   └── key_queue         ← キーボード入力
@@ -514,7 +514,7 @@ porta_uart_rx_task / mbus_uart_rx_task
 
 keyboard_event_cb() → key_queueへの書き込み
 
-sd_serial_log_task（Serial Log=ON時）
+sd_serial_log_task（RX Log (SD)=ON時）
   └── SDログ用PSRAMキュー → sd_dictionary共有SDセッション → /TAB5-LOG/TERMLOG.TXTへ追記
 
 bell_audio_task（Sound時のみ初回にES8388/I2S初期化）

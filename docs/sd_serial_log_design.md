@@ -5,7 +5,7 @@
 
 ## 目的と範囲
 
-`Serial Log`設定がONのとき、現在選択されているUSB CDC/VCP、Port A UART、またはMBUS UARTから共通RXリングバッファへ届いた受信バイト列を、microSDカードの`/TAB5-LOG/TERMLOG.TXT`へ追記する。ログはUTF-8、VT100制御列、Sixel DCSを含む**生バイト列**であり、Tab5から接続先への送信、DSR/DA応答、時刻ヘッダ、行区切りの追加は含まない。
+`RX Log (SD)`設定がONのとき、現在選択されているUSB CDC/VCP、Port A UART、またはMBUS UARTから共通RXリングバッファへ届いた受信バイト列を、microSDカードの`/TAB5-LOG/TERMLOG.TXT`へ追記する。ログはUTF-8、VT100制御列、Sixel DCSを含む**生バイト列**であり、Tab5から接続先への送信、DSR/DA応答、時刻ヘッダ、行区切りの追加は含まない。
 
 初期実装では単一固定ファイルを追記専用で使う。ローテーション、圧縮、検索、ログ閲覧、TXとの混在、RTCによる時刻付加は対象外である。ファイル名とディレクトリはFATFSのLFN有無に依存しない8.3形式である。
 
@@ -22,9 +22,9 @@
 
 ## 設定UI
 
-`Ctrl+Alt+S`で開くSettings画面の**Connection & Display**セクションでは、`Serial Log`を既存の接続・表示項目と同じ固定行として表示する。`Serial Log`は二択の直接トグルであり、値をタッチすると`OFF`と`ON`を切り替える。固定候補パネルは開かない。ほかの設定と同様に、NVSへの保存と実際のロガー開始・停止は**Save & Close**を押した時点で行う。Escによるキャンセルでは設定変更を破棄する。
+`Ctrl+Alt+S`で開くSettings画面の**Connection & Display**セクションでは、`RX Log (SD)`を既存の接続・表示項目と同じ固定行として表示する。`RX Log (SD)`は二択の直接トグルであり、値をタッチすると`OFF`と`ON`を切り替える。固定候補パネルは開かない。ほかの設定と同様に、NVSへの保存と実際のロガー開始・停止は**Save & Close**を押した時点で行う。Escによるキャンセルでは設定変更を破棄する。
 
-Connection & Displayは7行（Baud Rate、Interface、Log Level、Font Size、Echo Back、Bell、Serial Log）である。各操作ボタンは高さ56 px、行間は4 pxで、Serial Logを含む全行をパネル内へ収める。最終行の下には10 pxの余白を残し、画面下部のSave & Closeの拡張タッチ領域と重ならない。実装では行数・高さ・間隔に対するコンパイル時境界検査を置き、将来項目を追加してもパネル外への配置を防ぐ。
+Connection & Displayは7行（Baud Rate、Interface、Log Level、Font Size、Echo Back、Bell、RX Log (SD)）である。各操作ボタンは高さ56 px、行間は4 pxで、RX Log (SD)を含む全行をパネル内へ収める。最終行の下には10 pxの余白を残し、画面下部のSave & Closeの拡張タッチ領域と重ならない。実装では行数・高さ・間隔に対するコンパイル時境界検査を置き、将来項目を追加してもパネル外への配置を防ぐ。
 
 ## 実行経路と優先順位
 
@@ -68,7 +68,7 @@ SDにカード検出GPIOはないため、物理抜去を即時に知ること�
 
 ログキューが満杯なら、受信処理を止めず、ログの一部だけを捨てる。この事実は`+DROP`としてステータスに残る。これは媒体の状態とは別に保持する。例えばカードなしでキューが飽和しても`NoSD+DROP`であり、`NoSD`の30秒再試行を妨げない。同様に`IO+DROP`はI/O回復を継続する。
 
-`+DROP`はSerial LogをOFF→ONに切り替えるとクリアする。これは前回の欠落を明示的に区切ってから新しいログ収集を始めるためである。
+`+DROP`はRX Log (SD)をOFF→ONに切り替えるとクリアする。これは前回の欠落を明示的に区切ってから新しいログ収集を始めるためである。
 
 ## 実機確認項目
 
