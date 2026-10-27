@@ -47,11 +47,6 @@ static size_t s_display_opaque_pixels = 0;
 // Logical Y=0 is stored at this physical row. Advancing the origin makes the
 // image follow a terminal scroll without moving the 1.7 MiB RGB565 surface.
 static int s_display_row_origin = 0;
-// The full-size fixed surface remains allocated for Small font compatibility,
-// but Large narrows the visible/committable horizontal range to its 80-column
-// central terminal viewport.
-static int s_viewport_x = 0;
-static int s_viewport_width = SIXEL_GRAPHICS_WIDTH;
 
 static bool s_active = false;
 static bool s_finished = false;
@@ -416,24 +411,6 @@ bool sixel_graphics_has_displayed_pixels(void)
     return s_display_opaque_pixels != 0;
 }
 
-void sixel_graphics_set_viewport(int x, int width)
-{
-    if (x < 0) x = 0;
-    if (x > SIXEL_GRAPHICS_WIDTH) x = SIXEL_GRAPHICS_WIDTH;
-    if (width < 0) width = 0;
-    if (width > SIXEL_GRAPHICS_WIDTH - x) width = SIXEL_GRAPHICS_WIDTH - x;
-
-    if (s_viewport_x == x && s_viewport_width == width) return;
-    s_viewport_x = x;
-    s_viewport_width = width;
-
-    // The meaning of the visible terminal area changed. Keeping pixels in a
-    // formerly valid area would let them reappear after a later font switch,
-    // so match the existing font-change policy and discard live graphics.
-    sixel_graphics_clear_all();
-    ESP_LOGI(TAG, "Sixel viewport set to %d+%d", s_viewport_x, s_viewport_width);
-}
-
 void sixel_graphics_clear_all(void)
 {
     if (!s_display_mask) return;
@@ -463,12 +440,11 @@ void sixel_graphics_scroll_up(int pixels)
 void sixel_graphics_clear_rect(int x, int y, int width, int height)
 {
     if (!s_display_mask || s_display_opaque_pixels == 0 || width <= 0 || height <= 0) return;
-    const int viewport_right = s_viewport_x + s_viewport_width;
-    int x0 = x < s_viewport_x ? s_viewport_x : x;
+    int x0 = x < 0 ? 0 : x;
     int y0 = y < 0 ? 0 : y;
     int x1 = x + width;
     int y1 = y + height;
-    if (x1 > viewport_right) x1 = viewport_right;
+    if (x1 > SIXEL_GRAPHICS_WIDTH) x1 = SIXEL_GRAPHICS_WIDTH;
     if (y1 > SIXEL_GRAPHICS_HEIGHT) y1 = SIXEL_GRAPHICS_HEIGHT;
     if (x0 >= x1 || y0 >= y1) return;
 
@@ -565,17 +541,7 @@ bool sixel_graphics_commit(const sixel_graphics_image_t *image, int origin_x, in
         sixel_graphics_clear_rect(origin_x, origin_y, image->width, image->height);
     }
 
-    bool changed = false;
-    const int viewport_right = s_viewport_x + s_viewport_width;
-    if (image->clear_background) {
-        const int x0 = origin_x < s_viewport_x ? s_viewport_x : origin_x;
-        const int x1 = origin_x + image->width > viewport_right ? viewport_right
-                                                                  : origin_x + image->width;
-        const int y0 = origin_y < 0 ? 0 : origin_y;
-        const int y1 = origin_y + image->height > SIXEL_GRAPHICS_HEIGHT ? SIXEL_GRAPHICS_HEIGHT
-                                                                          : origin_y + image->height;
-        changed = x0 < x1 && y0 < y1;
-    }
+    bool changed = image->clear_background;
     for (int y = 0; y < image->height; ++y) {
         const int display_y = origin_y + y;
         if (display_y < 0 || display_y >= SIXEL_GRAPHICS_HEIGHT) continue;
@@ -586,7 +552,7 @@ bool sixel_graphics_commit(const sixel_graphics_image_t *image, int origin_x, in
             const size_t source = row + (size_t)x;
             if (!bit_get(s_stage_mask, source)) continue;
             const int display_x = origin_x + x;
-            if (display_x < s_viewport_x || display_x >= viewport_right) continue;
+            if (display_x < 0 || display_x >= SIXEL_GRAPHICS_WIDTH) continue;
             const size_t destination = display_row + (size_t)display_x;
             s_display_pixels[destination] = s_palette[s_stage_indices[source]];
             if (!bit_get(s_display_mask, destination)) ++s_display_opaque_pixels;

@@ -37,13 +37,6 @@ bool sixel_graphics_available(void);
 /** Return true when the live graphics plane contains one or more pixels. */
 bool sixel_graphics_has_displayed_pixels(void);
 
-/**
- * Restrict displayed and committed graphics to an LCD pixel viewport. This is
- * used by the Large 80-column terminal layout to keep its side margins free
- * of Sixel pixels. Invalid values are safely clamped to the fixed surface.
- */
-void sixel_graphics_set_viewport(int x, int width);
-
 /** Clear every displayed Sixel pixel. Staging state is left untouched. */
 void sixel_graphics_clear_all(void);
 

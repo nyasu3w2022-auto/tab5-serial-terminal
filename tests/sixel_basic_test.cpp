@@ -41,19 +41,11 @@ static void reset_terminal()
     assert(!sixel_graphics_has_displayed_pixels());
 }
 
-static uint16_t screen_pixel_at(int x, int y, uint16_t background = 0x39e7)
+static uint16_t pixel_at(int x, int y, uint16_t background = 0x39e7)
 {
     uint16_t pixel = 0;
     sixel_graphics_composite_background(&pixel, 1, x, y, 1, 1, background);
     return pixel;
-}
-
-// Coordinates in the terminal/Sixel protocol are relative to the current
-// terminal viewport. Large centers its 80 columns; this helper keeps the
-// protocol tests independent of that physical LCD margin.
-static uint16_t pixel_at(int x, int y, uint16_t background = 0x39e7)
-{
-    return screen_pixel_at(TERM_VIEWPORT_X + x, y, background);
 }
 
 int main()
@@ -75,7 +67,6 @@ int main()
     const uint16_t red = rgb565(255, 0, 0);
     assert(sixel_graphics_has_displayed_pixels());
     for (int y = 0; y < 6; ++y) assert(pixel_at(0, y) == red);
-    assert(screen_pixel_at(TERM_VIEWPORT_X - 1, 0) == 0x39e7);
     assert(pixel_at(0, 6) == 0x39e7);
     assert(cursor_row == 1);
     assert(cursor_col == 0);
@@ -160,7 +151,7 @@ int main()
     reset_terminal();
     feed("\x1bP0;0;0q#1;2;100;0;0-----~\x1b\\");
     assert(sixel_graphics_has_displayed_pixels());
-    feed("\x1b[25;80HAB");
+    feed("\x1b[25;91HAB");
     assert(!sixel_graphics_has_displayed_pixels());
 
     // The image plane uses a logical row ring rather than copying the full

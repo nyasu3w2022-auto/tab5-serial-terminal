@@ -17,14 +17,12 @@
 static const char *TAG = "terminal";
 
 // ==============================================================
-// Runtime font and viewport geometry (default: Large 28px / 80x25)
+// Runtime font geometry (default: Large 28px)
 // ==============================================================
 int g_term_font_w = 14;   // half-width cell: 28px font -> adv_w=224 = 14px
 int g_term_font_h = 28;
-int g_term_cols   = TERM_LARGE_COLS;
-int g_term_rows   = TERM_LARGE_ROWS;
-int g_term_viewport_x = (LVGL_W - TERM_LARGE_COLS * 14) / 2;  // 80px
-int g_term_viewport_width = TERM_LARGE_COLS * 14;              // 1120px
+int g_term_cols   = LVGL_W / 14;   // 91
+int g_term_rows   = (LVGL_H - STATUS_BAR_H) / 28;  // 25
 
 // ==============================================================
 // SGR Color Palette
@@ -118,8 +116,7 @@ static void term_clear_graphics_cell(int row, int column, int cell_count)
     if (row < 0 || row >= TERM_ROWS || column < 0 || column >= TERM_COLS ||
         cell_count <= 0) return;
     if (column + cell_count > TERM_COLS) cell_count = TERM_COLS - column;
-    sixel_graphics_clear_rect(TERM_VIEWPORT_X + column * TERM_FONT_W,
-                              row * TERM_FONT_H,
+    sixel_graphics_clear_rect(column * TERM_FONT_W, row * TERM_FONT_H,
                               cell_count * TERM_FONT_W, TERM_FONT_H);
 }
 
@@ -270,35 +267,22 @@ void term_mark_all_dirty(void)
 
 void term_set_font_size(int font_w, int font_h)
 {
-    const bool large_geometry = font_w == 14 && font_h == 28;
-    int new_cols = large_geometry ? TERM_LARGE_COLS : LVGL_W / font_w;
-    int new_rows = (LVGL_H - STATUS_BAR_H) / font_h;
-    if (new_cols > TERM_COLS_MAX) new_cols = TERM_COLS_MAX;
-    if (new_rows > TERM_ROWS_MAX) new_rows = TERM_ROWS_MAX;
-    const int new_viewport_width = new_cols * font_w;
-    const int new_viewport_x = (LVGL_W - new_viewport_width) / 2;
-    const bool changed = g_term_font_w != font_w ||
-                         g_term_font_h != font_h ||
-                         g_term_cols != new_cols ||
-                         g_term_rows != new_rows ||
-                         g_term_viewport_x != new_viewport_x ||
-                         g_term_viewport_width != new_viewport_width;
+    const bool changed = g_term_font_w != font_w || g_term_font_h != font_h;
     g_term_font_w = font_w;
     g_term_font_h = font_h;
-    g_term_cols   = new_cols;
-    g_term_rows   = new_rows;
-    g_term_viewport_x = new_viewport_x;
-    g_term_viewport_width = new_viewport_width;
-    sixel_graphics_set_viewport(g_term_viewport_x, g_term_viewport_width);
+    g_term_cols   = LVGL_W / font_w;
+    g_term_rows   = (LVGL_H - STATUS_BAR_H) / font_h;
+    // Clamp to maximum buffer dimensions
+    if (g_term_cols > TERM_COLS_MAX) g_term_cols = TERM_COLS_MAX;
+    if (g_term_rows > TERM_ROWS_MAX) g_term_rows = TERM_ROWS_MAX;
     if (changed) {
         term_scrollback_clear();
         // A retained pixel image has the old cell geometry as its placement
         // contract, so font changes intentionally discard it with history.
         sixel_graphics_clear_all();
     }
-    ESP_LOGI("terminal", "Font size set to %dx%d, cols=%d rows=%d viewport=%d+%d",
-             font_w, font_h, g_term_cols, g_term_rows,
-             g_term_viewport_x, g_term_viewport_width);
+    ESP_LOGI("terminal", "Font size set to %dx%d, cols=%d rows=%d",
+             font_w, font_h, g_term_cols, g_term_rows);
 }
 
 static void term_clear_region(int row_start, int col_start, int row_end, int col_end)
@@ -615,7 +599,7 @@ static void vt_finish_sixel(void)
     if (!sixel_graphics_finish(&image)) return;
 
     int origin_row = dcs_sixel_start_row;
-    int origin_x = TERM_VIEWPORT_X + dcs_sixel_start_col * TERM_FONT_W;
+    int origin_x = dcs_sixel_start_col * TERM_FONT_W;
     int origin_y = origin_row * TERM_FONT_H;
 
     if (dec_sixel_scrolling && image.height > 0) {

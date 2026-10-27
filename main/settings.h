@@ -36,11 +36,11 @@ typedef enum {
 /**
  * Font size selection.
  *   Small: 16px font → 160 cols × 43 rows (more information, smaller text)
- *   Large: 28px font →  80 cols × 25 rows (easier to read)
+ *   Large: 28px font →  91 cols × 25 rows (easier to read)
  */
 typedef enum {
     FONT_SIZE_SMALL = 0,  /**< 16px IPA Gothic: 160×43 */
-    FONT_SIZE_LARGE = 1,  /**< 28px IPA Gothic:  80×25 */
+    FONT_SIZE_LARGE = 1,  /**< 28px IPA Gothic:  91×25 */
 } app_font_size_t;
 
 /**
