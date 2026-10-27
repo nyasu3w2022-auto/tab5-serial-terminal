@@ -73,7 +73,10 @@ void settings_load(app_settings_t *out)
         out->log_level = (app_log_level_t)v8;
     }
     if (nvs_get_u8(h, KEY_FONT, &v8) == ESP_OK) {
-        out->font_size = (app_font_size_t)v8;
+        // Values 0 and 1 retain compatibility with settings written before
+        // the optional Large 80-column layout was added.
+        out->font_size = (v8 <= (uint8_t)FONT_SIZE_LARGE_80)
+                       ? (app_font_size_t)v8 : SETTINGS_DEFAULT_FONT_SIZE;
     }
     if (nvs_get_u8(h, KEY_LOCAL_ECHO, &v8) == ESP_OK) {
         out->local_echo = (v8 == (uint8_t)LOCAL_ECHO_ON)
@@ -179,14 +182,19 @@ void settings_apply(const app_settings_t *s)
     esp_log_level_set("*", lvl_map[idx]);
     ESP_LOGI(TAG, "Log level set to %d", idx);
 
-    // Apply font size only when it differs from the active geometry.
-    // A real size change clears the terminal and rebuilds the display.
-    // Small: 16px font (8px half-width)  → 160 cols × 43 rows
-    // Large: 28px font (14px half-width) →  91 cols × 25 rows
+    // Apply the selected terminal layout only when its active geometry differs.
+    // A real layout change clears the terminal and rebuilds the display.
+    // Small:    16px font (8px half-width)  → 160 cols × 43 rows
+    // Large:    28px font (14px half-width) →  91 cols × 25 rows
+    // Large 80: 28px font (14px half-width) →  80 cols × 25 rows + margins
     const int wanted_font_w = (s->font_size == FONT_SIZE_SMALL) ? 8 : 14;
     const int wanted_font_h = (s->font_size == FONT_SIZE_SMALL) ? 16 : 28;
-    if (TERM_FONT_W != wanted_font_w || TERM_FONT_H != wanted_font_h) {
-        ui_rebuild_for_font_size(wanted_font_w, wanted_font_h);
+    const int wanted_cols = (s->font_size == FONT_SIZE_LARGE_80)
+                          ? TERM_LARGE_80_COLS : 0;
+    const int effective_cols = wanted_cols > 0 ? wanted_cols : LVGL_W / wanted_font_w;
+    if (TERM_FONT_W != wanted_font_w || TERM_FONT_H != wanted_font_h ||
+        TERM_COLS != effective_cols) {
+        ui_rebuild_for_font_size_and_columns(wanted_font_w, wanted_font_h, wanted_cols);
     }
 
     // Notify a connected peer about the active terminal geometry. For USB
