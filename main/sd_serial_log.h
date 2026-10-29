@@ -13,6 +13,7 @@
 typedef enum {
     SD_SERIAL_LOG_OFF = 0,  /**< Logging disabled by the persistent setting. */
     SD_SERIAL_LOG_ON,       /**< Appending raw RX bytes to the SD file. */
+    SD_SERIAL_LOG_FLUSH,    /**< OFF requested; accepted RX is draining and syncing. */
     SD_SERIAL_LOG_NO_SD,    /**< SD card missing or FAT32 mount failed. */
     SD_SERIAL_LOG_LOW,      /**< Stopped before consuming dictionary safety reserve. */
     SD_SERIAL_LOG_FULL,     /**< Write returned ENOSPC or a partial byte count. */
@@ -31,10 +32,18 @@ constexpr const char *SD_SERIAL_LOG_FILE_PATH = "/sd/TAB5-LOG/TERMLOG.TXT";
  */
 bool sd_serial_log_init();
 
-/** Enable or disable logging without blocking the serial receive path. */
+/**
+ * Enable logging, or request a nonblocking safe stop.
+ *
+ * A disable request immediately rejects new RX data, then the worker publishes
+ * FLUSH while it writes every previously accepted queue item, fflushes, fsyncs,
+ * closes, and unmounts. OFF is published only after that sequence succeeds.
+ * A write/sync/close failure is retained as FULL, RO, or IO instead of being
+ * masked as OFF.
+ */
 void sd_serial_log_configure(bool enabled);
 
-/** Return whether persistent configuration currently requests logging. */
+/** Return whether persistent configuration currently requests new RX logging. */
 bool sd_serial_log_is_enabled();
 
 /**

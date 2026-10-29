@@ -1,11 +1,11 @@
 # SDカード通信ログ設計
 
 **対象ブランチ:** `feature/sd-serial-log`
-**更新日:** 2026-10-26
+**更新日:** 2026-10-29
 
 ## 目的と範囲
 
-`Serial Log`設定がONのとき、現在選択されているUSB CDC/VCP、Port A UART、またはMBUS UARTから共通RXリングバッファへ届いた受信バイト列を、microSDカードの`/TAB5-LOG/TERMLOG.TXT`へ追記する。ログはUTF-8、VT100制御列、Sixel DCSを含む**生バイト列**であり、Tab5から接続先への送信、DSR/DA応答、時刻ヘッダ、行区切りの追加は含まない。
+`RX Log (SD)`設定がONのとき、現在選択されているUSB CDC/VCP、Port A UART、またはMBUS UARTから共通RXリングバッファへ届いた受信バイト列を、microSDカードの`/TAB5-LOG/TERMLOG.TXT`へ追記する。ログはUTF-8、VT100制御列、Sixel DCSを含む**生バイト列**であり、Tab5から接続先への送信、DSR/DA応答、時刻ヘッダ、行区切りの追加は含まない。
 
 初期実装では単一固定ファイルを追記専用で使う。ローテーション、圧縮、検索、ログ閲覧、TXとの混在、RTCによる時刻付加は対象外である。ファイル名とディレクトリはFATFSのLFN有無に依存しない8.3形式である。
 
@@ -22,9 +22,9 @@
 
 ## 設定UI
 
-`Ctrl+Alt+S`で開くSettings画面の**Connection & Display**セクションでは、`Serial Log`を既存の接続・表示項目と同じ固定行として表示する。`Serial Log`は二択の直接トグルであり、値をタッチすると`OFF`と`ON`を切り替える。固定候補パネルは開かない。ほかの設定と同様に、NVSへの保存と実際のロガー開始・停止は**Save & Close**を押した時点で行う。Escによるキャンセルでは設定変更を破棄する。
+`Ctrl+Alt+S`で開くSettings画面の**Connection & Display**セクションでは、`RX Log (SD)`を既存の接続・表示項目と同じ固定行として表示する。`RX Log (SD)`は二択の直接トグルであり、値をタッチすると`OFF`と`ON`を切り替える。固定候補パネルは開かない。ほかの設定と同様に、NVSへの保存と実際のロガー開始・停止は**Save & Close**を押した時点で行う。Escによるキャンセルでは設定変更を破棄する。
 
-Connection & Displayは7行（Baud Rate、Interface、Log Level、Font Size、Echo Back、Bell、Serial Log）である。各操作ボタンは高さ56 px、行間は4 pxで、Serial Logを含む全行をパネル内へ収める。最終行の下には10 pxの余白を残し、画面下部のSave & Closeの拡張タッチ領域と重ならない。実装では行数・高さ・間隔に対するコンパイル時境界検査を置き、将来項目を追加してもパネル外への配置を防ぐ。
+Connection & Displayは7行（Baud Rate、Interface、Log Level、Font Size、Echo Back、Bell、RX Log (SD)）である。各操作ボタンは高さ56 px、行間は4 pxで、RX Log (SD)を含む全行をパネル内へ収める。最終行の下には10 pxの余白を残し、画面下部のSave & Closeの拡張タッチ領域と重ならない。実装では行数・高さ・間隔に対するコンパイル時境界検査を置き、将来項目を追加してもパネル外への配置を防ぐ。
 
 ## 実行経路と優先順位
 
@@ -51,24 +51,33 @@ Connection & Displayは7行（Baud Rate、Interface、Log Level、Font Size、Ec
 
 | 状態 | 契機 | ログ受入 | 次の動作 |
 |---|---|---|---|
-| `OFF` | 設定OFF | しない | open済みなら同期・close・アンマウントする |
+| `OFF` | drain・同期・close・アンマウント完了 | しない | SDログ用にはSDカードへアクセスしない |
 | `NoSD` | mount失敗 | しない | 30秒ごとにmountを再試行 |
 | `ON` | mount、空き確認、append open成功 | する | 書込み・定期同期を続行 |
+| `FLUSH` | `RX Log (SD)`をOFFにしてSave & Close | しない | 既に受理済みの全キューをFIFO順で書込み、`fflush`→`fsync`→`fclose`→unmount成功後にのみ`OFF`へ遷移 |
 | `LOW` | 空き容量が2 MiB以下 | しない | close・アンマウント。OFF→ONまで停止 |
 | `FULL` | `ENOSPC`またはerrnoなしの短い書込み | しない | close・アンマウント。OFF→ONまで停止 |
 | `RO` | `EROFS`、`EACCES`、`EPERM` | しない | close・アンマウント。OFF→ONまで停止 |
-| `IO` | SDMMC/書込み/flush/sync/close失敗 | しない | close・アンマウントし、30秒ごとに再試行 |
+| `IO` | SDMMC/書込み/flush/sync/close失敗 | しない | ON中はclose・アンマウントして30秒ごとに再試行。FLUSH中の書込み・同期・close失敗は診断を保持し、OFFへ遷移しない |
 | `MEM` | PSRAMキューまたはタスク生成失敗 | しない | 端末機能だけを継続。再起動後に再試行 |
 
 FatFsの空き容量は開始時、以後1 MiB書込みごと、または10秒ごとの早い方で確認する。これは辞書交換が一時ファイルとバックアップを作る余裕を残すための予防策である。実際の書込み長、`fflush`、`fsync`、`fclose`も個別に確認するため、容量や媒体状態が照会直後に変化しても検出する。
 
 SDにカード検出GPIOはないため、物理抜去を即時に知ることはできない。`disk_status_check_enable`と実I/O失敗により検出し、既存のFILE/VFS/SDカード状態を破棄してから再試行する。カードを自動フォーマットしない。
 
+### OFF時の安全停止（drain / flush stop）
+
+`RX Log (SD)`を`OFF`にして**Save & Close**した瞬間、ロガーは新しいRXチャンクの受理を停止して`Log:FLUSH`を表示する。ただし、その瞬間より前に受理処理へ入ったチャンクは投入中カウンタで追跡する。ワーカーはこのカウンタが0になり、かつPSRAMリングと現在書込み中のチャンクが空になるまで待つため、OFF要求と受信処理が競合しても「要求前に受理済み」のバイト列をOFF遷移より後へ取り残さない。
+
+キューが空になっただけでは`OFF`にしない。SDセッションを保持したまま最後の`fflush`、`fsync`、`fclose`、アンマウントを順番に成功させてから初めて`Log:OFF`を公開する。辞書SD操作がFLUSH中に始まった場合は、現在取り出している1チャンクを完了して同期・closeし、辞書操作後に同じFLUSH状態でappend再開する。
+
+FLUSH中の`fwrite`、`fflush`、`fsync`、`fclose`、またはSDロック取得の失敗は`FULL`、`RO`、または`IO`として保持する。この場合は成功していない停止を`OFF`で隠さず、残りのリング項目を解放してSDセッションを閉じる。`NoSD`だけは未書込みキューがある間に30秒間隔で再マウントを試みるが、書込み・同期開始後の障害はログ完全性を保証できないためエラー状態を残す。復旧後は明示的なOFF→ONで新しいログセッションを開始する。
+
 ## `+DROP`付加状態
 
 ログキューが満杯なら、受信処理を止めず、ログの一部だけを捨てる。この事実は`+DROP`としてステータスに残る。これは媒体の状態とは別に保持する。例えばカードなしでキューが飽和しても`NoSD+DROP`であり、`NoSD`の30秒再試行を妨げない。同様に`IO+DROP`はI/O回復を継続する。
 
-`+DROP`はSerial LogをOFF→ONに切り替えるとクリアする。これは前回の欠落を明示的に区切ってから新しいログ収集を始めるためである。
+`+DROP`はRX Log (SD)をOFF→ONに切り替えるとクリアする。これは前回の欠落を明示的に区切ってから新しいログ収集を始めるためである。
 
 ## 実機確認項目
 

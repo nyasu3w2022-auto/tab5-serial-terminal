@@ -12,7 +12,7 @@ g++ -std=c++17 -Wall -Wextra -Werror -I. \
 /tmp/test_dictionary_transfer
 ```
 
-`sd_serial_log_state_test.cpp`は、ESP-IDFのFreeRTOS/SDMMC/FatFsを最小スタブ化した構文・状態遷移テストです。初期OFF、ON要求時の`NoSD`、生バイト入力API、OFFへの復帰、ステータス変更通知を確認します。実行には開発時に用意するスタブヘッダが必要です。実機APIを置換するものではありません。
+`sd_serial_log_state_test.cpp`は、ESP-IDFのFreeRTOS/SDMMC/FatFsを最小スタブ化した構文・状態遷移テストです。初期`OFF`、ON要求時の`NoSD`、生バイト入力API、OFF要求直後の`FLUSH`、再ON要求、ステータス変更通知を確認します。実行には開発時に用意するスタブヘッダが必要です。実機APIを置換するものではありません。
 
 `ime_skk_test.cpp`は、ローマ字からひらがなへの変換、カタカナ切替、促音、`ん`、SKK大文字開始、送り仮名付き候補（`MiRu` → 「見る」）、候補の検索・移動・確定・取消を確認します。さらに、補助辞書`assets/SKK-JISYO.TAB5.txt`の`KiTa`→「来た」、ユーザー辞書の手動登録・先頭優先化・完全一致削除、辞書間の候補重複除去、および同梱の `assets/SKK-JISYO.S.txt` を使った実辞書検索も検証します。学習保存については、学習しない・保留保存・手動保存の各モード、RAM保留中の候補優先化、明示フラッシュを確認します。
 

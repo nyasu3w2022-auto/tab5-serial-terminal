@@ -39,13 +39,26 @@ constexpr uint32_t LOG_TASK_STACK = 4096;
 static RingbufHandle_t s_ring = nullptr;
 static TaskHandle_t s_task = nullptr;
 static FILE *s_file = nullptr;
+// s_enabled is the persistent configuration request.  A stop keeps the
+// worker alive with s_stop_requested=true, but prevents any new RX acceptance.
 static volatile bool s_enabled = false;
+static volatile bool s_stop_requested = false;
 static volatile bool s_pause_requested = false;
 static volatile bool s_pause_acknowledged = false;
 static volatile bool s_initialized = false;
 static volatile bool s_status_changed = false;
 static volatile sd_serial_log_status_t s_status = SD_SERIAL_LOG_OFF;
 static volatile bool s_drop_seen = false;
+// An enqueue reserves an in-flight slot before it calls the nonblocking ring
+// API.  The stop worker waits for these slots before it decides the queue is
+// empty, so an enqueue that began just before Save & Close cannot be lost.
+static volatile uint32_t s_enqueues_in_flight = 0;
+// Includes an item checked out by the writer until that item is returned to
+// the ring. This is the drain-completion accounting source of truth.
+static volatile size_t s_queued_bytes = 0;
+// A successful OFF transition is illegal once a drain write/sync/close error
+// has been observed.  The user must see the actual media diagnosis instead.
+static volatile bool s_stop_error_seen = false;
 static portMUX_TYPE s_state_mux = portMUX_INITIALIZER_UNLOCKED;
 
 static bool status_is_retryable(sd_serial_log_status_t status)
@@ -57,7 +70,15 @@ static bool status_allows_open(sd_serial_log_status_t status)
 {
     // ON with no FILE* is the normal post-dictionary-pause state. It must
     // reopen immediately rather than being treated as a terminal condition.
-    return status == SD_SERIAL_LOG_ON || status_is_retryable(status);
+    return status == SD_SERIAL_LOG_ON || status == SD_SERIAL_LOG_FLUSH ||
+           status_is_retryable(status);
+}
+
+static bool status_is_stop_error(sd_serial_log_status_t status)
+{
+    return status == SD_SERIAL_LOG_LOW || status == SD_SERIAL_LOG_FULL ||
+           status == SD_SERIAL_LOG_RO || status == SD_SERIAL_LOG_IO ||
+           status == SD_SERIAL_LOG_MEM;
 }
 
 static bool status_is_terminal_failure(sd_serial_log_status_t status)
@@ -66,13 +87,19 @@ static bool status_is_terminal_failure(sd_serial_log_status_t status)
            status == SD_SERIAL_LOG_RO || status == SD_SERIAL_LOG_IO;
 }
 
-static void set_status(sd_serial_log_status_t status)
+static void set_status_locked(sd_serial_log_status_t status)
 {
-    portENTER_CRITICAL(&s_state_mux);
+    if (s_stop_requested && status_is_stop_error(status)) s_stop_error_seen = true;
     if (s_status != status) {
         s_status = status;
         s_status_changed = true;
     }
+}
+
+static void set_status(sd_serial_log_status_t status)
+{
+    portENTER_CRITICAL(&s_state_mux);
+    set_status_locked(status);
     portEXIT_CRITICAL(&s_state_mux);
 }
 
@@ -82,6 +109,72 @@ static bool is_enabled()
     const bool enabled = s_enabled;
     portEXIT_CRITICAL(&s_state_mux);
     return enabled;
+}
+
+static bool is_stop_requested()
+{
+    portENTER_CRITICAL(&s_state_mux);
+    const bool requested = s_stop_requested;
+    portEXIT_CRITICAL(&s_state_mux);
+    return requested;
+}
+
+static bool has_worker_work()
+{
+    portENTER_CRITICAL(&s_state_mux);
+    const bool has_work = s_enabled || s_stop_requested;
+    portEXIT_CRITICAL(&s_state_mux);
+    return has_work;
+}
+
+static bool reserve_enqueue()
+{
+    portENTER_CRITICAL(&s_state_mux);
+    const bool accepted = s_enabled && !s_stop_requested && s_status == SD_SERIAL_LOG_ON;
+    if (accepted) ++s_enqueues_in_flight;
+    portEXIT_CRITICAL(&s_state_mux);
+    return accepted;
+}
+
+static void finish_enqueue(bool queued, size_t len)
+{
+    portENTER_CRITICAL(&s_state_mux);
+    if (queued) {
+        s_queued_bytes += len;
+    } else {
+        // The receive path remains deliberately lossy before it ever blocks.
+        s_drop_seen = true;
+        s_status_changed = true;
+    }
+    if (s_enqueues_in_flight > 0) --s_enqueues_in_flight;
+    portEXIT_CRITICAL(&s_state_mux);
+}
+
+static void release_queued_item(size_t len)
+{
+    portENTER_CRITICAL(&s_state_mux);
+    // Defensive saturation avoids an underflow if a corrupt Ringbuffer handle
+    // reports an item that was not accepted through sd_serial_log_enqueue_rx.
+    s_queued_bytes = len <= s_queued_bytes ? s_queued_bytes - len : 0;
+    portEXIT_CRITICAL(&s_state_mux);
+}
+
+static bool drain_barrier_reached()
+{
+    portENTER_CRITICAL(&s_state_mux);
+    const bool ready = s_stop_requested && !s_enabled && !s_pause_requested &&
+                       !s_stop_error_seen && s_enqueues_in_flight == 0 &&
+                       s_queued_bytes == 0;
+    portEXIT_CRITICAL(&s_state_mux);
+    return ready;
+}
+
+static bool stop_has_drain_error()
+{
+    portENTER_CRITICAL(&s_state_mux);
+    const bool failed = s_stop_requested && s_stop_error_seen;
+    portEXIT_CRITICAL(&s_state_mux);
+    return failed;
 }
 
 static bool is_pause_requested()
@@ -151,11 +244,12 @@ static bool ensure_log_directory_locked(int *system_errno)
     return false;
 }
 
-static void close_file_locked(bool sync_before_close)
+static bool close_file_locked(bool sync_before_close)
 {
-    if (s_file == nullptr) return;
+    if (s_file == nullptr) return true;
 
-    if (sync_before_close) (void)flush_and_sync_locked();
+    bool success = true;
+    if (sync_before_close && !flush_and_sync_locked()) success = false;
     if (fclose(s_file) != 0) {
         const int close_errno = errno;
         ESP_LOGW(TAG, "close log failed: errno=%d", close_errno);
@@ -164,34 +258,56 @@ static void close_file_locked(bool sync_before_close)
         if (!status_is_terminal_failure(sd_serial_log_status())) {
             set_status(status_from_errno(close_errno, false));
         }
+        success = false;
     }
     s_file = nullptr;
+    return success;
 }
 
-static void close_file(bool sync_before_close)
+static bool close_file(bool sync_before_close)
 {
     if (!sd_dictionary_lock(1000)) {
         ESP_LOGW(TAG, "Timed out acquiring SD lock while closing log");
         set_status(SD_SERIAL_LOG_IO);
-        return;
+        return false;
     }
-    close_file_locked(sync_before_close);
+    const bool success = close_file_locked(sync_before_close);
     sd_dictionary_unlock();
+    return success;
 }
 
-static void close_file_and_unmount(bool sync_before_close)
+static bool close_file_and_unmount(bool sync_before_close)
 {
     if (!sd_dictionary_lock(1000)) {
         ESP_LOGW(TAG, "Timed out acquiring SD lock while invalidating log session");
         set_status(SD_SERIAL_LOG_IO);
-        return;
+        return false;
     }
-    close_file_locked(sync_before_close);
+    const bool success = close_file_locked(sync_before_close);
     // A failed FATFS write can leave its FILE object aborted. Dropping the
     // complete mount makes a later NoSD/IO retry re-probe the physical card
     // rather than reusing stale SDMMC/VFS state after removal or I/O failure.
     sd_dictionary_unmount_locked();
     sd_dictionary_unlock();
+    return success;
+}
+
+/**
+ * Finish a successful drain while holding the SD session exactly once.  A
+ * failure keeps the diagnostic state set by flush/close and deliberately does
+ * not permit the caller to publish OFF.
+ */
+static bool sync_close_and_unmount_for_stop()
+{
+    if (!sd_dictionary_lock(1000)) {
+        ESP_LOGW(TAG, "Timed out acquiring SD lock while finishing drain stop");
+        set_status(SD_SERIAL_LOG_IO);
+        return false;
+    }
+    const bool success = close_file_locked(true);
+    sd_dictionary_unmount_locked();
+    sd_dictionary_unlock();
+    return success;
 }
 
 static bool check_free_space_locked()
@@ -243,7 +359,10 @@ static bool open_log_file()
                 ESP_LOGW(TAG, "Cannot open %s: errno=%d", SD_SERIAL_LOG_FILE_PATH, open_errno);
                 set_status(status_from_errno(open_errno, false));
             } else {
-                set_status(SD_SERIAL_LOG_ON);
+                // A dictionary pause or a transient I/O retry can reopen while
+                // a user-requested drain is in progress. Preserve FLUSH until
+                // all accepted bytes are synchronized and the stop completes.
+                set_status(is_stop_requested() ? SD_SERIAL_LOG_FLUSH : SD_SERIAL_LOG_ON);
                 success = true;
                 ESP_LOGI(TAG, "Serial RX logging to %s", SD_SERIAL_LOG_FILE_PATH);
             }
@@ -271,7 +390,11 @@ static bool write_log_chunk(void *data, size_t len, size_t *bytes_until_sync,
         return false;
     }
 
-    if (is_pause_requested() || !is_enabled()) {
+    // If a pause arrives after this worker removed an item from the ring, it
+    // must finish this item before acknowledging the pause. The dictionary
+    // caller cannot acquire the SD session until that acknowledgement, so this
+    // preserves FIFO bytes instead of dropping a checked-out chunk.
+    if (!has_worker_work()) {
         sd_dictionary_unlock();
         return false;
     }
@@ -318,11 +441,72 @@ static bool write_log_chunk(void *data, size_t len, size_t *bytes_until_sync,
     return true;
 }
 
+/**
+ * Return every queued item after all potentially concurrent nonblocking
+ * enqueue calls have completed.  No new call can reserve after a stop request
+ * clears s_enabled, so this consumes a finite, well-defined drain set.
+ */
+static bool discard_queued_items_after_enqueue_barrier()
+{
+    portENTER_CRITICAL(&s_state_mux);
+    const bool safe_to_discard = s_stop_requested && s_enqueues_in_flight == 0;
+    portEXIT_CRITICAL(&s_state_mux);
+    if (!safe_to_discard) return false;
+
+    while (true) {
+        size_t received_len = 0;
+        void *received = xRingbufferReceiveUpTo(s_ring, &received_len, 0, LOG_WRITE_MAX_BYTES);
+        if (received == nullptr || received_len == 0) break;
+        vRingbufferReturnItem(s_ring, received);
+        release_queued_item(received_len);
+    }
+    return true;
+}
+
+/**
+ * A media failure during a stop means the remaining ring cannot truthfully be
+ * reported as durable.  Release it, close/unmount the failed session, retain
+ * FULL/RO/IO on the status line, and never overwrite that diagnosis with OFF.
+ */
+static bool abandon_failed_stop()
+{
+    if (!is_stop_requested()) return true;
+    if (!close_file_and_unmount(false)) return false;
+    if (!discard_queued_items_after_enqueue_barrier()) return false;
+
+    portENTER_CRITICAL(&s_state_mux);
+    if (s_stop_requested && !s_enabled && s_enqueues_in_flight == 0 &&
+        s_queued_bytes == 0) {
+        s_stop_requested = false;
+        s_pause_requested = false;
+        s_pause_acknowledged = false;
+        // Keep s_stop_error_seen set until a later OFF->ON session begins.
+    }
+    portEXIT_CRITICAL(&s_state_mux);
+    return true;
+}
+
+static void publish_successful_stop()
+{
+    portENTER_CRITICAL(&s_state_mux);
+    if (s_stop_requested && !s_enabled && !s_stop_error_seen &&
+        s_enqueues_in_flight == 0 && s_queued_bytes == 0) {
+        s_stop_requested = false;
+        s_pause_requested = false;
+        s_pause_acknowledged = false;
+        set_status_locked(SD_SERIAL_LOG_OFF);
+    }
+    portEXIT_CRITICAL(&s_state_mux);
+}
+
 static void wait_while_paused()
 {
-    close_file(true);
+    // A dictionary operation may arrive during FLUSH. Closing here preserves
+    // SD-session exclusion; after resume the worker reopens and continues the
+    // same finite drain instead of dropping queued data.
+    (void)close_file(true);
     set_pause_acknowledged(true);
-    while (is_enabled() && is_pause_requested()) {
+    while (has_worker_work() && is_pause_requested()) {
         (void)ulTaskNotifyTake(pdTRUE, pdMS_TO_TICKS(LOG_PAUSE_POLL_MS));
     }
     set_pause_acknowledged(false);
@@ -337,10 +521,15 @@ static void serial_log_task(void *)
     TickType_t next_retry = 0;
 
     while (true) {
-        if (!is_enabled()) {
-            close_file_and_unmount(true);
+        if (!has_worker_work()) {
+            // Normally a successful stop has already closed the file.  Do not
+            // re-sync here: an earlier failure must remain FULL/RO/IO rather
+            // than being hidden by a best-effort cleanup and OFF publication.
+            (void)close_file_and_unmount(false);
             set_pause_acknowledged(false);
-            set_status(SD_SERIAL_LOG_OFF);
+            if (!status_is_stop_error(sd_serial_log_status())) {
+                set_status(SD_SERIAL_LOG_OFF);
+            }
             (void)ulTaskNotifyTake(pdTRUE, pdMS_TO_TICKS(250));
             continue;
         }
@@ -351,6 +540,27 @@ static void serial_log_task(void *)
             bytes_until_space_check = 0;
             last_sync = xTaskGetTickCount();
             last_space_check = last_sync;
+            continue;
+        }
+
+        // FULL/RO/IO/LOW during FLUSH is not a successful stop.  Drop only
+        // after the enqueue barrier, release the SD session, and leave the
+        // actual error visible until the next explicit ON request.
+        if (stop_has_drain_error()) {
+            if (!abandon_failed_stop()) {
+                (void)ulTaskNotifyTake(pdTRUE, pdMS_TO_TICKS(LOG_PAUSE_POLL_MS));
+            }
+            continue;
+        }
+
+        // This check must precede open_log_file(): stopping an empty logger
+        // must not mount an SD card merely to close it again.
+        if (drain_barrier_reached()) {
+            if (sync_close_and_unmount_for_stop()) {
+                publish_successful_stop();
+            } else if (is_stop_requested() && !abandon_failed_stop()) {
+                (void)ulTaskNotifyTake(pdTRUE, pdMS_TO_TICKS(LOG_PAUSE_POLL_MS));
+            }
             continue;
         }
 
@@ -368,6 +578,8 @@ static void serial_log_task(void *)
             }
             if (!open_log_file()) {
                 next_retry = now;
+                // NoSD remains retryable during a drain with queued data. An
+                // I/O diagnosis sets s_stop_error_seen and is handled above.
                 (void)ulTaskNotifyTake(pdTRUE, pdMS_TO_TICKS(250));
                 continue;
             }
@@ -386,11 +598,11 @@ static void serial_log_task(void *)
             if ((TickType_t)(now - last_sync) >= pdMS_TO_TICKS(LOG_SYNC_MS)) {
                 if (!sd_dictionary_lock(1000)) {
                     set_status(SD_SERIAL_LOG_IO);
-                    close_file_and_unmount(false);
+                    (void)close_file_and_unmount(false);
                 } else {
                     if (!flush_and_sync_locked()) {
                         sd_dictionary_unlock();
-                        close_file_and_unmount(false);
+                        (void)close_file_and_unmount(false);
                     } else {
                         last_sync = now;
                         sd_dictionary_unlock();
@@ -404,7 +616,8 @@ static void serial_log_task(void *)
                                               &bytes_until_space_check, &last_sync,
                                               &last_space_check);
         vRingbufferReturnItem(s_ring, received);
-        if (!write_ok) close_file_and_unmount(false);
+        release_queued_item(received_len);
+        if (!write_ok) (void)close_file_and_unmount(false);
     }
 }
 
@@ -450,21 +663,34 @@ void sd_serial_log_configure(bool enabled)
 
     portENTER_CRITICAL(&s_state_mux);
     const bool was_enabled = s_enabled;
-    s_enabled = enabled;
-    s_pause_requested = false;
-    s_pause_acknowledged = false;
-    if (!enabled || !was_enabled) {
+    if (enabled) {
+        s_enabled = true;
+        s_stop_requested = false;
+        s_stop_error_seen = false;
+        s_pause_requested = false;
+        s_pause_acknowledged = false;
+        if (!was_enabled) {
+            s_drop_seen = false;
+            // ON is published only after the worker has mounted the card,
+            // reserved free space, and opened the append file. Until then,
+            // the user-visible state remains NoSD as a nonblocking request.
+            set_status_locked(SD_SERIAL_LOG_NO_SD);
+        }
+    } else if (was_enabled || s_stop_requested) {
+        // This is the linearization point for safe stop. New enqueue calls
+        // fail their reservation test after it, while a caller that reserved
+        // just before it is counted by s_enqueues_in_flight and must finish
+        // before the worker can declare the ring drained.
+        s_enabled = false;
+        s_stop_requested = true;
+        // An identical settings save may be delivered while an earlier FLUSH
+        // is failing.  Preserve its first durable-media diagnosis; never turn
+        // IO/FULL/RO/LOW back into FLUSH and later claim a false OFF success.
+        s_stop_error_seen = s_stop_error_seen || status_is_stop_error(s_status);
+        s_pause_requested = false;
+        s_pause_acknowledged = false;
         s_drop_seen = false;
-    }
-    // ON is published only after the worker has mounted the card, reserved
-    // free space, and opened the append file. Until then, enabled means the
-    // worker must attempt a mount.
-    if (!enabled) {
-        s_status = SD_SERIAL_LOG_OFF;
-        s_status_changed = true;
-    } else if (!was_enabled) {
-        s_status = SD_SERIAL_LOG_NO_SD;
-        s_status_changed = true;
+        if (!s_stop_error_seen) set_status_locked(SD_SERIAL_LOG_FLUSH);
     }
     portEXIT_CRITICAL(&s_state_mux);
     notify_worker();
@@ -477,25 +703,22 @@ bool sd_serial_log_is_enabled()
 
 void sd_serial_log_enqueue_rx(const uint8_t *data, size_t len)
 {
-    if (data == nullptr || len == 0 || !is_enabled() || s_ring == nullptr) return;
+    if (data == nullptr || len == 0 || s_ring == nullptr) return;
     // Once a media error is known, deliberately stop accepting bytes instead
     // of filling PSRAM with data that cannot be committed. A pause keeps the
     // primary state ON, so short dictionary operations still retain bytes.
-    if (sd_serial_log_status() != SD_SERIAL_LOG_ON) return;
-    if (xRingbufferSend(s_ring, data, len, 0) != pdTRUE) {
-        // The logger is deliberately lossy before the serial terminal is. RX
-        // callbacks and the main parser must never wait for SD-card throughput.
-        portENTER_CRITICAL(&s_state_mux);
-        s_drop_seen = true;
-        s_status_changed = true;
-        portEXIT_CRITICAL(&s_state_mux);
-    }
+    if (!reserve_enqueue()) return;
+    const bool queued = xRingbufferSend(s_ring, data, len, 0) == pdTRUE;
+    // Finishing the reservation after the send establishes an exact drain
+    // boundary even when Save & Close races this nonblocking receive-path API.
+    finish_enqueue(queued, len);
+    notify_worker();
 }
 
 const char *sd_serial_log_status_text()
 {
     static const char *const normal_text[] = {
-        "OFF", "ON", "NoSD", "LOW", "FULL", "RO", "IO", "MEM"
+        "OFF", "ON", "FLUSH", "NoSD", "LOW", "FULL", "RO", "IO", "MEM"
     };
     const sd_serial_log_status_t status = sd_serial_log_status();
     portENTER_CRITICAL(&s_state_mux);
@@ -506,6 +729,7 @@ const char *sd_serial_log_status_text()
         // retrying card mounts rather than being masked by queue pressure.
         switch (status) {
         case SD_SERIAL_LOG_ON:   return "ON+DROP";
+        case SD_SERIAL_LOG_FLUSH:return "FLUSH+DROP";
         case SD_SERIAL_LOG_NO_SD:return "NoSD+DROP";
         case SD_SERIAL_LOG_LOW:  return "LOW+DROP";
         case SD_SERIAL_LOG_FULL: return "FULL+DROP";
@@ -537,7 +761,7 @@ bool sd_serial_log_take_status_changed()
 
 bool sd_serial_log_pause_for_sd_operation(uint32_t timeout_ms)
 {
-    if (!s_initialized || !is_enabled() || s_task == nullptr) return true;
+    if (!s_initialized || !has_worker_work() || s_task == nullptr) return true;
 
     portENTER_CRITICAL(&s_state_mux);
     s_pause_requested = true;

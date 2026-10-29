@@ -34,13 +34,26 @@ int main()
     assert(sd_serial_log_take_status_changed());
     assert(!sd_serial_log_take_status_changed());
 
-    // Raw binary input is accepted at the API boundary without text handling.
+    // Raw binary input reaches the API as bytes rather than text. While the
+    // worker is still NoSD it is intentionally rejected without side effects.
     const uint8_t raw[] = {0x1b, 'P', 0x00, 0xff, '\\'};
     sd_serial_log_enqueue_rx(raw, sizeof(raw));
 
+    // Disabling is a nonblocking drain request. New RX is rejected immediately,
+    // but OFF is intentionally withheld until the worker has drained every
+    // accepted ring item and completed fflush/fsync/close/unmount.
     sd_serial_log_configure(false);
     assert(!sd_serial_log_is_enabled());
-    assert(sd_serial_log_status() == SD_SERIAL_LOG_OFF);
-    assert(std::strcmp(sd_serial_log_status_text(), "OFF") == 0);
+    assert(sd_serial_log_status() == SD_SERIAL_LOG_FLUSH);
+    assert(std::strcmp(sd_serial_log_status_text(), "FLUSH") == 0);
+    assert(sd_serial_log_take_status_changed());
+    assert(!sd_serial_log_take_status_changed());
+
+    // Re-enabling cancels only an unfinished drain request and starts a new
+    // nonblocking mount attempt. The worker owns the eventual ON transition.
+    sd_serial_log_configure(true);
+    assert(sd_serial_log_is_enabled());
+    assert(sd_serial_log_status() == SD_SERIAL_LOG_NO_SD);
+    assert(std::strcmp(sd_serial_log_status_text(), "NoSD") == 0);
     return 0;
 }
