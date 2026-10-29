@@ -521,7 +521,7 @@ sd_serial_log_task（RX Log (SD)=ON時）
   └── SDログ用PSRAMキュー → sd_dictionary共有SDセッション → /TAB5-LOG/TERMLOG.TXTへ追記
 
 bell_audio_task（Sound時のみ初回にES8388/I2S初期化）
-  └── 1件キューで短いBell音を再生。初期化成功後はSPK_ENをONのまま維持
+  └── 1件キューで短いBell音を再生。BellごとにSPK_ENをONにし、DACミュート後はOFFへ戻す
 ```
 
 ## 既知の制限・今後の予定

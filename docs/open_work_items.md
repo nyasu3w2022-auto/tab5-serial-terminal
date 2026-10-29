@@ -1,7 +1,7 @@
 # 現在の未実装案件
 
 **対象ブランチ:** `feature/sd-serial-log`
-**更新日:** 2026-10-25
+**更新日:** 2026-10-29
 
 ## 概要
 
@@ -25,7 +25,7 @@ USB CDC/VCP Host、Port A UART、MBUS UART2、VT100の基本表示、UTF-8/CJK�
 |:---:|---|---|
 | 完了 | タッチ・バックスクロール | PSRAM固定リングに最大512物理行を保持し、端末画面の上下ドラッグ量に応じて行単位で履歴表示します。受信・VT100解析は履歴中も継続し、タップまたはEscでライブ画面に戻ります。揮発性で、alternate screen・検索・コピー・SD保存・慣性スクロールは未実装です。 |
 | 完了（Basic） | Sixel グラフィック | PSRAM固定面の1280×700ライブ画像、7/8-bit DCS、256色、RGB/HLS、repeat、raster、DECSDMを実装しました。通常のLF改行による全画面上スクロールでは画像も上へ追従しますが、画像付き履歴・alternate screen・画像保存・kitty/iTerm2/ReGIS・XTSMGRAPHICSは未実装です。詳細は`docs/sixel_basic_design.md`を参照してください。 |
-| 完了 | BELL通知 | `0x07`を文字セルへ出さず、Off / Visual / Sound / Visual + Soundの設定に従い通知します。Visualは短時間の白フラッシュ、SoundはES8388短音です。連続BELは集約し、音声は250 ms以上離して再生します。詳細は`docs/bell_notification_design.md`を参照してください。 |
+| 完了 | BELL通知 | `0x07`を文字セルへ出さず、Off / Visual / Sound / Visual + Soundの設定に従い通知します。Visualは短時間の白フラッシュ、SoundはES8388短音です。連続BELは集約し、音声は250 ms以上離して再生します。外部スピーカーアンプはBell再生時だけ有効化し、DACミュート後に無効化するため、待機時の電源由来雑音を抑えます。詳細は`docs/bell_notification_design.md`を参照してください。 |
 | 完了 | SDカード受信ログ | `RX Log (SD)`で、USB／Port A／MBUSから受信した生バイト列を`/TAB5-LOG/TERMLOG.TXT`へ非同期追記します。PSRAM 256 KiBキュー、64 KiBまたは2秒ごとの同期、2 MiBの空き容量保護、カード障害分類・回復、Dictionary EditorとのSD排他を実装しています。詳細は`docs/sd_serial_log_design.md`を参照してください。 |
 | P2 | LVGL標準ドロップダウン障害の根本調査 | 現在は固定候補パネルで安定化しています。標準`lv_dropdown`を戻す必要はありませんが、Tab5の回転・直接描画構成で発生した白点滅の根本原因は未特定です。実機ログ、LVGLの無効化領域、表示完了コールバックを追加して切り分ける場合の調査案件です。 |
 | P2 | VT100文字集合切替 | UTF-8と日本語表示は実装済みですが、VT100の文字集合指定シーケンスを用いた文字集合切替は未実装です。英語中心の一般的なxterm互換用途では優先度は低いものの、厳密なVT100互換性を上げる余地があります。 |

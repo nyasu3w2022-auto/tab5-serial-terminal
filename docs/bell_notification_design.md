@@ -1,7 +1,7 @@
 # BELL（0x07）通知の設計
 
-**更新日:** 2026-10-07
-**対象ブランチ:** `feature/bell-notification`
+**更新日:** 2026-10-29
+**対象ブランチ:** `feature/sd-serial-log`
 
 ## 目的
 
@@ -54,17 +54,20 @@ Tab5内蔵ES8388をI2S標準モードで使用する。
 | 出力音量 | ES8388 70%、ピーク振幅12,000/32,767（短音・フェード付き） |
 | 連続音の最短間隔 | 250 ms |
 
-I2S TX、ES8388制御、PCM生成は、Soundモードで最初のBELを処理する音声ワーカー内で遅延初期化する。音声を使わない端末では、I2S・ES8388・スピーカーアンプを起動しない。最初に音を必要とした時だけ、スピーカーアンプの`SPK_EN`をTab5の共有SYS I2Cに接続された低位I/Oエキスパンダ経由で有効化し、100 ms以上安定させてからES8388を初期化する。初期化成功後は、公式Tab5実装と同じくアンプを有効のまま維持し、各Bellの終了時にはES8388だけをミュートする。
+I2S TX、ES8388制御、PCM生成は、Soundモードで最初のBELを処理する音声ワーカー内で遅延初期化する。音声を使わない端末では、I2S・ES8388・スピーカーアンプを起動しない。外部アンプの`SPK_EN`はTab5の共有SYS I2Cに接続された低位I/Oエキスパンダ経由で制御する。初回初期化時と後続Bellのいずれも、ES8388をミュートしたまま`SPK_EN`を有効化し、100 ms以上安定させてから出力を開始する。
+
+再生後は、DMAへ渡したPCMの消化余裕（約212 ms）を待ち、**ES8388を先にミュート**してから5 ms待機し、`SPK_EN`を無効化する。I2S TXとES8388は再生間も初期化済み・ミュート状態で維持し、外部アンプだけをBellごとにON/OFFする。これにより、電源品質が悪い環境でも、待機中にアンプ経路から雑音が出続けることを避ける。ミュート前にアンプをOFFしたり、BellごとにI2Sをdeinitしたりしない。前者はポップ、後者は初音欠落や状態遷移失敗のリスクを増やすためである。
 
 I2S TXは、標準モードの初期化後に一度有効化してから`esp_codec_dev_open()`へ渡す。`esp_codec_dev`のI2Sアダプタは実行時のフォーマット再設定前にチャネルを停止するため、未有効のまま渡すと`i2s_channel_disable(): the channel has not been enabled yet`となり、再設定・再生の開始を妨げる。これは公式Tab5 BSPの初期化順と同じである。
 
-I2Sポートと再生サンプルの構成は、公式M5Stack Tab5 UserDemoに合わせて**I2S1・ステレオ2チャネル**とする。1チャネルのPCMを`esp_codec_dev`へ渡すと、同アダプタがI2Sスロットを2チャネルへ正規化するため、PCMも最初からL/Rの完全なフレームとして生成する。GPIOマトリクスだけでI2S0へ出力する構成は採用しない。初回再生時には`m5tab5.speaker: SPK_EN -> ON`、`bell_audio: ES8388 Bell audio ready: I2S1 stereo`、再生ごとには`bell_audio: Bell playback started`をINFOログで出力し、アンプ電源、フォーマット、PCM送信開始を実機で切り分けられるようにする。
+I2Sポートと再生サンプルの構成は、公式M5Stack Tab5 UserDemoに合わせて**I2S1・ステレオ2チャネル**とする。1チャネルのPCMを`esp_codec_dev`へ渡すと、同アダプタがI2Sスロットを2チャネルへ正規化するため、PCMも最初からL/Rの完全なフレームとして生成する。GPIOマトリクスだけでI2S0へ出力する構成は採用しない。初回再生時には`m5tab5.speaker: SPK_EN -> ON`、`bell_audio: ES8388 Bell audio ready: I2S1 stereo`、再生ごとには`bell_audio: Bell playback started`、終了時には`m5tab5.speaker: SPK_EN -> OFF`がINFOログに出るため、アンプ電源、フォーマット、PCM送信開始・終了を実機で切り分けられる。
 
-初期化または再生に失敗した場合、音声は以後無効化してエラーログを残す。VT100解析、接続先へのキー送信、可視Bellは継続する。
+初期化、再生、または`SPK_EN`のI2C制御に失敗した場合、音声は以後無効化してエラーログを残す。アンプ有効化失敗時はOFFをベストエフォートで試みる。アンプ無効化失敗時もOFFを一度再試行し、以後のDACアンミュートを行わない。VT100解析、接続先へのキー送信、可視Bellは継続する。
 
 ## 依存関係と検証
 
 - `main/idf_component.yml`に`espressif/esp_codec_dev ^1.5.0`を追加する。
 - `main/CMakeLists.txt`では`esp_driver_i2s`、`esp_driver_i2c`、`espressif__esp_codec_dev`を要求する。
 - 実機ビルド対象はESP-IDF **v5.5.4**。
-- サンドボックスにはESP-IDFがないため、ホスト側ではBELパーサ、設定UI選択、音声モジュールのAPI構文をスタブで検証する。最終的なI2S/ES8388音量・クリック・他機能との競合はTab5実機で確認する。
+- サンドボックスにはESP-IDFがないため、ホスト側ではBELパーサ、設定UI選択、音声モジュールのAPI構文と、`SPK_EN ON → DAC unmute → PCM → DAC mute → SPK_EN OFF`の呼出し順をスタブで検証する。
+- Tab5実機では、Sound未使用時、Visualのみ、Soundの各待機状態で雑音がないこと、初回・連続Bellで音の頭切れやポップがないこと、再生後に`SPK_EN -> OFF`となることを確認する。ポップが残る場合のみ、DACミュート後の待機を10〜20 msへ調整する。
