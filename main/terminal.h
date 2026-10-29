@@ -30,9 +30,16 @@
 #define LVGL_H          720    // LVGL logical height (after 90-degree rotation)
 #define STATUS_BAR_H    20
 
-// Maximum terminal buffer dimensions (sized for the smallest font: 8px wide, 16px tall)
-// Small (16px): 160 cols x 43 rows
-// Large (28px):  91 cols x 25 rows
+// Fixed logical terminal geometries selected by the application settings.
+// Large's normal layout retains the original full-width 91x25 grid. The
+// optional 80-column Large layout uses the same font inside a centered area.
+#define TERM_SMALL_COLS     160
+#define TERM_SMALL_ROWS      43
+#define TERM_LARGE_COLS      91
+#define TERM_LARGE_80_COLS   80
+#define TERM_LARGE_ROWS      25
+
+// Maximum terminal buffer dimensions (sized for the smallest font: 8px wide, 16px tall).
 #define TERM_COLS_MAX   160
 #define TERM_ROWS_MAX   43
 
@@ -41,18 +48,24 @@
 // scrollback.
 #define TERM_SCROLLBACK_MAX_LINES 512
 
-// Runtime font geometry — set by term_set_font_size(), read by display and VT100 parser.
-// These are the *active* dimensions used for all terminal operations.
+// Runtime font and viewport geometry — set by term_set_font_size*(), read by
+// display and the VT100 parser. These are the active dimensions used for all
+// terminal operations. A centered viewport is used only by the optional
+// 80-column Large layout; the normal layouts use the full LCD width.
 extern int g_term_font_w;   // half-width cell width in pixels
 extern int g_term_font_h;   // cell height in pixels
-extern int g_term_cols;     // active number of columns  (LVGL_W / g_term_font_w)
+extern int g_term_cols;     // active number of columns
 extern int g_term_rows;     // active number of rows     ((LVGL_H - STATUS_BAR_H) / g_term_font_h)
+extern int g_term_viewport_x;      // active terminal viewport left edge in pixels
+extern int g_term_viewport_width;  // active terminal viewport width in pixels
 
 // Convenience macros that resolve to the runtime variables
 #define TERM_FONT_W  g_term_font_w
 #define TERM_FONT_H  g_term_font_h
 #define TERM_COLS    g_term_cols
 #define TERM_ROWS    g_term_rows
+#define TERM_VIEWPORT_X      g_term_viewport_x
+#define TERM_VIEWPORT_WIDTH  g_term_viewport_width
 
 // ==============================================================
 // Terminal Cell and Color Definitions
@@ -158,13 +171,27 @@ const TermCell *term_scrollback_display_row(int display_row);
 /**
  * @brief Switch the active font size at runtime.
  *
- * Updates g_term_font_w, g_term_font_h, g_term_cols, g_term_rows.
+ * Updates g_term_font_w, g_term_font_h, g_term_cols, g_term_rows and uses
+ * the full LCD width for the terminal viewport.
  * Caller must call term_clear_all() and rebuild the display after this.
  *
  * @param font_w  Half-width cell width in pixels  (e.g. 8 or 14)
  * @param font_h  Cell height in pixels            (e.g. 16 or 28)
  */
 void term_set_font_size(int font_w, int font_h);
+
+/**
+ * @brief Switch font size and logical column count at runtime.
+ *
+ * A requested column count narrower than the font's natural full-width grid
+ * is centered and given matching side margins. The standard full-width mode
+ * remains available through term_set_font_size().
+ *
+ * @param font_w       Half-width cell width in pixels (e.g. 8 or 14)
+ * @param font_h       Cell height in pixels (e.g. 16 or 28)
+ * @param columns      Requested logical columns; invalid values use full width
+ */
+void term_set_font_size_with_columns(int font_w, int font_h, int columns);
 
 /**
  * @brief Render locally transmitted keyboard input without feeding the RX

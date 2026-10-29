@@ -20,7 +20,7 @@ g++ -std=c++17 -Wall -Wextra -Werror -I. \
 
 `terminal_scrollback_test.cpp`は、PSRAMを模したアロケータの下で、全画面スクロールの履歴化、部分スクロール領域・`CSI M`の非履歴化、履歴閲覧中の受信補正、`CSI 3 J`、固定512行リング、フォント切替時の履歴破棄を確認します。加えて、BELL（`0x07`）が文字セルを変更せず、主タスクが取得する保留イベントとして集約・飽和することを確認します。
 
-`sixel_basic_test.cpp`は、固定面のDEC SixelデコーダとVT100統合を確認します。7/8-bit DCS、RGB/HLS、透明・不透明背景、repeat、異常DCSの破棄、Sixel capabilityを含むDA応答、`CSI 2 J`／`CSI 3 J`、通常のLF改行による全画面上スクロールに伴う画像追従、自動折返し・明示的スクロール時の画像消去、PSRAM画像面の行リング、RXオーバーフロー後・DCS終端欠落後の復帰を対象にします。
+`sixel_basic_test.cpp`は、固定面のDEC SixelデコーダとVT100統合を確認します。7/8-bit DCS、RGB/HLS、透明・不透明背景、repeat、異常DCSの破棄、Sixel capabilityを含むDA応答、`CSI 2 J`／`CSI 3 J`、通常のLF改行による全画面上スクロールに伴う画像追従、自動折返し・明示的スクロール時の画像消去、PSRAM画像面の行リング、RXオーバーフロー後・DCS終端欠落後の復帰を対象にします。通常のLarge（91×25）が全幅を維持すること、追加のLarge（80×25）が中央1120pxだけへSixelを配置して左右余白を保つことも検証します。
 
 SD受信ログの実装は、ESP-IDF v5.5.4の`xRingbufferCreateWithCaps`、FreeRTOSタスク、FatFs VFS、SDMMCを使うため、ホストでは構文検査のみを行います。ロガーの状態遷移、実カード容量、`fflush`/`fsync`、カード抜去、書込み禁止、Dictionary Editorとの排他、USB／Port A／MBUSの連続受信は実機確認対象です。詳細な確認表は[`docs/sd_serial_log_design.md`](../docs/sd_serial_log_design.md)にあります。
 

@@ -36,11 +36,13 @@ typedef enum {
 /**
  * Font size selection.
  *   Small: 16px font → 160 cols × 43 rows (more information, smaller text)
- *   Large: 28px font →  91 cols × 25 rows (easier to read)
+ *   Large: 28px font →  91 cols × 25 rows (full display width)
+ *   Large 80: 28px font → 80 cols × 25 rows (centered with side margins)
  */
 typedef enum {
-    FONT_SIZE_SMALL = 0,  /**< 16px IPA Gothic: 160×43 */
-    FONT_SIZE_LARGE = 1,  /**< 28px IPA Gothic:  91×25 */
+    FONT_SIZE_SMALL    = 0,  /**< 16px IPA Gothic: 160×43 */
+    FONT_SIZE_LARGE    = 1,  /**< 28px IPA Gothic:  91×25 */
+    FONT_SIZE_LARGE_80 = 2,  /**< 28px IPA Gothic:  80×25 with side margins */
 } app_font_size_t;
 
 /**
@@ -95,7 +97,7 @@ typedef struct {
     uint32_t        baud_rate;   /**< Serial baud rate (default: 115200)    */
     serial_if_t     serial_if;   /**< Interface: USB, PortA, or M-Bus UART  */
     app_log_level_t log_level;   /**< ESP-IDF log level                     */
-    app_font_size_t font_size;   /**< Terminal font size (Small or Large)   */
+    app_font_size_t font_size;   /**< Terminal layout (Small, Large, or Large 80) */
     local_echo_t    local_echo;  /**< Local TAB5 keyboard echo setting       */
     app_input_mode_t input_mode; /**< Default local keyboard input mode       */
     app_punctuation_style_t punctuation_style; /**< Japanese input punctuation style */

@@ -49,6 +49,15 @@ void ui_destroy(void);
 void ui_rebuild_for_font_size(int font_w, int font_h);
 
 /**
+ * @brief Rebuild the terminal UI for a font and requested logical width.
+ *
+ * A narrower-than-natural column count is centered by the terminal layer.
+ * It is used for the optional Large (80x25) layout; the two-argument API
+ * remains the full-width compatibility wrapper.
+ */
+void ui_rebuild_for_font_size_and_columns(int font_w, int font_h, int columns);
+
+/**
  * @brief Redraw all dirty rows and update cursor display.
  * Must be called from the main task (not from LVGL task).
  */

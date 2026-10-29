@@ -7,7 +7,7 @@ M5Stack TAB5 (ESP32-P4) 向けの VT100 互換スタンドアロンシリアル�
 - **USB ホスト CDC-ACM 対応** — VCP チップ（CH34x / CP210x / FTDI）および標準 CDC-ACM デバイス（Raspberry Pi USB ガジェット等）に対応
 - **VT100 ターミナルエミュレーション** — カーソル移動・スクロール領域・画面消去・SGR カラー（8色 + 輝度、256色、Truecolor 近似）
 - **UTF-8 日本語表示** — IPAゴシックフォントを内蔵し、UTF-8 マルチバイト文字（ひらがな、カタカナ、漢字等）の表示に対応
-- **フォントサイズ切り替え** — 設定画面から「Small (16px, 160×43)」と「Large (28px, 91×25)」を切り替え可能
+- **表示レイアウト切り替え** — 設定画面から「Small (16px, 160×43)」「Large (28px, 91×25)」「Large (28px, 80×25)」を選択可能。80列Largeは左右の余白で端末領域を示す
 - **pending wrap（遅延折り返し）** — VT100 仕様に準拠した行末処理。余分なスクロールを防止
 - **DSR / DA 応答** — `ESC[6n`（カーソル位置報告要求）および `ESC[c`（デバイス属性要求）に応答。bash/readline がブロックしない
 - **共有 RX 256 KB PSRAMリングバッファ** — USB・Port A・MBUS UARTの大量出力やSixelの連続受信を吸収。PSRAM確保失敗時のみ16KB内部RAMへ安全にフォールバック
@@ -32,13 +32,14 @@ M5Stack TAB5 (ESP32-P4) 向けの VT100 互換スタンドアロンシリアル�
 
 ## ターミナル仕様
 
-| 項目 | Small フォント | Large フォント（デフォルト） |
-|:---|:---|:---|
-| 表示列数 | 160 列 | 91 列 |
-| 表示行数 | 43 行 | 25 行 |
-| フォントサイズ | 16 px | 28 px |
-| フォント種別 | IPAゴシック (lv_font_cjk_16) | IPAゴシック (lv_font_cjk_28) |
-| カラー | 16色（ANSI 8色 + 輝度ビット）、256色近似、Truecolor 近似 | 16色（ANSI 8色 + 輝度ビット）、256色近似、Truecolor 近似 |
+| 項目 | Small フォント | Large フォント（デフォルト） | Large 80列 |
+|:---|:---|:---|:---|
+| 表示列数 | 160 列 | 91 列 | 80 列 |
+| 表示行数 | 43 行 | 25 行 | 25 行 |
+| フォントサイズ | 16 px | 28 px | 28 px |
+| フォント種別 | IPAゴシック (lv_font_cjk_16) | IPAゴシック (lv_font_cjk_28) | IPAゴシック (lv_font_cjk_28) |
+| 表示領域 | 1280×688 px（下部12pxはSixel用の余り領域） | 1280×700 px | 中央1120×700 px（左右各80pxは控えめな青灰色の余白） |
+| カラー | 16色（ANSI 8色 + 輝度ビット）、256色近似、Truecolor 近似 | 16色（ANSI 8色 + 輝度ビット）、256色近似、Truecolor 近似 | 16色（ANSI 8色 + 輝度ビット）、256色近似、Truecolor 近似 |
 
 ## キーバインド
 
@@ -79,11 +80,14 @@ M5Stack TAB5 (ESP32-P4) 向けの VT100 互換スタンドアロンシリアル�
 
 TAB5は、接続先から送られる**DEC Sixel**形式の画像をライブ端末画面へ表示できます。これはPNG/JPEGファイルを直接受け取る機能ではありません。接続先側で[`img2sixel`](https://github.com/saitoha/libsixel)やSixel対応の`gnuplot`などが、Sixel制御シーケンスを端末へ送る必要があります。
 
-表示面はステータスバーを除く**1280×700 logical px**です。アプリ側の画像出力サイズもこの範囲に調整してください。TAB5は画像を自動拡大・縮小しません。対応する入力は7-bit DCS（`ESC P ... q ... ESC \\`）と8-bit DCS/ST、256色パレット、RGB/HLS色定義、repeat、raster attributes、`$`／`-`です。PSRAM確保に成功した起動では、Primary DA問い合わせ（`ESC[c`）へSixel capabilityを含む`ESC[?1;4c`で応答します。
+表示面はステータスバーを除く**1280×700 logical px**です。Smallおよび通常のLarge (91×25)は全幅を使います。Large (80×25)では、中央の端末領域に対応する**1120×700 px**へ画像をクリップし、左右の余白には表示しません。TAB5は画像を自動拡大・縮小しないため、使用中のレイアウトに合わせて画像出力サイズを調整してください。対応する入力は7-bit DCS（`ESC P ... q ... ESC \\`）と8-bit DCS/ST、256色パレット、RGB/HLS色定義、repeat、raster attributes、`$`／`-`です。PSRAM確保に成功した起動では、Primary DA問い合わせ（`ESC[c`）へSixel capabilityを含む`ESC[?1;4c`で応答します。
 
 ```sh
-# 接続先での例。実行時の端末出力をそのままTAB5へ送る。
+# 接続先での例。Smallまたは通常のLarge (91x25)向け。
 img2sixel -w 1280 -h 700 image.png
+
+# Large (80x25)向け。中央の端末領域に合わせる。
+img2sixel -w 1120 -h 700 image.png
 ```
 
 #### 大きな画像を送る際の速度制限
@@ -94,8 +98,11 @@ Sixelデータを`cat`などで一度に送ると、送信側の出力速度がT
 # 既存のSixelファイルを約10 KiB/sで送る。-q は進捗表示を端末へ混ぜないため必須。
 pv -q -L 10k image.sixel
 
-# img2sixelの出力を直接制限して送る場合。
+# img2sixelの出力を直接制限して送る場合（91列Large）。
 img2sixel -w 1280 -h 700 image.png | pv -q -L 10k
+
+# 80列Largeの場合。
+img2sixel -w 1120 -h 700 image.png | pv -q -L 10k
 ```
 
 最初は低めの値（例: `10k`）でオーバーフローログが出ないことを確認し、`20k`、`40k`のように段階的に上げてください。安定している最高速度の半分から75%程度を常用値にすると、シェルの通常出力などが重なっても余裕を確保できます。Debian/Raspberry Pi OSで`pv`が未導入なら、`sudo apt install pv`で導入できます。
@@ -126,7 +133,7 @@ img2sixel -w 1280 -h 700 image.png | pv -q -L 10k
 | Connection & Display | Baud Rate | 9600 / 19200 / 38400 / 57600 / 115200 / 230400 / 460800 / 921600 | 固定候補パネル |
 |  | Interface | USB Serial / PortA UART (GPIO53/54) / MBUS UART2 (GPIO6/7) | 固定候補パネル |
 |  | Log Level | NONE / ERROR / WARN / INFO / DEBUG / VERBOSE | 固定候補パネル |
-|  | Font Size | Small (160×43) / Large (91×25) | 直接トグル。実際に切り替えると端末、履歴、ライブSixel画像をクリア |
+|  | Font Size | Small (160×43) / Large (91×25) / Large (80×25) | 固定候補パネル。実際に切り替えると端末、履歴、ライブSixel画像をクリア |
 |  | Echo Back | OFF / ON | 直接トグル |
 |  | Bell | Off / Visual / Sound / Visual + Sound | 固定候補パネル |
 |  | RX Log (SD) | OFF / ON | 直接トグル |
@@ -477,6 +484,9 @@ Tab5はUSB接続時、および設定の適用時（フォントサイズ・接�
 ```bash
 # Large フォント (28px) の場合
 stty rows 25 cols 91
+
+# Large (80x25) の場合
+stty rows 25 cols 80
 
 # Small フォント (16px) の場合
 stty rows 43 cols 160

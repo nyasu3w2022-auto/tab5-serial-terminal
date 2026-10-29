@@ -761,6 +761,8 @@ extern "C" void app_main(void)
     // (baud rate and log level are applied after USB init below)
     if (s_settings.font_size == FONT_SIZE_SMALL) {
         term_set_font_size(8, 16);
+    } else if (s_settings.font_size == FONT_SIZE_LARGE_80) {
+        term_set_font_size_with_columns(14, 28, TERM_LARGE_80_COLS);
     } else {
         term_set_font_size(14, 28);
     }

@@ -17,12 +17,14 @@
 static const char *TAG = "terminal";
 
 // ==============================================================
-// Runtime font geometry (default: Large 28px)
+// Runtime font and viewport geometry (default: full-width Large 28px / 91x25)
 // ==============================================================
 int g_term_font_w = 14;   // half-width cell: 28px font -> adv_w=224 = 14px
 int g_term_font_h = 28;
-int g_term_cols   = LVGL_W / 14;   // 91
-int g_term_rows   = (LVGL_H - STATUS_BAR_H) / 28;  // 25
+int g_term_cols   = TERM_LARGE_COLS;
+int g_term_rows   = TERM_LARGE_ROWS;
+int g_term_viewport_x = 0;
+int g_term_viewport_width = LVGL_W;
 
 // ==============================================================
 // SGR Color Palette
@@ -116,7 +118,8 @@ static void term_clear_graphics_cell(int row, int column, int cell_count)
     if (row < 0 || row >= TERM_ROWS || column < 0 || column >= TERM_COLS ||
         cell_count <= 0) return;
     if (column + cell_count > TERM_COLS) cell_count = TERM_COLS - column;
-    sixel_graphics_clear_rect(column * TERM_FONT_W, row * TERM_FONT_H,
+    sixel_graphics_clear_rect(TERM_VIEWPORT_X + column * TERM_FONT_W,
+                              row * TERM_FONT_H,
                               cell_count * TERM_FONT_W, TERM_FONT_H);
 }
 
@@ -267,22 +270,51 @@ void term_mark_all_dirty(void)
 
 void term_set_font_size(int font_w, int font_h)
 {
-    const bool changed = g_term_font_w != font_w || g_term_font_h != font_h;
+    term_set_font_size_with_columns(font_w, font_h, 0);
+}
+
+void term_set_font_size_with_columns(int font_w, int font_h, int columns)
+{
+    if (font_w <= 0 || font_h <= 0) {
+        ESP_LOGE(TAG, "Invalid terminal font geometry %dx%d", font_w, font_h);
+        return;
+    }
+
+    const int full_width_cols = LVGL_W / font_w;
+    if (columns <= 0 || columns > full_width_cols) columns = full_width_cols;
+    if (columns > TERM_COLS_MAX) columns = TERM_COLS_MAX;
+
+    int rows = (LVGL_H - STATUS_BAR_H) / font_h;
+    if (rows > TERM_ROWS_MAX) rows = TERM_ROWS_MAX;
+    // Preserve the original full-width layouts exactly: 91 Large cells occupy
+    // 1274px but their remaining 6px were historically ordinary terminal
+    // background on the right, not symmetric side margins. Only an explicitly
+    // narrower layout (currently Large 80) is centered and margin-coloured.
+    const bool full_width_layout = columns == full_width_cols;
+    const int viewport_width = full_width_layout ? LVGL_W : columns * font_w;
+    const int viewport_x = full_width_layout ? 0 : (LVGL_W - viewport_width) / 2;
+    const bool changed = g_term_font_w != font_w ||
+                         g_term_font_h != font_h ||
+                         g_term_cols != columns ||
+                         g_term_rows != rows ||
+                         g_term_viewport_x != viewport_x ||
+                         g_term_viewport_width != viewport_width;
     g_term_font_w = font_w;
     g_term_font_h = font_h;
-    g_term_cols   = LVGL_W / font_w;
-    g_term_rows   = (LVGL_H - STATUS_BAR_H) / font_h;
-    // Clamp to maximum buffer dimensions
-    if (g_term_cols > TERM_COLS_MAX) g_term_cols = TERM_COLS_MAX;
-    if (g_term_rows > TERM_ROWS_MAX) g_term_rows = TERM_ROWS_MAX;
+    g_term_cols   = columns;
+    g_term_rows   = rows;
+    g_term_viewport_x = viewport_x;
+    g_term_viewport_width = viewport_width;
+    sixel_graphics_set_viewport(g_term_viewport_x, g_term_viewport_width);
     if (changed) {
         term_scrollback_clear();
         // A retained pixel image has the old cell geometry as its placement
         // contract, so font changes intentionally discard it with history.
         sixel_graphics_clear_all();
     }
-    ESP_LOGI("terminal", "Font size set to %dx%d, cols=%d rows=%d",
-             font_w, font_h, g_term_cols, g_term_rows);
+    ESP_LOGI(TAG, "Font size set to %dx%d, cols=%d rows=%d viewport=%d+%d",
+             font_w, font_h, g_term_cols, g_term_rows,
+             g_term_viewport_x, g_term_viewport_width);
 }
 
 static void term_clear_region(int row_start, int col_start, int row_end, int col_end)
@@ -599,7 +631,7 @@ static void vt_finish_sixel(void)
     if (!sixel_graphics_finish(&image)) return;
 
     int origin_row = dcs_sixel_start_row;
-    int origin_x = dcs_sixel_start_col * TERM_FONT_W;
+    int origin_x = TERM_VIEWPORT_X + dcs_sixel_start_col * TERM_FONT_W;
     int origin_y = origin_row * TERM_FONT_H;
 
     if (dec_sixel_scrolling && image.height > 0) {

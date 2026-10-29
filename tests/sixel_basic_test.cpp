@@ -51,6 +51,18 @@ static uint16_t pixel_at(int x, int y, uint16_t background = 0x39e7)
 int main()
 {
     reset_terminal();
+    assert(TERM_COLS == TERM_LARGE_COLS);
+    assert(TERM_VIEWPORT_X == 0);
+    const uint16_t red = rgb565(255, 0, 0);
+
+    // Large (80x25) is a separate centered layout. Sixel origin follows that
+    // terminal viewport and its side margin remains free of opaque pixels.
+    term_set_font_size_with_columns(14, 28, TERM_LARGE_80_COLS);
+    term_clear_all();
+    feed("\x1bP0;0;0q#1;2;100;0;0~\x1b\\");
+    assert(pixel_at(TERM_VIEWPORT_X, 0) == red);
+    assert(pixel_at(TERM_VIEWPORT_X - 1, 0) == 0x39e7);
+    reset_terminal();
 
     // Primary DA declares Sixel only after the fixed graphics surface has
     // allocated successfully, allowing a peer to feature-detect safely.
@@ -64,7 +76,6 @@ int main()
     // terminal cursor moves one physical terminal row after a 6-pixel image
     // in the default DECSDM scrolling mode.
     feed("\x1bP0;0;0q#1;2;100;0;0!3~\x1b\\");
-    const uint16_t red = rgb565(255, 0, 0);
     assert(sixel_graphics_has_displayed_pixels());
     for (int y = 0; y < 6; ++y) assert(pixel_at(0, y) == red);
     assert(pixel_at(0, 6) == 0x39e7);

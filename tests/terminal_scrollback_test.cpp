@@ -33,6 +33,27 @@ static void reset_terminal()
 int main()
 {
     reset_terminal();
+    assert(TERM_COLS == TERM_LARGE_COLS);
+    assert(TERM_ROWS == TERM_LARGE_ROWS);
+    assert(TERM_VIEWPORT_X == 0);
+    assert(TERM_VIEWPORT_WIDTH == LVGL_W);
+
+    // The optional 80-column layout retains the 28px font but centers its
+    // terminal grid. The 80th cell uses normal VT100 pending-wrap behavior.
+    term_set_font_size_with_columns(14, 28, TERM_LARGE_80_COLS);
+    assert(TERM_COLS == TERM_LARGE_80_COLS);
+    assert(TERM_ROWS == TERM_LARGE_ROWS);
+    assert(TERM_VIEWPORT_WIDTH == TERM_LARGE_80_COLS * TERM_FONT_W);
+    assert(TERM_VIEWPORT_X == (LVGL_W - TERM_VIEWPORT_WIDTH) / 2);
+    for (int i = 0; i < TERM_LARGE_80_COLS; ++i) feed_byte((uint8_t)'A');
+    assert(cursor_row == 0);
+    assert(cursor_col == TERM_LARGE_80_COLS - 1);
+    assert(term_buffer[0][TERM_LARGE_80_COLS - 1].codepoint == 'A');
+    feed_byte((uint8_t)'B');
+    assert(cursor_row == 1);
+    assert(cursor_col == 1);
+    assert(term_buffer[1][0].codepoint == 'B');
+    reset_terminal();
 
     // BEL is a parser event, never a printable terminal cell. Events are
     // consumed by the application loop and bounded under a noisy peer.
@@ -44,7 +65,7 @@ int main()
     assert(vt100_take_bell_events() == UINT8_MAX);
 
     // Twenty-five visible rows plus six extra physical lines leave A..F in
-    // history at the default 91x25 geometry.
+    // history at the default full-width 91x25 geometry.
     for (int i = 0; i < 30; ++i) emit_line((char)('A' + i));
     assert(term_scrollback_history_count() == 6);
     assert(term_scrollback_display_row(0) == term_buffer[0]);
@@ -114,6 +135,10 @@ int main()
     // Font changes intentionally discard history because physical rows from a
     // different terminal width cannot be faithfully reflowed.
     term_set_font_size(8, 16);
+    assert(TERM_COLS == TERM_SMALL_COLS);
+    assert(TERM_ROWS == TERM_SMALL_ROWS);
+    assert(TERM_VIEWPORT_X == 0);
+    assert(TERM_VIEWPORT_WIDTH == LVGL_W);
     assert(term_scrollback_history_count() == 0);
     assert(!term_scrollback_is_viewing());
 

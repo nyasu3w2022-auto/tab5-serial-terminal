@@ -60,6 +60,11 @@ static int s_scrollback_touch_accum_y = 0;
 static constexpr int TOUCH_TAP_SLOP_PX = 8;
 static constexpr int TOUCH_MAX_PENDING_LINES = TERM_SCROLLBACK_MAX_LINES;
 
+// The optional Large (80x25) layout reserves 80 logical pixels at both sides
+// of its 1120px text viewport. This subdued blue-gray identifies unused space
+// without competing with an ANSI black terminal background or the status bar.
+static constexpr uint16_t TERM_SIDE_MARGIN_RGB565 = 0x10A2;
+
 static constexpr uint32_t LCD_H_RES = 720;
 static constexpr uint32_t LCD_V_RES = 1280;
 static lv_display_t *s_lvgl_disp        = nullptr;
@@ -219,6 +224,20 @@ static void term_rebuild_row(int r)
     const TermCell *source_row = term_scrollback_display_row(r);
     if (source_row == NULL) return;
 
+    // Row canvases remain full LCD width so their touch handling and lifetime
+    // are identical in all layouts. Only a narrowed terminal viewport paints
+    // the physical area outside terminal cells as a side margin.
+    const int viewport_right = TERM_VIEWPORT_X + TERM_VIEWPORT_WIDTH;
+    for (int y = 0; y < TERM_FONT_H; ++y) {
+        uint16_t *row = buf + (size_t)y * LVGL_W;
+        for (int x = 0; x < TERM_VIEWPORT_X; ++x) {
+            row[x] = TERM_SIDE_MARGIN_RGB565;
+        }
+        for (int x = viewport_right; x < LVGL_W; ++x) {
+            row[x] = TERM_SIDE_MARGIN_RGB565;
+        }
+    }
+
     for (int c = 0; c < TERM_COLS; c++) {
         const TermCell *cell = &source_row[c];
 
@@ -238,11 +257,13 @@ static void term_rebuild_row(int r)
         uint32_t cp = cell->codepoint;
         bool is_wide = (cell->wide == 1);
         int cell_width = is_wide ? (TERM_FONT_W * 2) : TERM_FONT_W;
-        int cx_start = c * TERM_FONT_W;
+        int cx_start = TERM_VIEWPORT_X + c * TERM_FONT_W;
 
-        // Clamp to buffer width
-        if (cx_start + cell_width > LVGL_W) cell_width = LVGL_W - cx_start;
-        if (cx_start >= LVGL_W) continue;
+        // Clamp to the terminal viewport rather than the whole LCD. This
+        // prevents a right-edge wide character from entering an 80-column
+        // layout's side margin.
+        if (cx_start + cell_width > viewport_right) cell_width = viewport_right - cx_start;
+        if (cx_start >= viewport_right) continue;
 
         draw_glyph(buf, cx_start, cell_width, font, cp, fg16, bg16,
                    r * TERM_FONT_H,
@@ -537,7 +558,12 @@ void ui_destroy(void)
 
 void ui_rebuild_for_font_size(int font_w, int font_h)
 {
-    ESP_LOGI(TAG, "Rebuilding UI for font size %dx%d", font_w, font_h);
+    ui_rebuild_for_font_size_and_columns(font_w, font_h, 0);
+}
+
+void ui_rebuild_for_font_size_and_columns(int font_w, int font_h, int columns)
+{
+    ESP_LOGI(TAG, "Rebuilding UI for font size %dx%d, cols=%d", font_w, font_h, columns);
 
     // Select the appropriate font pointer
     if (font_h <= 16) {
@@ -551,7 +577,7 @@ void ui_rebuild_for_font_size(int font_w, int font_h)
     ime_ui_hide();
 
     // Update terminal geometry variables
-    term_set_font_size(font_w, font_h);
+    term_set_font_size_with_columns(font_w, font_h, columns);
 
     // Destroy existing LVGL objects
     ui_destroy();
