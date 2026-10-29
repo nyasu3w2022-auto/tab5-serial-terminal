@@ -35,6 +35,7 @@ static constexpr int BELL_SAMPLE_RATE = 48000;
 static constexpr int BELL_DURATION_MS = 200;
 static constexpr int BELL_FADE_MS = 5;
 static constexpr int BELL_AMP_SETTLE_MS = 100;
+static constexpr int BELL_MUTE_SETTLE_MS = 5;
 // esp_codec_dev maps 0..100 to approximately -50..0 dB.  A 30 percent
 // setting combined with the former low-amplitude waveform was roughly -50 dB
 // at the speaker and could not serve as an audible terminal Bell.
@@ -66,6 +67,7 @@ static i2s_chan_handle_t s_i2s_tx = nullptr;
 static esp_codec_dev_handle_t s_playback = nullptr;
 static bool s_audio_ready = false;
 static bool s_audio_failed = false;
+static bool s_speaker_enabled = false;
 static int16_t s_bell_pcm[BELL_PCM_SAMPLES] = {};
 static bool s_bell_pcm_ready = false;
 
@@ -94,7 +96,48 @@ static void bell_release_failed_audio(void)
     if (s_board != nullptr) {
         (void)s_board->speaker_enable(false);
     }
+    s_speaker_enabled = false;
     s_audio_failed = true;
+}
+
+/**
+ * The Tab5's external NS4150B amplifier can reveal power noise even when the
+ * ES8388 DAC is soft-muted. Keep SPK_EN low between Bells and give the
+ * amplifier time to settle before its first non-muted PCM frame.
+ */
+static bool bell_enable_speaker_output(void)
+{
+    if (s_speaker_enabled) return true;
+    if (s_board == nullptr) {
+        s_audio_failed = true;
+        return false;
+    }
+    if (s_board->speaker_enable(true) != ESP_OK) {
+        ESP_LOGE(TAG, "Could not enable Tab5 speaker amplifier for Bell playback");
+        // A failed I2C write can leave SPK_EN indeterminate. Try to force the
+        // safe state before permanently disabling audible Bell requests.
+        bell_release_failed_audio();
+        return false;
+    }
+    vTaskDelay(pdMS_TO_TICKS(BELL_AMP_SETTLE_MS));
+    s_speaker_enabled = true;
+    return true;
+}
+
+static void bell_disable_speaker_output(void)
+{
+    if (!s_speaker_enabled || s_board == nullptr) return;
+    const esp_err_t err = s_board->speaker_enable(false);
+    if (err != ESP_OK) {
+        ESP_LOGE(TAG, "Could not disable Tab5 speaker amplifier after Bell: %s",
+                 esp_err_to_name(err));
+        // Do not issue a later unmute after a failure to isolate the amplifier.
+        // One final best-effort OFF write covers a transient I2C fault.
+        (void)s_board->speaker_enable(false);
+        s_audio_failed = true;
+        return;
+    }
+    s_speaker_enabled = false;
 }
 
 static bool bell_audio_prepare(void)
@@ -102,15 +145,9 @@ static bool bell_audio_prepare(void)
     if (s_audio_failed || s_board == nullptr) return false;
     if (s_audio_ready) return true;
 
-    // The official Tab5 audio implementation enables SPK_EN before bringing
-    // the ES8388 online and keeps it enabled for playback. This makes the
-    // external NS4150B amplifier stable before its first PCM frame.
-    if (s_board->speaker_enable(true) != ESP_OK) {
-        ESP_LOGE(TAG, "Could not enable Tab5 speaker amplifier for audio initialization");
-        s_audio_failed = true;
-        return false;
-    }
-    vTaskDelay(pdMS_TO_TICKS(BELL_AMP_SETTLE_MS));
+    // The Tab5 BSP brings SPK_EN up before ES8388 setup. It remains enabled
+    // only for this initial playback and is switched off after the final mute.
+    if (!bell_enable_speaker_output()) return false;
 
     // I2S is isolated from the terminal transport. The I2S channel stays
     // disabled until esp_codec_dev_open() establishes the fixed playback
@@ -236,6 +273,11 @@ static bool bell_audio_prepare(void)
 static void bell_audio_play_once(void)
 {
     if (!bell_audio_prepare()) return;
+    // bell_audio_prepare() leaves SPK_EN active for the first Bell. On later
+    // Bells the DAC/I2S stay initialized and soft-muted, so re-enable only the
+    // external amplifier for the pending sound.
+    if (!bell_enable_speaker_output()) return;
+
     const int unmute_result = esp_codec_dev_set_out_mute(s_playback, false);
     const int write_result = (unmute_result == ESP_CODEC_DEV_OK)
                              ? esp_codec_dev_write(s_playback, s_bell_pcm, sizeof(s_bell_pcm))
@@ -248,11 +290,17 @@ static void bell_audio_play_once(void)
                  (int)sizeof(s_bell_pcm));
     }
 
-    // I2S writes may finish when DMA has accepted the final block. Keep the
-    // codec and amplifier available for following Bell requests; the startup
-    // sequence is deliberately not repeated for every short alert.
+    // I2S writes may finish when DMA has accepted the final block. Mute the
+    // codec first, then disconnect the external amplifier. This prevents the
+    // powered amp from exposing idle-DAC or supply noise between Bell events.
     vTaskDelay(pdMS_TO_TICKS(BELL_DURATION_MS + 12));
-    (void)esp_codec_dev_set_out_mute(s_playback, true);
+    const int mute_result = esp_codec_dev_set_out_mute(s_playback, true);
+    if (mute_result != ESP_CODEC_DEV_OK) {
+        ESP_LOGW(TAG, "ES8388 Bell mute failed: %d", mute_result);
+        s_audio_failed = true;
+    }
+    vTaskDelay(pdMS_TO_TICKS(BELL_MUTE_SETTLE_MS));
+    bell_disable_speaker_output();
 }
 
 static void bell_audio_task(void *arg)
