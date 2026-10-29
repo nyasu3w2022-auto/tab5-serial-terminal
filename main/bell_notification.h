@@ -12,9 +12,10 @@
 /**
  * @brief Start the one-slot Bell audio worker.
  *
- * This does not initialise I2S, ES8388, or the speaker amplifier.  Those
- * resources are opened in the worker only after the first audible Bell so an
- * otherwise silent terminal retains the board's normal low-power state.
+ * This does not initialise I2S, ES8388, or the speaker amplifier. Those
+ * resources are opened in the worker only after the first audible Bell. The
+ * external speaker amplifier is disabled again after every tone so an
+ * otherwise silent terminal retains the board's normal low-noise state.
  */
 bool bell_notification_init(m5::tab5::m5tab5_component &board);
 
