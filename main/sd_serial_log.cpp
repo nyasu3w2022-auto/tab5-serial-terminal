@@ -53,8 +53,10 @@ static volatile bool s_drop_seen = false;
 // API.  The stop worker waits for these slots before it decides the queue is
 // empty, so an enqueue that began just before Save & Close cannot be lost.
 static volatile uint32_t s_enqueues_in_flight = 0;
-// Includes an item checked out by the writer until that item is returned to
-// the ring. This is the drain-completion accounting source of truth.
+// Counts every byte reserved for a nonblocking send, including an item that is
+// already visible to the ring but is still inside xRingbufferSend(). The count
+// is therefore established before the worker can dequeue the item and remains
+// valid until that item is returned after writing.
 static volatile size_t s_queued_bytes = 0;
 // A successful OFF transition is illegal once a drain write/sync/close error
 // has been observed.  The user must see the actual media diagnosis instead.
@@ -127,11 +129,17 @@ static bool has_worker_work()
     return has_work;
 }
 
-static bool reserve_enqueue()
+static bool reserve_enqueue(size_t len)
 {
     portENTER_CRITICAL(&s_state_mux);
     const bool accepted = s_enabled && !s_stop_requested && s_status == SD_SERIAL_LOG_ON;
-    if (accepted) ++s_enqueues_in_flight;
+    if (accepted) {
+        ++s_enqueues_in_flight;
+        // xRingbufferSend() makes data visible before it returns. Account for
+        // the bytes first so release_queued_item() cannot win that race and
+        // leave a late, permanent positive count that pins Log:FLUSH.
+        s_queued_bytes += len;
+    }
     portEXIT_CRITICAL(&s_state_mux);
     return accepted;
 }
@@ -139,9 +147,11 @@ static bool reserve_enqueue()
 static void finish_enqueue(bool queued, size_t len)
 {
     portENTER_CRITICAL(&s_state_mux);
-    if (queued) {
-        s_queued_bytes += len;
-    } else {
+    if (!queued) {
+        // This reservation never became a ring item, so roll it back before
+        // releasing the in-flight barrier. A successful send is decremented
+        // only by the worker after its item has been returned.
+        s_queued_bytes = len <= s_queued_bytes ? s_queued_bytes - len : 0;
         // The receive path remains deliberately lossy before it ever blocks.
         s_drop_seen = true;
         s_status_changed = true;
@@ -707,7 +717,7 @@ void sd_serial_log_enqueue_rx(const uint8_t *data, size_t len)
     // Once a media error is known, deliberately stop accepting bytes instead
     // of filling PSRAM with data that cannot be committed. A pause keeps the
     // primary state ON, so short dictionary operations still retain bytes.
-    if (!reserve_enqueue()) return;
+    if (!reserve_enqueue(len)) return;
     const bool queued = xRingbufferSend(s_ring, data, len, 0) == pdTRUE;
     // Finishing the reservation after the send establishes an exact drain
     // boundary even when Save & Close races this nonblocking receive-path API.
